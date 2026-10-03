@@ -444,52 +444,72 @@ def t_g2_probe_rotation():
 def t_g3_guard_ruminate():
     """G3-a：数据尽后守护模式不退场——反刍注入经部署管线、周期照常发生、
     部署侧流入自动恢复正式喂食、记忆库空时 max-idle 收工（无死循环）。"""
+    import shutil
     import threading
     import time as _time
     from feed import SleepTrainer, guard_loop
 
-    # 场景 1：记忆库有料 → 反刍自续；外部流入 → 恢复正式喂食
-    d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                device="cpu")
-    for i in range(3):
-        d.memory.add(f"反刍旧事第{i}条：海豚用回声定位寻找沙丁鱼群，记忆库里的旧经验。{i}".encode(),
-                     3.0, 0, "residue")
-    trainer = SleepTrainer(d, steps=2, save_every=10000)
-    trainer.start()
-    result = {}
+    # 测试夹具自造探测集，不绑死生产 probes/probe.txt（与 t_g8_gate_failfast 同一套做法）：
+    # 本组要验的是反刍自续，不是探测集。若吃生产默认路径，探测卷一旦被挪走/改名/清空，
+    # G8 fail-fast 会让 trainer_cycle 拒绝开睡 → 反刍注入照常但周期恒为 0，
+    # 且场景 2 的 guard_loop 因idle_cycles永不递增而死挂——让一个无关的外部文件
+    # 成为本组通过的前提。生产律不动，这里只换夹具。
+    tmp = tempfile.mkdtemp(prefix="dolphin_g3a_")
+    try:
+        probe = os.path.join(tmp, "probe.txt")
+        # 自然语言逻辑片段（非随机字节：门控在随机数据上没意义），
+        # 补齐到 block_size 整数倍 → 19 块完整块，probe.evaluate 可正常算 NLL。
+        seg = ("逻辑推理探测片段：若甲高于乙，乙高于丙，则甲高于丙；"
+               "所有金属都导电，铁是金属，故铁导电；下雨地必湿，此地不湿，"
+               "故此地未必下雨；鸟会飞，企鹅是鸟，然企鹅不会飞，故前提有误；"
+               "此段仅供体检评分，永不进训练粮。").encode()
+        body = (seg * 16).ljust(4864, b" ")  # 4864 = 19 * block_size(256)
+        open(probe, "wb").write(body)
 
-    def run_guard():
-        result["out"] = guard_loop(d, trainer, max_idle=2)
+        # 场景 1：记忆库有料 → 反刍自续；外部流入 → 恢复正式喂食
+        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                    probe_path=probe, device="cpu")
+        for i in range(3):
+            d.memory.add(f"反刍旧事第{i}条：海豚用回声定位寻找沙丁鱼群，记忆库里的旧经验。{i}".encode(),
+                         3.0, 0, "residue")
+        trainer = SleepTrainer(d, steps=2, save_every=10000)
+        trainer.start()
+        result = {}
 
-    th = threading.Thread(target=run_guard, daemon=True)
-    th.start()
-    deadline = _time.time() + 30
-    while _time.time() < deadline and (d.learn_total < 1 or trainer.cycles < 1):
-        _time.sleep(0.01)  # 等反刍注入与周期发生的实证
-    check("G3-a 反刍材料经部署管线注入且周期照常发生",
-          d.learn_total >= 1 and trainer.cycles >= 1,
-          f"注入 {d.learn_total} 条  周期 {trainer.cycles} 次")
-    d.learn("部署侧新经验流入：守护模式应自动恢复正式喂食，绝不退场。", source="deploy")
-    th.join(timeout=15)
-    out = result.get("out", (False, 0))
-    check("G3-a 检测到流入自动恢复正式喂食（非死守反刍）",
-          not th.is_alive() and out[0] is True and out[1] >= 1,
-          f"resume={out[0]} 反刍 {out[1]} 条")
-    trainer.shutdown()
-    trainer.join(timeout=10)
+        def run_guard():
+            result["out"] = guard_loop(d, trainer, max_idle=2)
 
-    # 场景 2：记忆库也空 → 连续空选拔周期 → --max-idle 收工（防真死转）
-    d2 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                 device="cpu")
-    trainer2 = SleepTrainer(d2, steps=2, save_every=10000)
-    trainer2.start()
-    t0 = _time.time()
-    resumed2, fed2 = guard_loop(d2, trainer2, max_idle=2)  # 应自行收敛返回
-    trainer2.shutdown()
-    trainer2.join(timeout=10)
-    check("G3-a 记忆库空时 max-idle 收工（无死循环）",
-          resumed2 is False and fed2 == 0 and trainer2.idle_cycles >= 2,
-          f"resume={resumed2} idle={trainer2.idle_cycles}  耗时 {_time.time() - t0:.1f}s")
+        th = threading.Thread(target=run_guard, daemon=True)
+        th.start()
+        deadline = _time.time() + 30
+        while _time.time() < deadline and (d.learn_total < 1 or trainer.cycles < 1):
+            _time.sleep(0.01)  # 等反刍注入与周期发生的实证
+        check("G3-a 反刍材料经部署管线注入且周期照常发生",
+              d.learn_total >= 1 and trainer.cycles >= 1,
+              f"注入 {d.learn_total} 条  周期 {trainer.cycles} 次")
+        d.learn("部署侧新经验流入：守护模式应自动恢复正式喂食，绝不退场。", source="deploy")
+        th.join(timeout=15)
+        out = result.get("out", (False, 0))
+        check("G3-a 检测到流入自动恢复正式喂食（非死守反刍）",
+              not th.is_alive() and out[0] is True and out[1] >= 1,
+              f"resume={out[0]} 反刍 {out[1]} 条")
+        trainer.shutdown()
+        trainer.join(timeout=10)
+
+        # 场景 2：记忆库也空 → 连续空选拔周期 → --max-idle 收工（防真死转）
+        d2 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                     probe_path=probe, device="cpu")
+        trainer2 = SleepTrainer(d2, steps=2, save_every=10000)
+        trainer2.start()
+        t0 = _time.time()
+        resumed2, fed2 = guard_loop(d2, trainer2, max_idle=2)  # 应自行收敛返回
+        trainer2.shutdown()
+        trainer2.join(timeout=10)
+        check("G3-a 记忆库空时 max-idle 收工（无死循环）",
+              resumed2 is False and fed2 == 0 and trainer2.idle_cycles >= 2,
+              f"resume={resumed2} idle={trainer2.idle_cycles}  耗时 {_time.time() - t0:.1f}s")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def t_g3_feed_cursor():
