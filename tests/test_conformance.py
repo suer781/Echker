@@ -756,6 +756,29 @@ def t_g2_probe_rotation():
         check("G2-c 多字节字符零割裂",
               c5.decode("utf-8") == "甲" * 88 + "丁" * 32
               and open(os.path.join(ret2, r5["retired"]), "rb").read().decode("utf-8") == "甲" * 32)
+
+        # 2026-10-04 回归：中途新增字典序更小的候选文件，指针不得错位——
+        # 旧实现用 file_idx（排序下标），池文件集合一变就错位到新文件，
+        # 导致候选题静默丢失 + 已消费区间重复进卷。
+        probe3 = os.path.join(tmp, "probe3.txt")
+        pool3 = os.path.join(tmp, "pool3")
+        ret3 = os.path.join(tmp, "retired3")
+        os.makedirs(pool3)
+        open(probe3, "wb").write(b"S" * 300)
+        open(os.path.join(pool3, "m.txt"), "wb").write(b"M" * 100 + b"N" * 100)
+        open(os.path.join(pool3, "z.txt"), "wb").write(b"Z" * 100)
+        rotate(probe_path=probe3, pool_dir=pool3, retired_dir=ret3, section_bytes=100)
+        rotate(probe_path=probe3, pool_dir=pool3, retired_dir=ret3, section_bytes=100)
+        # 此时已消费 m.txt 两段（共 200B），指针应在 m.txt 的 offset=200（已消费完）
+        # 中途插入字典序更小的 0_new.txt —— 旧实现会把它误判为"已消费 200B"
+        open(os.path.join(pool3, "0_new.txt"), "wb").write(b"X" * 100 + b"Y" * 100)
+        r6 = rotate(probe_path=probe3, pool_dir=pool3, retired_dir=ret3, section_bytes=100)
+        # 应继续消费 z.txt 的第一段（100B），而不是跳过/错位到 0_new.txt 的中间
+        c6 = open(probe3, "rb").read()
+        check("G2-c 修复：中途新增文件指针不错位（不丢候选不重复）",
+              r6.get("source") == "z.txt"
+              and c6[-100:] == b"Z" * 100,
+              f"source={r6.get('source')} 卷尾={c6[-100:][:4]!r}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

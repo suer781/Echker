@@ -33,7 +33,14 @@ def memtest(iters=30, size=1536):
 
 
 def trajectory(steps=50):
-    """同一组初始权重，GPU 与 CPU 各自独立训练，loss 轨迹必须重合。"""
+    """同一组初始权重，GPU 与 CPU 各自独立训练，loss 轨迹必须重合。
+
+    2026-10-04 修复：旧实现 max(|a-b|/max(|b|,1e-6)) 是纯相对偏差——
+    训练后期 loss 趋 0 时，正常舍入差被除以极小分母放大成假错误
+    （v1 的病根在 trajectory 里残留，memtest 早已改用混合容差）。
+    现与 memtest 的 excess() 统一：容差 = atol + rtol*|ref|（混合容差），
+    返回"超出容差的最大量"，<=0 表示轨迹完全重合在容差内。
+    """
     torch.manual_seed(0)
     cfg = Config(d_model=256, n_layers=3, n_heads=4, block_size=256)
     x = torch.randint(0, 256, (8, 256))
@@ -54,7 +61,9 @@ def trajectory(steps=50):
 
     g = train("cuda")
     c = train("cpu")
-    worst = max(abs(a - b) / max(abs(b), 1e-6) for a, b in zip(g, c))
+    # 混合容差：绝对容差 2e-3 + 相对容差 1e-2×|ref|（与 memtest 同一口径）
+    worst = max((abs(a - b) - (2e-3 + 1e-2 * abs(b))).__float__()
+                for a, b in zip(g, c))
     return worst
 
 
@@ -94,9 +103,11 @@ if __name__ == "__main__":
     print(f"   CPU 侧超容差量 {wc:+.2e}  {'✓ 在容差内' if c_ok else '✗ CPU/内存侧在算错数（查内存超频）'}")
 
     traj = trajectory()
-    t_ok = traj < 0.05
+    # 混合容差口径：<=0 表示所有点都在 atol+rtol*|ref| 内（与 memtest 同标准）。
+    # 留 0.01 裕量防边界浮点抖动，但不接受量级放大（旧阈值 0.05 已不适用）。
+    t_ok = traj <= 0.01
     ok &= t_ok
-    print(f"② 训练轨迹一致性（50 步 GPU vs CPU）：最大偏差 {traj:.2e}  {'✓' if t_ok else '✗'}")
+    print(f"② 训练轨迹一致性（50 步 GPU vs CPU）：超出混合容差 {traj:+.2e}  {'✓' if t_ok else '✗'}")
 
     try:
         tf = throughput()

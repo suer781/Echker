@@ -61,13 +61,20 @@ def _load_pointer(pool_dir):
     if os.path.exists(p):
         try:
             ptr = json.load(open(p, encoding="utf-8"))
-            ptr.setdefault("file_idx", 0)
+            # 2026-10-04 修复：旧指针用 file_idx（排序列表下标），池文件集合一变就错位。
+            # 新指针改用 file（文件名）定位当前文件。兼容旧档：把 file_idx 转成 file。
+            if "file" not in ptr and "file_idx" in ptr:
+                files = _pool_files(pool_dir)
+                idx = int(ptr.get("file_idx", 0))
+                ptr["file"] = files[idx] if 0 <= idx < len(files) else None
+            ptr.setdefault("file", None)
             ptr.setdefault("offset", 0)
             ptr.setdefault("retired_seq", 0)
+            ptr.setdefault("exhausted", False)
             return ptr
         except (json.JSONDecodeError, OSError):
             pass  # 指针损坏从头消费：宁可重来不可跳卷
-    return {"file_idx": 0, "offset": 0, "retired_seq": 0}
+    return {"file": None, "offset": 0, "retired_seq": 0, "exhausted": False}
 
 
 def _save_pointer(pool_dir, ptr):
@@ -87,20 +94,50 @@ def _pool_files(pool_dir):
 
 
 def _next_section(pool_dir, ptr, section_bytes):
-    """从候选流取下一小节（可跨文件），推进指针。返回 (字节, 来源名) 或 (None, None)。"""
+    """从候选流取下一小节（可跨文件），推进指针。返回 (字节, 来源名) 或 (None, None)。
+
+    2026-10-04 修复：
+    1. 用文件名定位当前文件，而不是排序下标——运行中新增/改名/重排池文件，
+       也能从指针记录的文件名正确续读，不会错位到别的文件。
+    2. 已消费完的文件移入 .consumed/ 子目录，不再出现在候选池中——
+       否则指针重置（或新增文件）后已消费文件会"复活"被重复消费/计数。
+    """
     files = _pool_files(pool_dir)
-    while ptr["file_idx"] < len(files):
-        data = open(os.path.join(pool_dir, files[ptr["file_idx"]]), "rb").read()
-        pos = _align(data, min(ptr["offset"], len(data)))
+    consumed_dir = os.path.join(pool_dir, ".consumed")
+    # 从指针记录的文件开始（若已被移走/删除，则从头开始——剩余的都是未消费）
+    start = 0
+    if ptr.get("file") is not None and ptr["file"] in files:
+        start = files.index(ptr["file"])
+    i = start
+    while i < len(files):
+        fname = files[i]
+        data = open(os.path.join(pool_dir, fname), "rb").read()
+        # 仅当这就是指针记录的文件时，从 offset 续读；否则从头读
+        pos = ptr.get("offset", 0) if fname == ptr.get("file") else 0
+        pos = _align(data, min(pos, len(data)))
         if pos >= len(data):
-            ptr["file_idx"] += 1
+            # 当前文件已读完 → 移入 .consumed，避免之后复活被重复消费
+            if fname == ptr.get("file"):
+                ptr["file"] = None
             ptr["offset"] = 0
-            continue
+            os.makedirs(consumed_dir, exist_ok=True)
+            try:
+                os.replace(os.path.join(pool_dir, fname), os.path.join(consumed_dir, fname))
+            except FileNotFoundError:
+                pass  # 已被并发移除，忽略
+            files = _pool_files(pool_dir)  # 刷新（当前文件已移走）
+            continue  # 从当前位置继续（下一个文件现在占据 i）
         end = _align(data, min(pos + section_bytes, len(data)))
         if end <= pos:
             end = len(data)
+        ptr["file"] = fname
         ptr["offset"] = end
-        return data[pos:end], files[ptr["file_idx"]]
+        ptr["exhausted"] = False  # 消费到新内容 → 不再是耗尽态
+        return data[pos:end], fname
+    # 全部文件已耗尽
+    ptr["file"] = None
+    ptr["offset"] = 0
+    ptr["exhausted"] = True
     return None, None
 
 
@@ -157,23 +194,37 @@ def status(probe_path=None, pool_dir=None, retired_dir=None, section_bytes=8192)
     probe_bytes = os.path.getsize(probe_path) if os.path.exists(probe_path) else 0
     sections = len(_split(open(probe_path, "rb").read(), section_bytes)) if probe_bytes else 0
 
-    ptr = _load_pointer(pool_dir) if os.path.isdir(pool_dir) else {"file_idx": 0, "offset": 0}
+    ptr = _load_pointer(pool_dir) if os.path.isdir(pool_dir) else {"file": None, "offset": 0, "exhausted": False}
     files = _pool_files(pool_dir)
-    cur = ptr.get("file_idx", 0)
     pool_left = 0
-    for i, f in enumerate(files):
-        n = os.path.getsize(os.path.join(pool_dir, f))
-        if i < cur:      # 已消费完毕的文件
-            continue
-        pool_left += (n - ptr.get("offset", 0)) if i == cur else n
-
+    if ptr.get("exhausted"):
+        # 全部候选已消费完：剩余 0（候选池持续流入后由 _next_section 清除标志）
+        pool_left = 0
+    else:
+        cur = ptr.get("file", None)
+        seen_cur = False
+        for f in files:
+            n = os.path.getsize(os.path.join(pool_dir, f))
+            if cur is None:
+                # 无指针 → 全部候选都未消费
+                pool_left += n
+            elif f == cur:
+                seen_cur = True
+                pool_left += max(0, n - ptr.get("offset", 0))
+            elif not seen_cur:
+                # 还没到指针文件 → 之前的文件都已消费完，不再计入
+                continue
+            else:
+                # 已过指针文件 → 后续文件全部未消费
+                pool_left += n
     retired_files = sorted(f for f in os.listdir(retired_dir)) if os.path.isdir(retired_dir) else []
     retired_bytes = sum(os.path.getsize(os.path.join(retired_dir, f)) for f in retired_files)
     return {"probe_bytes": probe_bytes, "probe_sections": sections,
             "pool_files": len(files), "pool_bytes_left": max(0, pool_left),
             "retired_files": len(retired_files), "retired_bytes": retired_bytes,
-            "pointer": {"file_idx": ptr.get("file_idx", 0), "offset": ptr.get("offset", 0),
-                        "retired_seq": ptr.get("retired_seq", 0)}}
+            "pointer": {"file": ptr.get("file", None), "offset": ptr.get("offset", 0),
+                        "retired_seq": ptr.get("retired_seq", 0),
+                        "exhausted": ptr.get("exhausted", False)}}
 
 
 if __name__ == "__main__":
