@@ -6,7 +6,9 @@
 
 用法：python tests/test_conformance.py   （纯 CPU，约 1 分钟）
 """
+import atexit
 import contextlib
+import hashlib
 import os
 import secrets
 import shutil
@@ -19,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dolphin.dolphin import Dolphin
 from dolphin.experience import ExperienceBuffer
+from dolphin.memory import MemoryStore
 from dolphin.model import ByteTransformer, Config
 from dolphin.sleep import varied_replay
 
@@ -92,6 +95,137 @@ def _probe_fixture(prefix, n_chunks=12):
         yield _write_synthetic_probe(os.path.join(tmp, "probe.txt"), n_chunks)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ============ 冷层隔离总闸（2026-10-04，生产事故后施工） ============
+# 事故档案：上一次修复 resurrect() 后跑全量测试，t_g3_guard_ruminate 的
+# guard_loop 死循环 15 分钟，期间不断从**真实生产冷层**做梦注入、再逐回落盘，
+# 把 dolphin/memory_cold.jsonl 从 15498 行撑到 16316 行（+818 行垃圾）。
+# 该文件不在 git 版本控制内（.gitignore 第 7 行）→ 损坏不可逆、无法 checkout 恢复。
+#
+# 为什么用「全局改写 MemoryStore 默认值」而不是「每个测试包 try/finally」：
+#   逐测试 try/finally 依赖每个测试作者都记得包一层——而本文件历史上正是
+#   「19 处构造忘了包」才出的事故。忘了包不会有任何报错，只会静默污染生产数据，
+#   且由于文件不受 git 保护，事后再想补救已经晚了。改写成全局默认后，
+#   「忘记隔离」从「静默污染」变成「不可能发生」——这是安全等级的量级差别。
+#   代价：本文件再新增测试时，冷层自动落在临时目录，无需（也不应）再手动包
+#   try/finally；临时目录的生命周期由模块级 atexit 统一收口。
+#
+# 三道防线（互相独立，任何一道单独失效都不会导致生产数据被改）：
+#   ① 默认值改写：MemoryStore(cold_path=None) 解析出的若是生产路径，一律换成
+#      隔离沙箱内的路径。覆盖本文件全部构造点，且对**将来**新增的构造点自动生效。
+#   ② 显式路径也拦：即使有人显式传入 cold_path=生产路径，仍被改写——
+#      意图不明的显式传参不能绕过隔离（这是 ① 单独做不到的）。
+#   ③ 指纹哨兵：模块导入时记录生产冷层的 sha256/行数/mtime/尺寸，测试全部跑完
+#      后比对。任一项变化 → 显式报错（红线断言），不静默通过。
+#      ①② 是「让它碰不到」，③ 是「万一碰到了必须喊出来」——互不替代。
+#
+# 生产代码零改动：dolphin/memory.py 的 cold_path 默认语义、dolphin/dolphin.py 的
+# MemoryStore() 调用全部原样保留，改写只发生在本测试模块的进程内命名空间里。
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROD_COLD = os.path.realpath(os.path.join(_ROOT, "dolphin", "memory_cold.jsonl"))
+_PROD_PROBE = os.path.realpath(os.path.join(_ROOT, "probes", "probe.txt"))
+
+# 隔离沙箱：整个测试进程共用一个根目录，每个 MemoryStore 实例在其下独占一个文件。
+# 模块导入时创建一次，atexit 统一 rmtree（ignore_errors：Windows 上文件句柄
+# 可能延迟释放，残留一个临时目录无害，生产数据绝不能残留）。
+_SANDBOX = tempfile.mkdtemp(prefix="dolphin_cold_sandbox_")
+atexit.register(shutil.rmtree, _SANDBOX, True)
+
+_sandbox_seq = 0
+
+
+def _sandbox_cold_path():
+    """为隔离沙箱内的每个冷层实例分配独占路径（不复用，避免实例间互相看见）。"""
+    global _sandbox_seq
+    _sandbox_seq += 1
+    return os.path.join(_SANDBOX, f"cold_{_sandbox_seq:04d}.jsonl")
+
+
+# ---- 防线①②：改写 MemoryStore 默认冷层解析 ----
+_orig_ms_init = MemoryStore.__init__
+
+
+def _quarantined_ms_init(self, cap_entries=500, promote_hits=3, cold_path=None):
+    """MemoryStore.__init__ 的隔离版：解析结果若指向生产冷层，换成沙箱路径。
+
+    只在「解析结果 == 生产冷层」时改写：显式传入的临时路径（t_g1_cold_layer、
+    t_g10_* 等自带 mkdtemp 的用例）原样保留，那些用例断言的就是自己的沙箱文件。
+    """
+    resolved = os.path.realpath(cold_path) if cold_path else _PROD_COLD
+    if resolved == _PROD_COLD:
+        cold_path = _sandbox_cold_path()
+    _orig_ms_init(self, cap_entries, promote_hits, cold_path)
+
+
+MemoryStore.__init__ = _quarantined_ms_init
+
+
+# ---- 防线③：指纹哨兵 ----
+
+
+def _fingerprint(path):
+    """生产资产的 (行数, sha256, mtime_ns, 字节数)。
+
+    行数与 sha256 抓内容变化；mtime_ns 与字节数抓「内容碰巧相同但被重写过」
+    （flush_cold 是全量重写：内容一致时行数与 sha256 都不变，只有 mtime 变——
+    只比内容会漏掉这种写入）。mtime_ns 用 ns 精度，避免秒级精度撞时间戳的漏检。
+    """
+    if not os.path.exists(path):
+        return None
+    st = os.stat(path)
+    h = hashlib.sha256()
+    lines = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+            lines += chunk.count(b"\n")
+    return (lines, h.hexdigest(), st.st_mtime_ns, st.st_size)
+
+
+_BEFORE_COLD = _fingerprint(_PROD_COLD)
+_BEFORE_PROBE = _fingerprint(_PROD_PROBE)
+
+
+def verify_cold_quarantine():
+    """防线③：比对测试前后生产资产的指纹。返回 (是否完好, 明细)。
+
+    在全部测试跑完之后调用。任何一个生产资产被改动都判红——宁可误报，
+    不可漏报：这条断言的价值恰恰在于它平时必定为真，一旦为红就说明
+    隔离被绕过或生产代码存在未预期的冷层写入。
+    """
+    after_cold = _fingerprint(_PROD_COLD)
+    after_probe = _fingerprint(_PROD_PROBE)
+    ok = (after_cold == _BEFORE_COLD) and (after_probe == _BEFORE_PROBE)
+    detail = []
+    for name, before, after in (("memory_cold.jsonl", _BEFORE_COLD, after_cold),
+                                ("probe.txt", _BEFORE_PROBE, after_probe)):
+        if before != after:
+            detail.append(f"{name} 已被改动！测试前={before} 测试后={after}")
+        else:
+            detail.append(f"{name} 零改动（{after[0]} 行 sha256={after[1][:12]}…）")
+    return ok, "  ".join(detail)
+
+
+# ---- 显式工厂：让「本测试的 Dolphin 一律用临时冷层」在代码里看得见 ----
+
+
+def make_dolphin(cfg=None, device="cpu", probe_path=None):
+    """构造 Dolphin，并把 d.memory 换到隔离沙箱的独立冷层。
+
+    有了防线①②，本工厂在**正确性**上已是冗余的（默认路径已被改写到沙箱）；
+    保留它是为了让「本文件不碰生产冷层」这件事在源码里自证，而非依赖读者
+    记得模块顶部那段 monkeypatch。两者同时存在时：改写管兜底，工厂管可读性。
+
+    必须在构造后**立刻**替换、且替换前不做任何 add/retrieve——MemoryStore
+    构造本身只填字段不落盘（Dolphin.__init__ 也不会读写冷层），所以此处替换
+    是安全的；但若将来 Dolphin.__init__ 改成预加载冷层，这个顺序就会失效，
+    故在此注明。
+    """
+    d = Dolphin(cfg=cfg, device=device, probe_path=probe_path)
+    d.memory = MemoryStore(cold_path=_sandbox_cold_path())
+    return d
 
 
 def t_l1_bytes():
@@ -172,8 +306,8 @@ def t_l5_l8_training_paths():
         check(f"L5 训练用真实字节流（{rel}）", "varied_replay" in src)
 
     with _probe_fixture("dolphin_l5l8_") as probe:
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
         for i in range(12):
             d.learn(f"回滚验证记录第{i}条，内容足够长。{i}", source="test")
         before = [p.clone() for p in d.awake().model.parameters()]
@@ -192,8 +326,8 @@ def t_l5_l8_training_paths():
 def t_l8_gate():
     """L8：睡脑劣化时体检门控必须拒绝换班（防越学越傻的保险丝，此前零守护）。"""
     with _probe_fixture("dolphin_l8_") as probe:
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
         # 修复既有 flake（2026-10-03 G3 施工发现，断言未动、只加长喂食文本）：
         # 旧文本每条仅 47B，选拔 5 条拼流 ≈234B < block_size+2=258B → 命中"样本过短"
         # 早退路径（report 无 passed/swapped 键），断言靠变异重放的供体拼接随机凑长
@@ -215,8 +349,8 @@ def t_l8_gate():
 def t_l10_dual_channel():
     """L10：换班后快通道笔记入记忆库且可检索（此前零守护）。"""
     with _probe_fixture("dolphin_l10_") as probe:
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
         for i in range(12):
             # 修复既有 flake（2026-10-04 审计发现，与 G3 修L8/persistence 同缺陷族、
             # 唯独L10 被漏掉；断言未动、只加长喂食文本）：旧文本每条仅 50B，
@@ -239,8 +373,8 @@ def t_l10_dual_channel():
 def t_persistence_v2():
     """v2 持久化：缓冲、优化器动量、值自成常量全部随档幸存。"""
     with _probe_fixture("dolphin_pers_") as probe:
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
         # 修复既有 flake（2026-10-03 G3 施工发现，断言未动、只加长喂食文本）：
         # 旧文本每条仅 47B，10 条预算 45% 只选出 4 条 ≈191B < block_size+2=258B →
         # "样本过短"早退 → 零训练 → 动量为空 → mom_ok 恒假（约 18% 概率，靠供体
@@ -255,8 +389,8 @@ def t_persistence_v2():
         d.target_interval = 9
         path = os.path.join(tempfile.gettempdir(), "dolphin_conf_test.pt")
         d.save(path)
-        d2 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                     probe_path=probe, device="cpu")
+        d2 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                          probe_path=probe, device="cpu")
         d2.load(path)
         os.remove(path)
         buf_ok = (len(d2.buffer.items) == len(d.buffer.items) and all(
@@ -286,8 +420,8 @@ def t_dual_thread_no_stop():
     # 在全量套件的 CPU 争抢下曾实测 fed_during=0（断言红）。
     # 断言未动（仍是 fed_during > 0），只把测量窗口恢复到与生产同量级。
     with _probe_fixture("dolphin_m15_", n_chunks=64) as probe:
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
         trainer = SleepTrainer(d, steps=4, save_every=10000)
         trainer.start()
         fed = {"n": 0}
@@ -408,8 +542,8 @@ def t_g1_dream_feed():
     # 冷层落盘与探测集都隔离到临时目录：吃生产默认 probes/probe.txt 会让
     # 探测集一挪走就G8 fail-fast 拒绝开睡，做梦注入照常但断言全灭。
     with _probe_fixture("dolphin_g1c_") as probe:
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
         d.memory = MemoryStore(cold_path=os.path.join(os.path.dirname(probe), "c.jsonl"))
         cue = "做梦联想线索条目：海豚用回声定位寻找沙丁鱼群，记忆库旧事。"
         d.memory.add(cue.encode(), 3.0, 0, "residue")
@@ -608,6 +742,7 @@ def t_g3_guard_ruminate():
     import threading
     import time as _time
     from feed import SleepTrainer, guard_loop
+    from dolphin.memory import MemoryStore
 
     # 测试夹具自造探测集，不绑死生产 probes/probe.txt（与 t_g8_gate_failfast 同一套做法）：
     # 本组要验的是反刍自续，不是探测集。若吃生产默认路径，探测卷一旦被挪走/改名/清空，
@@ -627,8 +762,14 @@ def t_g3_guard_ruminate():
         open(probe, "wb").write(body)
 
         # 场景 1：记忆库有料 → 反刍自续；外部流入 → 恢复正式喂食
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
+        # 冷层必须隔离到临时目录（同本文件 t_g1_dream_feed 的写法）：Dolphin() 默认
+        # MemoryStore() 指向生产 dolphin/memory_cold.jsonl。本组断言的前提是「记忆库
+        # 可控地空/非空」，若读生产冷层，场景 2 的 max-idle 收工断言就永不成立
+        # （ruminate 会从真实冷层持续做梦注入 → idle_cycles 永不达标 → 死循环），
+        # 且反刍注入会污染生产冷层。
+        d.memory = MemoryStore(cold_path=os.path.join(tmp, "g3a.jsonl"))
         for i in range(3):
             d.memory.add(f"反刍旧事第{i}条：海豚用回声定位寻找沙丁鱼群，记忆库里的旧经验。{i}".encode(),
                          3.0, 0, "residue")
@@ -657,8 +798,9 @@ def t_g3_guard_ruminate():
         trainer.join(timeout=10)
 
         # 场景 2：记忆库也空 → 连续空选拔周期 → --max-idle 收工（防真死转）
-        d2 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                     probe_path=probe, device="cpu")
+        d2 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                          probe_path=probe, device="cpu")
+        d2.memory = MemoryStore(cold_path=os.path.join(tmp, "g3a2.jsonl"))  # 同上：冷层隔离
         trainer2 = SleepTrainer(d2, steps=2, save_every=10000)
         trainer2.start()
         t0 = _time.time()
@@ -685,8 +827,8 @@ def t_g3_feed_cursor():
         src_b = [mk(10 + i) for i in range(3)]
         feed_mod.iter_source = lambda name: iter(src_a if name == "fakeA" else src_b)
         with _probe_fixture("dolphin_g3b_") as probe:
-            d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                        probe_path=probe, device="cpu")
+            d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                             probe_path=probe, device="cpu")
             names = ["fakeA", "fakeB"]
             cursor = {"sources": list(names), "source_idx": 0, "record_idx": 0}
             d.feed_cursor = cursor
@@ -696,14 +838,14 @@ def t_g3_feed_cursor():
                   f"fed={fed} cursor={cursor}")
             path = os.path.join(tempfile.gettempdir(), "dolphin_g3b_state.pt")
             d.save(path)
-            d2 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                         probe_path=probe, device="cpu")
+            d2 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                              probe_path=probe, device="cpu")
             d2.load(path)
             os.remove(path)
             check("G3-b 游标随档存读一致", d2.feed_cursor == cursor, f"{d2.feed_cursor}")
             # 续喂：游标 (0,2) → 跳过 fakeA 前两条
-            d3 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                         probe_path=probe, device="cpu")
+            d3 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                              probe_path=probe, device="cpu")
             cursor3 = {"sources": list(names), "source_idx": 0, "record_idx": 2}
             d3.feed_cursor = cursor3
             fed3, _, _ = feed_from(d3, names, cursor3, {})
@@ -724,8 +866,8 @@ def t_g3_structural_reward():
                "answer": "标准答案内容同样保持一字不差。", "source": "fake"}
         feed_mod.iter_source = lambda name: iter([rec, dict(rec), dict(rec)])
         with _probe_fixture("dolphin_g3c_") as probe:
-            d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                        probe_path=probe, device="cpu")
+            d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                             probe_path=probe, device="cpu")
             names = ["dup"]
             cursor = {"sources": names, "source_idx": 0, "record_idx": 0}
             fed, _, _ = feed_from(d, names, cursor, {})
@@ -749,8 +891,8 @@ def t_g7_atomic_save():
     try:
         probe = os.path.join(tmp, "probe.txt")
         open(probe, "wb").write("体检探针内容，用于哈希校验与门控。".encode() * 20)
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
         for i in range(6):
             d.learn(f"原子写验证记录第{i}条，内容足够长。{i}", source="test")
         path = os.path.join(tmp, "state.pt")
@@ -787,8 +929,8 @@ def t_g7_rolling_backup():
     try:
         probe = os.path.join(tmp, "probe.txt")
         open(probe, "wb").write("滚动备份验证探测内容。".encode() * 10)
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
         d.learn("滚动备份验证记录，内容足够长。", source="test")
         path = os.path.join(tmp, "state.pt")
         for _ in range(5):
@@ -810,8 +952,8 @@ def t_g7_eid_stability():
     try:
         probe = os.path.join(tmp, "probe.txt")
         open(probe, "wb").write("身份平移验证探测内容。".encode() * 10)
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
         d.buffer.cap = 400  # 压小缓冲逼逐出（ExperienceBuffer 的容量属性为 cap）
         texts = {}
         for i in range(8):
@@ -821,8 +963,8 @@ def t_g7_eid_stability():
         check("G7-c 逐出确实发生", 0 < len(survivors) < 8, f"幸存 {len(survivors)}/8")
         path = os.path.join(tmp, "state.pt")
         d.save(path)
-        d2 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                     probe_path=probe, device="cpu")
+        d2 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                          probe_path=probe, device="cpu")
         d2.load(path)
         check("G7-c 幸存条目 eid 逐字复原（不平移）",
               [e.id for e in d2.buffer.items] == survivors,
@@ -847,15 +989,15 @@ def t_g7_probe_hash():
         probe = os.path.join(tmp, "probe.txt")
         body = "体检探测集原文，哈希校验用。".encode() * 30
         open(probe, "wb").write(body)
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
         d.learn("哈希校验验证记录，内容足够长。", source="test")
         path = os.path.join(tmp, "state.pt")
         d.save(path)
         with open(probe, "ab") as f:  # 篡改：追加一字节即改变卷面语义
             f.write(b"X")
-        d2 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                     probe_path=probe, device="cpu")
+        d2 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                          probe_path=probe, device="cpu")
         rejected = False
         try:
             d2.load(path)
@@ -863,8 +1005,8 @@ def t_g7_probe_hash():
             rejected = "探测" in str(e) or "sha256" in str(e)
         check("G7-d 篡改 probe 后 load 拒绝", rejected)
         open(probe, "wb").write(body)  # 恢复原文
-        d3 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                     probe_path=probe, device="cpu")
+        d3 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                          probe_path=probe, device="cpu")
         d3.load(path)  # 不抛即放行
         check("G7-d probe 恢复后 load 放行", d3.awake_idx == d.awake_idx)
     finally:
@@ -884,8 +1026,8 @@ def t_g8_gate_failfast():
         probe = os.path.join(tmp, "probe.txt")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                        probe_path=probe, device="cpu")
+            d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                             probe_path=probe, device="cpu")
         check("G8 缺失即置 gate_disabled 并 stderr 醒目报警",
               d.gate_disabled is True and "探测集" in err.getvalue())
         for i in range(12):
@@ -932,8 +1074,8 @@ def t_g9_threshold_clamp():
           clamp_threshold(1e12) == 50.0 and clamp_threshold(-3.0) == 1.0
           and clamp_threshold(7.5) == 7.5)
     with _probe_fixture("dolphin_g9_") as probe:
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    probe_path=probe, device="cpu")
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
         d.buffer.sleep_threshold = 1e12
         d._since_sleep = d.target_interval * 3  # 睡得太稀 → 降
         _threshold_feedback(d)
@@ -951,6 +1093,145 @@ def t_g9_threshold_clamp():
         d.maybe_sleep(force=True, steps=2)
         check("G9 maybe_sleep 路径同样钳位",
               1.0 <= d.buffer.sleep_threshold <= 50.0, f"{d.buffer.sleep_threshold}")
+
+
+# ============ 2026-10-04 resurrect() 两缺陷回归（间隔重复吞吐 / 冷层重启失聪） ============
+
+def t_g10_resurrect_all():
+    """缺陷 A：resurrect() 遍历中删除 → 隔一条漏一条（吞吐减半 + 状态不一致）。
+
+    原实现 `for en in self.cold_entries: ... self.cold_entries.remove(en)`，
+    remove 让索引左移、下一条被跳过：N 条全达标只复活 N/2 条，残留条目 hits
+    已≥阈值却没被消费、一直占冷层位。取偶数 N 让"隔一条漏一条"无可遁形。
+    """
+    from dolphin.memory import MemoryStore
+    for n in (6, 8):
+        tmp = tempfile.mkdtemp(prefix="dolphin_g10a_")
+        try:
+            cold = os.path.join(tmp, "c.jsonl")
+            # cap=2：每 add 一条挤出一条，add N+2 条正好落盘 N 条冷层
+            src = MemoryStore(cap_entries=2, promote_hits=3, cold_path=cold)
+            for i in range(n + 2):
+                src.add(f"复活回归第{i:03d}号，内容各异可逐字核对。{i}".encode(), 0.0, 0, "residue")
+            texts = [e.text for e in src.cold_entries]
+            for e in src.cold_entries:
+                e.hits = 3  # 全部达标
+            src.flush_cold()
+            check(f"G10-a 夹具前置：{n} 条冷层已落盘且全部达标",
+                  len(texts) == n and all(e.hits >= 3 for e in src.cold_entries),
+                  f"冷层{len(texts)}条")
+
+            m = MemoryStore(cap_entries=1000, promote_hits=3, cold_path=cold)
+            m._ensure_cold()
+            hot_before = len(m.entries)
+            got = m.resurrect()
+            check(f"G10-a {n} 条全达标必须全部复活（原实现只回 {n // 2}）",
+                  len(got) == n, f"返回{len(got)}条")
+            check(f"G10-a {n} 条冷层残留必须为 0（漏网条目 hits 已达标却占位）",
+                  len(m.cold_entries) == 0, f"残留{len(m.cold_entries)}条")
+            check(f"G10-a {n} 条热层增量 == {n}",
+                  len(m.entries) - hot_before == n, f"热层{len(m.entries)}")
+            check(f"G10-a {n} 条返回 bytes 集合与原集合一致",
+                  set(got) == {t.encode("utf-8") for t in texts})
+            check(f"G10-a {n} 条升回热层后 hits 已复位为 0",
+                  all(e.hits == 0 for e in m.entries if e.text in set(texts)))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t_g10_resurrect_cold_load():
+    """缺陷 B：resurrect() 不调 _ensure_cold() → 断电重启后冷层失聪（违反 L9）。
+
+    部署喂食路径 feed.py --resume 走 trainer_cycle → resurrect()，不调 serve()
+    也就不会触发 retrieve()，于是上一进程逐出的知识在新进程完全不可见，
+    记忆写了落盘却在重启后失聪 = 静默丢弃。本测试用新建实例（不经 retrieve）
+    复现该路径。冷层一律落临时目录，绝不碰生产 dolphin/memory_cold.jsonl。
+    """
+    from dolphin.memory import MemoryStore
+    tmp = tempfile.mkdtemp(prefix="dolphin_g10b_")
+    try:
+        cold = os.path.join(tmp, "memory_cold.jsonl")
+        src = MemoryStore(cap_entries=2, promote_hits=3, cold_path=cold)
+        for i in range(6):  # cap=2 → 落盘 4 条
+            src.add(f"重启失聪回归第{i:03d}号，内容可核对。{i}".encode(), 0.0, 0, "residue")
+        texts = [e.text for e in src.cold_entries]
+        for e in src.cold_entries:
+            e.hits = 3
+        src.flush_cold()
+        n_cold = sum(1 for l in open(cold, encoding="utf-8") if l.strip())
+        check("G10-b 夹具前置：4 条冷层已落盘", n_cold == 4 and len(texts) == 4,
+              f"文件{n_cold}行")
+
+        # 关键：全新实例，不经 retrieve()/dream()，直接 resurrect()（= 喂食路径）
+        m2 = MemoryStore(cap_entries=1000, promote_hits=3, cold_path=cold)
+        check("G10-b 全新实例冷层尚未加载（复现前提）",
+              m2._cold_loaded is False and len(m2.cold_entries) == 0)
+        got = m2.resurrect()
+        check("G10-b 新实例直接 resurrect 须读到 4 条（原实现返回 0 条 = 重启失聪）",
+              len(got) == 4, f"返回{len(got)}条")
+        check("G10-b 新实例 resurrect 后冷层清空、4 条升回热层",
+              len(m2.cold_entries) == 0
+              and {e.text for e in m2.entries} == set(texts),
+              f"冷层{len(m2.cold_entries)} 热层{len(m2.entries)}")
+
+        # 闭环：复活后 flush → 第三个实例重启仍能读到（落盘一致性未被 _ensure_cold 破坏）
+        m2.flush_cold()
+        m3 = MemoryStore(cap_entries=1000, promote_hits=3, cold_path=cold)
+        check("G10-b 复活并回写后重启冷层为空（升回热层者不该留在冷层）",
+              m3.resurrect() == [] and len(m3.cold_entries) == 0)
+        check("G10-b 生产冷层文件未被本测试触碰",
+              not cold.startswith(os.path.dirname(os.path.dirname(
+                  os.path.abspath(__file__)))))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ============ 冷层隔离总闸自检（本身也是断言） ============
+
+
+def t_cold_quarantine():
+    """红线断言：本套件不得改动任何生产资产（memory_cold.jsonl / probe.txt）。
+
+    这条断言是防线③的兑现点，也是整个隔离机制唯一的「可观测出口」——
+    若前两道防线（默认值改写 + 显式路径拦截）某天被误删，这里会立刻变红
+    并打印测试前后的完整指纹，而不是让污染悄悄发生。
+    放在最后跑：必须等所有测试都结束才有意义（中途比对会误报）。
+    """
+    # ① 工厂产出的冷层必须落在隔离沙箱内，且与生产路径无关
+    d = make_dolphin(cfg=Config(d_model=32, n_layers=1, n_heads=2, block_size=64),
+                     device="cpu", probe_path=None)
+    check("隔离 工厂冷层不指向生产 memory_cold.jsonl",
+          os.path.realpath(d.memory.cold_path) != _PROD_COLD
+          and os.path.realpath(d.memory.cold_path).startswith(os.path.realpath(_SANDBOX)),
+          d.memory.cold_path)
+    # ② 默认路径（cold_path=None）也必须被改写到沙箱——这正是历史事故的漏点
+    m_def = MemoryStore()
+    check("隔离 默认 cold_path=None 也被改写到沙箱（历史事故漏点）",
+          os.path.realpath(m_def.cold_path) != _PROD_COLD,
+          m_def.cold_path)
+    # ③ 显式传入生产路径也拦得住（意图不明的显式传参不能绕过隔离）
+    m_exp = MemoryStore(cold_path=_PROD_COLD)
+    check("隔离 显式传入生产路径同样被改写（绕过路径封死）",
+          os.path.realpath(m_exp.cold_path) != _PROD_COLD, m_exp.cold_path)
+    # ④ 两个实例的冷层互相隔离（不共享文件，避免跨测试串味）
+    check("隔离 每实例独占冷层文件（实例间不串味）",
+          m_def.cold_path != m_exp.cold_path)
+    # ⑤ 对沙箱冷层做真实的逐出落盘 + flush：确认写操作确实落在沙箱、生产零改动。
+    #    这一条是「隔离不是空谈」的正面证据：写入路径真的被走了一遍。
+    #    cap=2（属性名是 cap，不是构造参数名 cap_entries）→ 第 3 条 add 起逐出。
+    d.memory.cap = 2
+    for i in range(6):
+        d.memory.add(f"隔离自检条目第{i}号，触发逐出落盘以验证写入落在沙箱。{i}".encode(),
+                     0.0, 0, "residue")
+    d.memory.flush_cold()
+    wrote = os.path.exists(d.memory.cold_path)
+    check("隔离 沙箱冷层可真实落盘（写入路径走得通）", wrote, d.memory.cold_path)
+
+
+def t_cold_untouched():
+    """红线断言（收尾）：全部测试跑完后，生产资产指纹必须与开工时逐字节一致。"""
+    ok, detail = verify_cold_quarantine()
+    check("红线 全套测试零改动生产资产（memory_cold.jsonl / probe.txt）", ok, detail)
 
 
 if __name__ == "__main__":
@@ -981,6 +1262,10 @@ if __name__ == "__main__":
     t_g7_probe_hash()
     t_g8_gate_failfast()
     t_g9_threshold_clamp()
+    t_g10_resurrect_all()
+    t_g10_resurrect_cold_load()
+    t_cold_quarantine()   # 隔离机制自检（先跑：此时污染若已发生，下面那条会一并变红）
+    t_cold_untouched()    # 收尾红线：必须最后跑
     n_ok = sum(PASS)
     if SKIP:
         print(f"（跳过 {len(SKIP)} 项：{'; '.join(SKIP)}）")
