@@ -65,9 +65,24 @@ class MemoryStore:
                     if not line:
                         continue
                     try:  # 崩溃尾行的半行日志不拖垮整卷
-                        self.cold_entries.append(MemoryEntry.from_json(json.loads(line)))
+                        en = MemoryEntry.from_json(json.loads(line))
                     except (json.JSONDecodeError, KeyError, ValueError):
-                        pass
+                        continue
+                    # 2026-10-04 修复：旧实现逐行 append，反刍把同一条反复逐出
+                    # 会导致同一 text 落盘成百上千行（生产实况 16316 行仅 153 条
+                    # 唯一 text）。加载时按 text 去重：保留 hits 最大、created 最早
+                    # 的一条（信息量最大且保留审计链），一次加载即自愈旧档。
+                    existing = next((x for x in self.cold_entries if x.text == en.text), None)
+                    if existing is None:
+                        self.cold_entries.append(en)
+                    else:
+                        if en.hits > existing.hits:
+                            existing.hits = en.hits
+                        if en.created < existing.created:
+                            existing.created = en.created
+                        # 保留更低的 score（逐出优先级 min 取低分，早逐出者更该留）
+                        if en.score < existing.score:
+                            existing.score = en.score
         self._cold_loaded = True
 
     def _ensure_cold(self):
@@ -118,11 +133,26 @@ class MemoryStore:
         self._demote(victim)
 
     def _demote(self, entry):
+        """把热层条目降级进冷层。2026-10-04 修复：若同 text 已在冷层，不再追加
+        新行（旧实现 append-only 导致反刍把同一条反复逐出→冷层无限膨胀，生产实况
+        16316 行仅 153 条唯一 text）。改为更新已有行的 hits/score，保留最早
+        created 作为审计链起点——落盘行数与唯一记忆数一致，且历史可追溯。"""
         with self._cold_lock:
             self._load_cold_locked()
             d = os.path.dirname(self.cold_path)
             if d:
                 os.makedirs(d, exist_ok=True)
+            existing = next((x for x in self.cold_entries if x.text == entry.text), None)
+            if existing is not None:
+                # 同 text 已在冷层：合并命中计数与分数，保留最早 created。
+                # hits 取 max（合并两次逐出之间的检索进度）。
+                existing.hits = max(existing.hits, entry.hits)
+                existing.score = min(existing.score, entry.score)
+                existing.cycle = max(existing.cycle, entry.cycle)
+                if entry.created < existing.created:
+                    existing.created = entry.created
+                # 不需要追加文件行；flush_cold 时统一按合并后的状态重写。
+                return
             with open(self.cold_path, "a", encoding="utf-8", newline="\n") as f:
                 f.write(json.dumps(entry.to_json(), ensure_ascii=False) + "\n")
             self.cold_entries.append(entry)
@@ -135,13 +165,16 @@ class MemoryStore:
             return []
         self._ensure_cold()  # 冷层同场竞技：G1 修复前被逐出条目从此永远查无此人
         scored = []
-        for en in self.entries:
+        # 2026-10-04 修复：训练线程（_evict/_demote/resurrect）会并发修改
+        # self.entries / self.cold_entries，直接迭代会跳过元素/漏检索（语义错误）。
+        # 迭代前取快照，保证检索看到一致视图，且不会在遍历中触发列表长度突变。
+        for en in list(self.entries):
             g = _grams(en.text)
             if g:
                 ov = len(q & g) / len(q)
                 if ov > 0.05:
                     scored.append((ov, en))
-        for en in self.cold_entries:
+        for en in list(self.cold_entries):
             g = _grams(en.text)
             if g:
                 ov = len(q & g) / len(q)
@@ -201,7 +234,9 @@ class MemoryStore:
         if not qs or k <= 0:
             return []
         self._ensure_cold()
-        pool = [en for en in self.entries + self.cold_entries
+        # 2026-10-04 修复：与 retrieve 同理，训练线程并发修改热/冷层列表，
+        # 取快照保证一致视图（+ 操作虽然创建新列表，但两个取值点之间可能被插入）。
+        pool = [en for en in list(self.entries) + list(self.cold_entries)
                 if en.hits < self.promote_hits]
         scored = []
         for en in pool:

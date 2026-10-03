@@ -114,7 +114,10 @@ def trainer_cycle(d, steps, kd_alpha=0.5, kd_T=2.0):
         d.buffer.clear()  # 摘除：名单已在本轮处置，缓冲即刻腾空，主线程继续喂数不丢
 
     # ② L9 周期层：滞留一律降级进记忆库——包括空选拔周期（审计③-1 反例路径）。
-    # serve 经 learn_busy 屏障与训练线程互斥，memory 此处无并发访问。
+    # 注：此处的 memory.add 在 feed_lock 之外执行；memory 内部对热/冷层列表的
+    # 并发修改已通过"取快照"（见 memory.py retrieve/dream）保证安全，
+    # 但本路径与主线程 serve/retrieve 仍可能有短暂交错——由 memory 内部快照兜底，
+    # 不再依赖"此处无并发访问"的假设（该假设已证明不成立，2026-10-04 修正）。
     for s, e in rest:
         d.memory.add(e.data, s, d.cycle, "residue")
 

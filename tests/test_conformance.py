@@ -619,6 +619,19 @@ def t_g2_full_coverage():
         check("G2-a 合成大卷 每块皆满块（无截断无重叠）",
               all(len(c) == 256 for c in cb), f"全 {len(cb)} 块均 256B")
 
+    # 2026-10-04 回归：len(data) % bs == 1 时旧实现会丢最后 1 字节
+        # （range(0, len-1, bs) 的 -1 使尾字节永不进块）。修复后覆盖恒等仍成立。
+        with _probe_fixture("dolphin_g2a_mod1_") as mod1:
+            _write_synthetic_volume(mod1, 256 + 1)  # 257 % 256 == 1
+            total_m = os.path.getsize(mod1)
+            cm = load_chunks(mod1, 256)
+            check("G2-a 修复：len%bs==1 覆盖字节 == 全卷字节（不丢尾字节）",
+                  sum(len(c) for c in cm) == total_m,
+                  f"{sum(len(c) for c in cm)}/{total_m}")
+            check("G2-a 修复：len%bs==1 尾块仍可评分（≥2 字节）",
+                  all(len(c) >= 2 for c in cm),
+                  f"尾块 {len(cm[-1])}B")
+
     # evaluate 契约：返回 (mean, per_chunk, n)，且 mean == per 均值（合成小卷驱动）
     with _probe_fixture("dolphin_g2a_eval_") as ev:
         _write_synthetic_volume(ev, 1317)
@@ -671,6 +684,20 @@ def t_g2_gate_margin():
     check("G2-b 劣化拒绝", p_bad is False)
     check("G2-b SE 全部由数据估计", d_rej["chunks"] == n and d_rej["gate_se"] > 0,
           f"n={d_rej['chunks']} se={d_rej['gate_se']}")
+    # 2026-10-04 回归：n 小于 MIN_GATE_CHUNKS 时判决带消失（旧实现 n=1 时 SE=0、
+    # eps=EPS_FLOOR → 任何 >1e-6 的"改善"即放行 = 无统计依据却换班）。
+    # 修复后 n 不足应判否，且报告里带 gate_reason。
+    from dolphin.probe import MIN_GATE_CHUNKS
+    p_small, d_small = gate_decision([5.0], [5.0 - 1e-5])
+    check("G2-b n<MIN_GATE_CHUNKS 时拒绝换班（防判决带消失）",
+          p_small is False and bool(d_small.get("gate_reason")),
+          f"n=1 passed={p_small} reason={d_small.get('gate_reason')}")
+    # 恰好在下限 n=MIN_GATE_CHUNKS 时统计判决仍应工作（非退化）
+    x = [5.0] * MIN_GATE_CHUNKS
+    p_min, d_min = gate_decision(x, [v - 1e-3 for v in x])
+    check("G2-b n==MIN_GATE_CHUNKS 真实改善仍放行",
+          p_min is True and d_min["chunks"] == MIN_GATE_CHUNKS,
+          f"n={d_min['chunks']} passed={p_min}")
     # 同步守卫（M4 漂移警告）：两条训练路径都必须走公共判决，掷硬币判决不得复活
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for rel, call in (("dolphin/sleep.py", "dolphin.gate("), ("feed.py", "d.gate(")):

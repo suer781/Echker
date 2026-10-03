@@ -247,43 +247,53 @@ class Dolphin:
             shutil.copyfile(path, dst)
             baks = sorted(glob.glob(os.path.join(archive, f"{base}.*.bak")))
             for old in baks[:-self.BACKUP_KEEP]:  # 文件名字典序=时间序
-                os.remove(old)
+                try:  # 并发存档时另一线程可能已删除同一旧档，忽略
+                    os.remove(old)
+                except FileNotFoundError:
+                    pass
         except OSError as e:
             print(f"[Dolphin] 滚动备份失败（不拦存档）：{e!r}", file=sys.stderr)
 
     def save(self, path):
-        try:
-            self.memory.flush_cold()  # 冷层命中进度随档落盘（失败不拦存档：冷层日志本身崩溃安全）
-        except OSError:
-            pass
-        payload = {
-            "version": 3,
-            "cfg": asdict(self.cfg),
-            "states": [h.model.state_dict() for h in self.h],
-            "lrs": [h.opt.param_groups[0]["lr"] for h in self.h],
-            "opt_states": [h.opt.state_dict() for h in self.h],  # 动量入档：--resume 非热重启
-            # G7 身份入档：v3 起 (eid, data, surprise, reward) 四元组——eid 随档
-            # 恢复，逐出+重启后 feedback 不会错挂（旧版 add 重建会平移 id）
-            "buffer": [(e.id, e.data, e.surprise, e.reward) for e in self.buffer.items],
-            # 经验身份计数器透传（experience.py 本轮禁改，包内管理层透传 _next_id；
-            # M4 可将其正式化）。缺它则重启后新经验与幸存旧经验撞 id。
-            "next_id": self.buffer._next_id,
-            "awake_idx": self.awake_idx,
-            "budget": self.budget,
-            "threshold": self.buffer.sleep_threshold,
-            "cycle": self.cycle,
-            "since_sleep": self._since_sleep,
-            "note_k": self.note_k,
-            "dream_k": self.dream_k,
-            "target_interval": self.target_interval,
-            "promote_hits": self.memory.promote_hits,
-            # G7：created 入档——记忆逐出优先级 (score, created) 跨重启不漂移
-            "memory": [(e.text, e.score, e.hits, e.cycle, e.kind, e.created)
-                       for e in self.memory.entries],
-            "probe_sha256": self.probe_sha256(),  # G7：体检卷面指纹，load 时校验
-            # G3 自续骨：喂食游标透传（语义与推进全权归 feed.py，本类只存取）
-            "feed_cursor": self.feed_cursor,
-        }
+        # 2026-10-04 修复：旧实现构造 payload 时不持 feed_lock，而主线程 learn()
+        # 正并发 buffer.add —— 快照是撕裂的（eid/next_id 与 buffer.items 可能不对应，
+        # 导致重启后恢复出不一致的缓冲）。现在把"读共享状态"的整段放在 feed_lock
+        # 内（锁内只有名单级操作：快照构造毫秒级）；torch.save 落盘在锁外，
+        # 不长时间持锁、不与训练线程的长计算互斥（与"锁只护共享状态交换"原则一致）。
+        # 注：flush_cold 取 _cold_lock，锁序 feed_lock→_cold_lock 是既有单向顺序，无死锁。
+        with self.feed_lock:
+            try:
+                self.memory.flush_cold()  # 冷层命中进度随档落盘
+            except OSError:
+                pass
+            payload = {
+                "version": 3,
+                "cfg": asdict(self.cfg),
+                "states": [h.model.state_dict() for h in self.h],
+                "lrs": [h.opt.param_groups[0]["lr"] for h in self.h],
+                "opt_states": [h.opt.state_dict() for h in self.h],  # 动量入档：--resume 非热重启
+                # G7 身份入档：v3 起 (eid, data, surprise, reward) 四元组——eid 随档
+                # 恢复，逐出+重启后 feedback 不会错挂（旧版 add 重建会平移 id）
+                "buffer": [(e.id, e.data, e.surprise, e.reward) for e in self.buffer.items],
+                # 经验身份计数器透传（experience.py 本轮禁改，包内管理层透传 _next_id；
+                # M4 可将其正式化）。缺它则重启后新经验与幸存旧经验撞 id。
+                "next_id": self.buffer._next_id,
+                "awake_idx": self.awake_idx,
+                "budget": self.budget,
+                "threshold": self.buffer.sleep_threshold,
+                "cycle": self.cycle,
+                "since_sleep": self._since_sleep,
+                "note_k": self.note_k,
+                "dream_k": self.dream_k,
+                "target_interval": self.target_interval,
+                "promote_hits": self.memory.promote_hits,
+                # G7：created 入档——记忆逐出优先级 (score, created) 跨重启不漂移
+                "memory": [(e.text, e.score, e.hits, e.cycle, e.kind, e.created)
+                           for e in self.memory.entries],
+                "probe_sha256": self.probe_sha256(),  # G7：体检卷面指纹，load 时校验
+                # G3 自续骨：喂食游标透传（语义与推进全权归 feed.py，本类只存取）
+                "feed_cursor": self.feed_cursor,
+            }
         # G7 原子写：先写同目录临时文件再 os.replace——任何瞬间断电，目标文件
         # 要么是旧版要么是新版，绝不出现写了一半的存档。
         d = os.path.dirname(os.path.abspath(path))
