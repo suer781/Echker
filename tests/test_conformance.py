@@ -6,8 +6,10 @@
 
 用法：python tests/test_conformance.py   （纯 CPU，约 1 分钟）
 """
+import contextlib
 import os
 import secrets
+import shutil
 import sys
 import tempfile
 
@@ -21,11 +23,75 @@ from dolphin.model import ByteTransformer, Config
 from dolphin.sleep import varied_replay
 
 PASS = []
+SKIP = []
 
 
-def check(name, cond, detail=""):
+def check(name, cond, detail="", skip=False):
+    """skip=True：本环境不适用（如生产探测集不在场），显式记为跳过而非判红。
+
+    跳过项仍进 PASS 以保持断言总数跨环境稳定（副本实验里生产卷不在场，
+    断言数不缩水），但单独记账并在结尾汇总，绝不与真绿混淆。
+    """
+    if skip:
+        SKIP.append(name)
+        PASS.append(True)
+        print(f"  ⏭ {name}  {detail}（本环境不适用，跳过）")
+        return
     PASS.append(cond)
     print(f"  {'✓' if cond else '✗'} {name}  {detail}")
+
+
+# ============ 共用探测集夹具（律 L8 脱钩，2026-10-04） ============
+# 为什么要它：此前 22 处 Dolphin(cfg=..., device="cpu") 里绝大多数不传 probe_path，
+# 于是吃生产默认probes/probe.txt —— 让"78/78 全绿"取决于一个与被测性质无关的
+# 外部文件是否躺在原处。实测把它挪走：第 12 项 t_l5_l8_training_paths 抛
+# GateDisabled 直接中断，78 项只跑出 11 项，后面 60+ 项压根跑不到。
+#
+# 本夹具只换测试夹具，生产律一个字节都不动：
+#   - 律 L8（任何 hemisphere 永不在探测集上训练）是正确的生产律，不许碰；
+#   - G8 fail-fast（ensure_gate_ready 缺失即抛 GateDisabled）是明令禁止削弱的守卫，
+#     原样保留——t_g8_gate_failfast 故意用不存在的 probe 路径验它，不套用本夹具；
+#   - 合成卷用自然语言逻辑推理片段而非随机字节：门控在随机数据上没有意义
+#     （逐块 NLL 无结构，配对差的 SE 退化），语义片段才让体检有可判的卷面。
+# 语料风格取自 probes/build_logic_probe.py 的逻辑推理域（若→则传递、金属导电、
+# 逆否、充分必要条件），与 probes/probe.txt 同域但独立撰写，不复制生产卷内容。
+
+_PROBE_SEG = (
+    "逻辑推理探测片段：若甲高于乙，乙高于丙，则甲高于丙；"
+    "所有金属都导电，铁是金属，故铁导电；下雨地必湿，此地不湿，"
+    "故此地未必下雨；鸟会飞，企鹅是鸟，然企鹅不会飞，故前提有误；"
+    "此段仅供体检评分，永不进训练粮。"
+).encode()
+
+
+def _write_synthetic_probe(path, n_chunks, block_size=256):
+    """写一份合成探测卷：n_chunks 个整块（尾块由整除保证不缺字节）。
+
+    补齐到 block_size 整数倍 → 恰好 n_chunks 块、每块 >= 2 字节（probe.evaluate
+    的可评分下限），n_chunks >= 2 时 gate_decision 的 SE 才有 n-1>0 的方差可估。
+    """
+    body = (_PROBE_SEG * (n_chunks * block_size // len(_PROBE_SEG) + 1))
+    body = body[: n_chunks * block_size]
+    with open(path, "wb") as f:
+        f.write(body)
+    return path
+
+
+@contextlib.contextmanager
+def _probe_fixture(prefix, n_chunks=12):
+    """共用探测集夹具：临时目录 → 写合成 probe → yield 路径 → rmtree 收尾。
+
+    形态沿用本文件既有的 t_g8_gate_failfast / t_g3_guard_ruminate 写法
+    （mkdtemp + 写临时 probe + finally rmtree），只是提为共用 helper。
+    n_chunks 默认 12（十几块足矣）：这些测试都是小 Config（d_model=64/2 层/
+    block_size=256），12 块足够门控判决，又不白白拖慢 78 项测试——不做成
+    生产卷那样的 242 块。
+    """
+    tmp = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield _write_synthetic_probe(os.path.join(tmp, "probe.txt"), n_chunks)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def t_l1_bytes():
@@ -105,94 +171,106 @@ def t_l5_l8_training_paths():
         check(f"L5 训练路径无自生成（{rel}）", "generate(" not in src)
         check(f"L5 训练用真实字节流（{rel}）", "varied_replay" in src)
 
-    d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                device="cpu")
-    for i in range(12):
-        d.learn(f"回滚验证记录第{i}条，内容足够长。{i}", source="test")
-    before = [p.clone() for p in d.awake().model.parameters()]
-    r = d.maybe_sleep(force=True, steps=3)
-    if r and r.get("swapped"):
-        old_awake = d.sleeping()  # 换班后原醒脑变睡脑
-        after = [p.clone() for p in old_awake.model.parameters()]
-        unchanged = all(torch.equal(a, b) for a, b in zip(before, after))
-        check("L3 服务期间的醒脑权重零改动", unchanged)
-    else:
-        after = [p.clone() for p in d.sleeping().model.parameters()]
-        unchanged = all(torch.equal(a, b) for a, b in zip(before, after))
-        check("L3 回滚路径恢复醒脑权重", unchanged)
+    with _probe_fixture("dolphin_l5l8_") as probe:
+        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                    probe_path=probe, device="cpu")
+        for i in range(12):
+            d.learn(f"回滚验证记录第{i}条，内容足够长。{i}", source="test")
+        before = [p.clone() for p in d.awake().model.parameters()]
+        r = d.maybe_sleep(force=True, steps=3)
+        if r and r.get("swapped"):
+            old_awake = d.sleeping()  # 换班后原醒脑变睡脑
+            after = [p.clone() for p in old_awake.model.parameters()]
+            unchanged = all(torch.equal(a, b) for a, b in zip(before, after))
+            check("L3 服务期间的醒脑权重零改动", unchanged)
+        else:
+            after = [p.clone() for p in d.sleeping().model.parameters()]
+            unchanged = all(torch.equal(a, b) for a, b in zip(before, after))
+            check("L3 回滚路径恢复醒脑权重", unchanged)
 
 
 def t_l8_gate():
     """L8：睡脑劣化时体检门控必须拒绝换班（防越学越傻的保险丝，此前零守护）。"""
-    d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                device="cpu")
-    # 修复既有 flake（2026-10-03 G3 施工发现，断言未动、只加长喂食文本）：
-    # 旧文本每条仅 47B，选拔 5 条拼流 ≈234B < block_size+2=258B → 命中"样本过短"
-    # 早退路径（report 无 passed/swapped 键），断言靠变异重放的供体拼接随机凑长
-    # 才偶发通过（实测 5/15 失败率）。加长后选拔流确定超过训练下限。
-    for i in range(12):
-        d.learn(f"门控验证记录第{i}条，内容足够长以稳定通过选拔训练，避免样本过短。{i}",
-                source="test")
-    before = [p.clone() for p in d.awake().model.parameters()]
-    with torch.no_grad():  # 重污染睡脑：2 步训练无法恢复
-        for p in d.sleeping().model.parameters():
-            p.add_(torch.randn_like(p) * 0.5)
-    r = d.maybe_sleep(force=True, steps=2)
-    check("L8 门控拒绝劣化睡脑", r is not None and r.get("swapped") is False,
-          f"passed={r.get('passed') if r else None}")
-    after = [p.clone() for p in d.awake().model.parameters()]
-    check("L8 醒脑权重未被污染", all(torch.equal(a, b) for a, b in zip(before, after)))
+    with _probe_fixture("dolphin_l8_") as probe:
+        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                    probe_path=probe, device="cpu")
+        # 修复既有 flake（2026-10-03 G3 施工发现，断言未动、只加长喂食文本）：
+        # 旧文本每条仅 47B，选拔 5 条拼流 ≈234B < block_size+2=258B → 命中"样本过短"
+        # 早退路径（report 无 passed/swapped 键），断言靠变异重放的供体拼接随机凑长
+        # 才偶发通过（实测 5/15 失败率）。加长后选拔流确定超过训练下限。
+        for i in range(12):
+            d.learn(f"门控验证记录第{i}条，内容足够长以稳定通过选拔训练，避免样本过短。{i}",
+                    source="test")
+        before = [p.clone() for p in d.awake().model.parameters()]
+        with torch.no_grad():  # 重污染睡脑：2 步训练无法恢复
+            for p in d.sleeping().model.parameters():
+                p.add_(torch.randn_like(p) * 0.5)
+        r = d.maybe_sleep(force=True, steps=2)
+        check("L8 门控拒绝劣化睡脑", r is not None and r.get("swapped") is False,
+              f"passed={r.get('passed') if r else None}")
+        after = [p.clone() for p in d.awake().model.parameters()]
+        check("L8 醒脑权重未被污染", all(torch.equal(a, b) for a, b in zip(before, after)))
 
 
 def t_l10_dual_channel():
     """L10：换班后快通道笔记入记忆库且可检索（此前零守护）。"""
-    d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                device="cpu")
-    for i in range(12):
-        d.learn(f"双通道验证记录第{i}条，内容足够长。{i}", source="test")
-    swapped = False
-    for _ in range(3):
-        r = d.maybe_sleep(force=True, steps=20)
-        swapped = swapped or bool(r and r.get("swapped"))
-    notes = [e for e in d.memory.entries if e.kind == "note"]
-    check("L10 快通道笔记随换班入记忆库", bool(swapped) and len(notes) >= 1,
-          f"notes={len(notes)}")
+    with _probe_fixture("dolphin_l10_") as probe:
+        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                    probe_path=probe, device="cpu")
+        for i in range(12):
+            # 修复既有 flake（2026-10-04 审计发现，与 G3 修L8/persistence 同缺陷族、
+            # 唯独L10 被漏掉；断言未动、只加长喂食文本）：旧文本每条仅 50B，
+            # 预算 45% 选出 5 条 ≈254B < block_size+2=258B —— 只差 4 字节，
+            # 变异重放的供体拼接与字符 dropout 随机增减字节 → 约 8~18% 概率
+            # 跌破下限，命中 dolphin/sleep.py 的"样本过短"早退（report 无
+            # swapped 键）→ 零换班 → notes=0 → 断言红。实测 HEAD 版 40 次红 3 次。
+            # 加长后选拔流确定超过训练下限，maybe_sleep 必然真训练。
+            d.learn(f"双通道验证记录第{i}条，内容足够长以稳定通过选拔训练，避免样本过短早退。{i}",
+                    source="test")
+        swapped = False
+        for _ in range(3):
+            r = d.maybe_sleep(force=True, steps=20)
+            swapped = swapped or bool(r and r.get("swapped"))
+        notes = [e for e in d.memory.entries if e.kind == "note"]
+        check("L10 快通道笔记随换班入记忆库", bool(swapped) and len(notes) >= 1,
+              f"notes={len(notes)}")
 
 
 def t_persistence_v2():
     """v2 持久化：缓冲、优化器动量、值自成常量全部随档幸存。"""
-    d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                device="cpu")
-    # 修复既有 flake（2026-10-03 G3 施工发现，断言未动、只加长喂食文本）：
-    # 旧文本每条仅 47B，10 条预算 45% 只选出 4 条 ≈191B < block_size+2=258B →
-    # "样本过短"早退 → 零训练 → 动量为空 → mom_ok 恒假（约 18% 概率，靠供体
-    # 拼接抽签通过）。加长后选拔流确定超过训练下限，maybe_sleep 必然真训练。
-    for i in range(10):
-        d.learn(f"持久化回环测试记录第{i}条，内容足够长以稳定通过选拔训练。{i}",
-                source="test")
-    d.maybe_sleep(force=True, steps=3)
-    for i in range(6):
-        d.learn(f"睡后补喂的第{i}条记录，内容足够长。{i}", source="test")
-    d.note_k = 7
-    d.target_interval = 9
-    path = os.path.join(tempfile.gettempdir(), "dolphin_conf_test.pt")
-    d.save(path)
-    d2 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                 device="cpu")
-    d2.load(path)
-    os.remove(path)
-    buf_ok = (len(d2.buffer.items) == len(d.buffer.items) and all(
-        a.data == b.data for a, b in zip(d.buffer.items, d2.buffer.items)))
-    m0 = [st["exp_avg"].clone() for h in (d.h[0], d.h[1])
-          for st in h.opt.state.values()]
-    nonempty = len(m0) > 0  # 空转守卫：动量断言必须真有东西可比（审计② M4 变异教训）
-    m1 = [st["exp_avg"].clone() for h in (d2.h[0], d2.h[1])
-          for st in h.opt.state.values()]
-    mom_ok = (nonempty and len(m0) == len(m1)
-              and all(torch.equal(a, b) for a, b in zip(m0, m1)))
-    check("持久化 v2 缓冲/动量/常量回环",
-          buf_ok and mom_ok and d2.note_k == 7 and d2.target_interval == 9,
-          f"缓冲{len(d2.buffer.items)} 动量{mom_ok}(非空{nonempty})")
+    with _probe_fixture("dolphin_pers_") as probe:
+        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                    probe_path=probe, device="cpu")
+        # 修复既有 flake（2026-10-03 G3 施工发现，断言未动、只加长喂食文本）：
+        # 旧文本每条仅 47B，10 条预算 45% 只选出 4 条 ≈191B < block_size+2=258B →
+        # "样本过短"早退 → 零训练 → 动量为空 → mom_ok 恒假（约 18% 概率，靠供体
+        # 拼接抽签通过）。加长后选拔流确定超过训练下限，maybe_sleep 必然真训练。
+        for i in range(10):
+            d.learn(f"持久化回环测试记录第{i}条，内容足够长以稳定通过选拔训练。{i}",
+                    source="test")
+        d.maybe_sleep(force=True, steps=3)
+        for i in range(6):
+            d.learn(f"睡后补喂的第{i}条记录，内容足够长。{i}", source="test")
+        d.note_k = 7
+        d.target_interval = 9
+        path = os.path.join(tempfile.gettempdir(), "dolphin_conf_test.pt")
+        d.save(path)
+        d2 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                     probe_path=probe, device="cpu")
+        d2.load(path)
+        os.remove(path)
+        buf_ok = (len(d2.buffer.items) == len(d.buffer.items) and all(
+            a.data == b.data for a, b in zip(d.buffer.items, d2.buffer.items)))
+        m0 = [st["exp_avg"].clone() for h in (d.h[0], d.h[1])
+              for st in h.opt.state.values()]
+        nonempty = len(m0) > 0  # 空转守卫：动量断言必须真有东西可比（审计② M4 变异教训）
+        m1 = [st["exp_avg"].clone() for h in (d2.h[0], d2.h[1])
+              for st in h.opt.state.values()]
+        mom_ok = (nonempty and len(m0) == len(m1)
+                  and all(torch.equal(a, b) for a, b in zip(m0, m1)))
+        check("持久化 v2 缓冲/动量/常量回环",
+              buf_ok and mom_ok and d2.note_k == 7 and d2.target_interval == 9,
+              f"缓冲{len(d2.buffer.items)} 动量{mom_ok}(非空{nonempty})")
 
 
 def t_dual_thread_no_stop():
@@ -200,42 +278,50 @@ def t_dual_thread_no_stop():
     import threading
     import time
     from feed import SleepTrainer
-    d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                device="cpu")
-    trainer = SleepTrainer(d, steps=4, save_every=10000)
-    trainer.start()
-    fed = {"n": 0}
-    stop = threading.Event()
+    # 本组唯一需要"够长探测卷"的测试（其余各组用默认 12 块即可）：
+    # 它量的是"一个睡眠周期进行中部署线程喂入了几条"，而喂入量正比于
+    # 周期墙钟时长 —— 周期时长又正比于体检块数（实测 12 块 ≈0.17s/周期、
+    # 64 块 ≈0.7s、242 块 ≈2.4s）。生产卷 242 块时余量 ~105 条；
+    # 若沿用 12 块小卷，周期缩到 0.17s，喂入余量塌到个位数，
+    # 在全量套件的 CPU 争抢下曾实测 fed_during=0（断言红）。
+    # 断言未动（仍是 fed_during > 0），只把测量窗口恢复到与生产同量级。
+    with _probe_fixture("dolphin_m15_", n_chunks=64) as probe:
+        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                    probe_path=probe, device="cpu")
+        trainer = SleepTrainer(d, steps=4, save_every=10000)
+        trainer.start()
+        fed = {"n": 0}
+        stop = threading.Event()
 
-    def feeder():
-        i = 0
-        while not stop.is_set() and i < 600:  # 修复既有竞态（断言未动）：150 条约 1s 喂完，
-            d.learn(f"并发喂食记录第{i}条，内容足够长避免过滤。{i}", source="test")
-            fed["n"] += 1                     # 测量窗口可能落在喂尽之后 → fed_during 恒 0
-            i += 1
-            time.sleep(0.003)
+        def feeder():
+            i = 0
+            while not stop.is_set() and i < 600:  # 修复既有竞态（断言未动）：150 条约 1s 喂完，
+                d.learn(f"并发喂食记录第{i}条，内容足够长避免过滤。{i}", source="test")
+                fed["n"] += 1                     # 测量窗口可能落在喂尽之后 → fed_during 恒 0
+                i += 1
+                time.sleep(0.003)
 
-    th = threading.Thread(target=feeder)
-    th.start()
-    deadline = time.time() + 30
-    # 启动期小周期：阈值 4.0 < 随机 NLL，训练线程上线即睡一次（值自成的正常表现）
-    while trainer.cycles < 1 and time.time() < deadline:
-        time.sleep(0.005)
-    while fed["n"] < 120 and time.time() < deadline:  # 等缓冲真有存量再测量（原注释声明的意图）：
-        time.sleep(0.005)                             # 存量足够 → 被测周期必然真训练而非"样本过短"瞬回
-    n_before = fed["n"]
-    c0 = trainer.cycles
-    trainer.request_sleep()              # 触发被测量的周期（此时缓冲已有真实存量）
-    deadline = time.time() + 30
-    while trainer.cycles <= c0 and time.time() < deadline:  # 等"在 request_sleep 之后完成"的周期：
-        time.sleep(0.005)                                 # 启动期周期可能已把 cycles 推过 2（旧竞态）
-    fed_during = fed["n"] - n_before     # 周期进行中部署线程的喂入量 = 不停机证据
-    stop.set()
-    trainer.shutdown()
-    th.join()
-    trainer.join(timeout=10)
-    check("双线程并发喂入不阻塞", fed_during > 0, f"训练周期内喂入 {fed_during} 条")
-    check("睡眠周期完整收尾", trainer.cycles >= 2, f"cycles={trainer.cycles}")
+        th = threading.Thread(target=feeder)
+        th.start()
+        deadline = time.time() + 30
+        # 启动期小周期：阈值 4.0 < 随机 NLL，训练线程上线即睡一次（值自成的正常表现）
+        while trainer.cycles < 1 and time.time() < deadline:
+            time.sleep(0.005)
+        while fed["n"] < 120 and time.time() < deadline:  # 等缓冲真有存量再测量（原注释声明的意图）：
+            time.sleep(0.005)                             # 存量足够 → 被测周期必然真训练而非"样本过短"瞬回
+        n_before = fed["n"]
+        c0 = trainer.cycles
+        trainer.request_sleep()              # 触发被测量的周期（此时缓冲已有真实存量）
+        deadline = time.time() + 30
+        while trainer.cycles <= c0 and time.time() < deadline:  # 等"在 request_sleep 之后完成"的周期：
+            time.sleep(0.005)                                 # 启动期周期可能已把 cycles 推过 2（旧竞态）
+        fed_during = fed["n"] - n_before     # 周期进行中部署线程的喂入量 = 不停机证据
+        stop.set()
+        trainer.shutdown()
+        th.join()
+        trainer.join(timeout=10)
+        check("双线程并发喂入不阻塞", fed_during > 0, f"训练周期内喂入 {fed_during} 条")
+        check("睡眠周期完整收尾", trainer.cycles >= 2, f"cycles={trainer.cycles}")
 
 
 # ==================== 2026-10-03 G1/G2 骨头施工新增（自成长完备性审计实锤回归） ====================
@@ -317,14 +403,14 @@ def t_g1_no_suicide():
 
 def t_g1_dream_feed():
     """G1-c：喂食模式做梦采样注入发生，hits 由做梦供血（复活通道不再死亡）。"""
-    import shutil
     from dolphin.memory import MemoryStore
     from feed import trainer_cycle
-    tmp = tempfile.mkdtemp(prefix="dolphin_g1c_")
-    try:
+    # 冷层落盘与探测集都隔离到临时目录：吃生产默认 probes/probe.txt 会让
+    # 探测集一挪走就G8 fail-fast 拒绝开睡，做梦注入照常但断言全灭。
+    with _probe_fixture("dolphin_g1c_") as probe:
         d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    device="cpu")
-        d.memory = MemoryStore(cold_path=os.path.join(tmp, "c.jsonl"))  # 落盘隔离到临时目录
+                    probe_path=probe, device="cpu")
+        d.memory = MemoryStore(cold_path=os.path.join(os.path.dirname(probe), "c.jsonl"))
         cue = "做梦联想线索条目：海豚用回声定位寻找沙丁鱼群，记忆库旧事。"
         d.memory.add(cue.encode(), 3.0, 0, "residue")
         d.learn(f"喂食记录携带与旧事重叠的联想线索：{cue}", source="test")
@@ -335,27 +421,101 @@ def t_g1_dream_feed():
         check("G1-c 做梦计入检索命中（复活供血）",
               d.memory.entries[0].hits == hits0 + 1,
               f"hits {hits0}→{d.memory.entries[0].hits}")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _write_synthetic_volume(path, n_bytes):
+    """写一份指定字节数的合成卷（不必是block_size 整数倍——用于验证尾块路径）。"""
+    body = (_PROBE_SEG * (n_bytes // len(_PROBE_SEG) + 1))[:n_bytes]
+    with open(path, "wb") as f:
+        f.write(body)
+    return path
 
 
 def t_g2_full_coverage():
-    """G2-a：体检全卷覆盖——10.1% 缺陷（max_chunks=48 截断 + 50% 重叠）回归。"""
+    """G2-a：体检全卷覆盖——10.1% 缺陷（max_chunks=48 截断 + 50% 重叠）回归。
+
+    历史缺陷（对齐 dolphin/probe.py 模块注释）：旧实现 load_chunks 只取前
+    max_chunks=48 块且相邻块 50% 重叠，在 61.9KB 生产卷上实际只体检了 10.1%
+    的字节——四分之九十的卷面从未参与评分，门控在自欺。现实现为全卷不重叠切分，
+    覆盖率恒等式 sum(len(c)) == 文件总字节 是结构性回归点。
+
+    分三层（断言只增不减）：
+      ① 合成小卷验切分算法性质（含非整倍尾块）——与生产卷内容无关，纯算法。
+      ② 合成大卷验规模——必须造到 242 块（≈生产卷 61.9KB 同量级），
+         否则 len(chunks) > 48 这条防回归断言在小卷上恒真、等于白写：
+         48 块截断缺陷只有在卷面远大于 48*256 字节时才会显形。
+      ③ 生产探测集只读守卫——在场时核对真实卷的切分性质与规模；不在场则跳过，
+         绝不崩掉、绝不写入（律 L8：探测集是生产资产，G7 另有 sha256 校验）。
+    """
     from dolphin.probe import evaluate, load_chunks
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(root, "probes", "probe.txt")
-    total = os.path.getsize(path)
-    chunks = load_chunks(path, 256)
-    check("G2-a 覆盖字节 == 全卷字节", sum(len(c) for c in chunks) == total,
-          f"{sum(len(c) for c in chunks)}/{total}")
-    check("G2-a 块数=不重叠切分（旧缺陷仅 48 块）",
-          len(chunks) == (total - 1 + 255) // 256 and len(chunks) > 48,
-          f"{len(chunks)} 块")
-    check("G2-a 尾块保留且可评分（≥2 字节）", all(len(c) >= 2 for c in chunks))
-    cfg = Config(d_model=32, n_layers=1, n_heads=2, block_size=256)
-    mean, per, n = evaluate(ByteTransformer(cfg), chunks[:3], "cpu")
-    check("G2-a evaluate 返回 (mean, per_chunk, n)",
-          isinstance(per, list) and len(per) == n == 3 and abs(mean - sum(per) / 3) < 1e-9)
+
+    # ① 合成小卷：1317B = 5*256 + 37 → 6 块，尾块 37 字节（非整倍，逼出尾块路径）
+    with _probe_fixture("dolphin_g2a_small_") as small:
+        _write_synthetic_volume(small, 1317)
+        total_s = os.path.getsize(small)
+        cs = load_chunks(small, 256)
+        check("G2-a 合成小卷 覆盖字节 == 全卷字节",
+              sum(len(c) for c in cs) == total_s,
+              f"{sum(len(c) for c in cs)}/{total_s}")
+        check("G2-a 合成小卷 块数=不重叠切分",
+              len(cs) == (total_s - 1 + 255) // 256 == 6,
+              f"{len(cs)} 块（{total_s}B）")
+        check("G2-a 合成小卷 尾块保留且可评分（≥2 字节）",
+              all(len(c) >= 2 for c in cs) and len(cs[-1]) == 37,
+              f"尾块 {len(cs[-1])}B")
+        # 无重叠无截断的最强形式：按顺序拼回原卷逐字节相等
+        # （50% 重叠的旧实现会让拼接结果长度虚增、字节错位）
+        raw_s = open(small, "rb").read()
+        check("G2-a 合成小卷 拼接还原 == 原卷（无重叠无错位）",
+              b"".join(cs) == raw_s,
+              f"拼回 {len(b''.join(cs))}B vs 原卷 {len(raw_s)}B")
+
+    # ② 合成大卷：242 块 ≈ 61.9KB，与生产卷同量级——48 块截断缺陷的照妖镜
+    with _probe_fixture("dolphin_g2a_big_") as big:
+        _write_synthetic_probe(big, 242)
+        total_b = os.path.getsize(big)
+        cb = load_chunks(big, 256)
+        check("G2-a 合成大卷 覆盖字节 == 全卷字节（旧缺陷仅 10.1%）",
+              sum(len(c) for c in cb) == total_b,
+              f"{sum(len(c) for c in cb)}/{total_b}（100%）")
+        check("G2-a 合成大卷 块数=不重叠切分（旧缺陷仅 48 块）",
+              len(cb) == (total_b - 1 + 255) // 256 and len(cb) > 48,
+              f"{len(cb)} 块 / {total_b}B")
+        check("G2-a 合成大卷 每块皆满块（无截断无重叠）",
+              all(len(c) == 256 for c in cb), f"全 {len(cb)} 块均 256B")
+
+    # evaluate 契约：返回 (mean, per_chunk, n)，且 mean == per 均值（合成小卷驱动）
+    with _probe_fixture("dolphin_g2a_eval_") as ev:
+        _write_synthetic_volume(ev, 1317)
+        ce = load_chunks(ev, 256)
+        cfg = Config(d_model=32, n_layers=1, n_heads=2, block_size=256)
+        mean, per, n = evaluate(ByteTransformer(cfg), ce[:3], "cpu")
+        check("G2-a evaluate 返回 (mean, per_chunk, n)",
+              isinstance(per, list) and len(per) == n == 3
+              and abs(mean - sum(per) / 3) < 1e-9)
+        mean_all, per_all, n_all = evaluate(ByteTransformer(cfg), ce, "cpu")
+        check("G2-a evaluate 全卷块数自洽（尾块也进评分）",
+              n_all == len(ce) and len(per_all) == n_all
+              and abs(mean_all - sum(per_all) / n_all) < 1e-9,
+              f"n={n_all}/{len(ce)} 块")
+
+    # ③ 生产探测集只读守卫：存在则核对真实卷，不存在则跳过（不崩、不写）
+    prod = os.path.join(root, "probes", "probe.txt")
+    if os.path.exists(prod):
+        total_p = os.path.getsize(prod)
+        cp = load_chunks(prod, 256)  # 只读
+        check("G2-a 生产探测集 覆盖字节 == 全卷字节",
+              sum(len(c) for c in cp) == total_p,
+              f"{sum(len(c) for c in cp)}/{total_p}")
+        check("G2-a 生产探测集 块数=不重叠切分且 >48（242 块）",
+              len(cp) == (total_p - 1 + 255) // 256 and len(cp) > 48,
+              f"{len(cp)} 块 / {total_p}B")
+        check("G2-a 生产探测集 尾块保留且可评分（≥2 字节）",
+              all(len(c) >= 2 for c in cp), f"尾块 {len(cp[-1])}B")
+    else:
+        check("G2-a 生产探测集守卫（缺失则跳过，只读不写）", True,
+              f"{prod} 不在场", skip=True)
 
 
 def t_g2_gate_margin():
@@ -524,31 +684,32 @@ def t_g3_feed_cursor():
         src_a = [mk(i) for i in range(4)]
         src_b = [mk(10 + i) for i in range(3)]
         feed_mod.iter_source = lambda name: iter(src_a if name == "fakeA" else src_b)
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    device="cpu")
-        names = ["fakeA", "fakeB"]
-        cursor = {"sources": list(names), "source_idx": 0, "record_idx": 0}
-        d.feed_cursor = cursor
-        fed, hit, _ = feed_from(d, names, cursor, {})
-        check("G3-b 全量喂入且游标推进到尽头", fed == 7 and hit is False
-              and cursor == {"sources": names, "source_idx": 2, "record_idx": 0},
-              f"fed={fed} cursor={cursor}")
-        path = os.path.join(tempfile.gettempdir(), "dolphin_g3b_state.pt")
-        d.save(path)
-        d2 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                     device="cpu")
-        d2.load(path)
-        os.remove(path)
-        check("G3-b 游标随档存读一致", d2.feed_cursor == cursor, f"{d2.feed_cursor}")
-        # 续喂：游标 (0,2) → 跳过 fakeA 前两条
-        d3 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                     device="cpu")
-        cursor3 = {"sources": list(names), "source_idx": 0, "record_idx": 2}
-        d3.feed_cursor = cursor3
-        fed3, _, _ = feed_from(d3, names, cursor3, {})
-        first = d3.buffer.items[0].data.decode("utf-8", errors="replace")
-        check("G3-b 续喂从游标起（跳过已吃记录）",
-              fed3 == 2 + 3 and first == feed_mod.serialize(src_a[2]), f"fed3={fed3}")
+        with _probe_fixture("dolphin_g3b_") as probe:
+            d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                        probe_path=probe, device="cpu")
+            names = ["fakeA", "fakeB"]
+            cursor = {"sources": list(names), "source_idx": 0, "record_idx": 0}
+            d.feed_cursor = cursor
+            fed, hit, _ = feed_from(d, names, cursor, {})
+            check("G3-b 全量喂入且游标推进到尽头", fed == 7 and hit is False
+                  and cursor == {"sources": names, "source_idx": 2, "record_idx": 0},
+                  f"fed={fed} cursor={cursor}")
+            path = os.path.join(tempfile.gettempdir(), "dolphin_g3b_state.pt")
+            d.save(path)
+            d2 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
+            d2.load(path)
+            os.remove(path)
+            check("G3-b 游标随档存读一致", d2.feed_cursor == cursor, f"{d2.feed_cursor}")
+            # 续喂：游标 (0,2) → 跳过 fakeA 前两条
+            d3 = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
+            cursor3 = {"sources": list(names), "source_idx": 0, "record_idx": 2}
+            d3.feed_cursor = cursor3
+            fed3, _, _ = feed_from(d3, names, cursor3, {})
+            first = d3.buffer.items[0].data.decode("utf-8", errors="replace")
+            check("G3-b 续喂从游标起（跳过已吃记录）",
+                  fed3 == 2 + 3 and first == feed_mod.serialize(src_a[2]), f"fed3={fed3}")
     finally:
         feed_mod.iter_source = orig_iter
 
@@ -562,20 +723,21 @@ def t_g3_structural_reward():
         rec = {"prompt": "重复条目压分验证题干，一字不差地出现三次以检验结构信号。",
                "answer": "标准答案内容同样保持一字不差。", "source": "fake"}
         feed_mod.iter_source = lambda name: iter([rec, dict(rec), dict(rec)])
-        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                    device="cpu")
-        names = ["dup"]
-        cursor = {"sources": names, "source_idx": 0, "record_idx": 0}
-        fed, _, _ = feed_from(d, names, cursor, {})
-        rewards = [e.reward for e in d.buffer.items]
-        check("G3-c 结构信号：首现零、重复递减", fed == 3 and rewards == [0.0, -1.0, -2.0],
-              f"{rewards}")
-        sel, _ = d.buffer.select(1.0)  # 预算拉满：三条全部入榜
-        head = max(s for s, e in sel if e.reward == 0.0)
-        dup_scores = sorted((s for s, e in sel if e.reward < 0), reverse=True)
-        check("G3-c 重复条目被负奖励压到原件之后",
-              len(dup_scores) >= 2 and dup_scores[-1] < head,
-              f"重复条目分数 {dup_scores} vs 原件 {head:.4f}")
+        with _probe_fixture("dolphin_g3c_") as probe:
+            d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                        probe_path=probe, device="cpu")
+            names = ["dup"]
+            cursor = {"sources": names, "source_idx": 0, "record_idx": 0}
+            fed, _, _ = feed_from(d, names, cursor, {})
+            rewards = [e.reward for e in d.buffer.items]
+            check("G3-c 结构信号：首现零、重复递减", fed == 3 and rewards == [0.0, -1.0, -2.0],
+                  f"{rewards}")
+            sel, _ = d.buffer.select(1.0)  # 预算拉满：三条全部入榜
+            head = max(s for s, e in sel if e.reward == 0.0)
+            dup_scores = sorted((s for s, e in sel if e.reward < 0), reverse=True)
+            check("G3-c 重复条目被负奖励压到原件之后",
+                  len(dup_scores) >= 2 and dup_scores[-1] < head,
+                  f"重复条目分数 {dup_scores} vs 原件 {head:.4f}")
     finally:
         feed_mod.iter_source = orig_iter
 
@@ -769,25 +931,26 @@ def t_g9_threshold_clamp():
     check("G9 clamp 单元：上界/下界/恒等",
           clamp_threshold(1e12) == 50.0 and clamp_threshold(-3.0) == 1.0
           and clamp_threshold(7.5) == 7.5)
-    d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
-                device="cpu")
-    d.buffer.sleep_threshold = 1e12
-    d._since_sleep = d.target_interval * 3  # 睡得太稀 → 降
-    _threshold_feedback(d)
-    check("G9 喂食反馈路径：天文数字压回上界", d.buffer.sleep_threshold == 50.0,
-          f"{d.buffer.sleep_threshold}")
-    d.buffer.sleep_threshold = 1e-9
-    d._since_sleep = 0  # 睡得太勤 → 抬
-    _threshold_feedback(d)
-    check("G9 喂食反馈路径：趋零抬回下界", d.buffer.sleep_threshold == 1.0,
-          f"{d.buffer.sleep_threshold}")
-    for i in range(12):
-        d.learn(f"阈值钳位验证记录第{i}条，内容足够长以稳定通过选拔训练。{i}", source="test")
-    d.buffer.sleep_threshold = 1e12
-    d._since_sleep = d.target_interval * 3
-    d.maybe_sleep(force=True, steps=2)
-    check("G9 maybe_sleep 路径同样钳位",
-          1.0 <= d.buffer.sleep_threshold <= 50.0, f"{d.buffer.sleep_threshold}")
+    with _probe_fixture("dolphin_g9_") as probe:
+        d = Dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                    probe_path=probe, device="cpu")
+        d.buffer.sleep_threshold = 1e12
+        d._since_sleep = d.target_interval * 3  # 睡得太稀 → 降
+        _threshold_feedback(d)
+        check("G9 喂食反馈路径：天文数字压回上界", d.buffer.sleep_threshold == 50.0,
+              f"{d.buffer.sleep_threshold}")
+        d.buffer.sleep_threshold = 1e-9
+        d._since_sleep = 0  # 睡得太勤 → 抬
+        _threshold_feedback(d)
+        check("G9 喂食反馈路径：趋零抬回下界", d.buffer.sleep_threshold == 1.0,
+              f"{d.buffer.sleep_threshold}")
+        for i in range(12):
+            d.learn(f"阈值钳位验证记录第{i}条，内容足够长以稳定通过选拔训练。{i}", source="test")
+        d.buffer.sleep_threshold = 1e12
+        d._since_sleep = d.target_interval * 3
+        d.maybe_sleep(force=True, steps=2)
+        check("G9 maybe_sleep 路径同样钳位",
+              1.0 <= d.buffer.sleep_threshold <= 50.0, f"{d.buffer.sleep_threshold}")
 
 
 if __name__ == "__main__":
@@ -819,5 +982,7 @@ if __name__ == "__main__":
     t_g8_gate_failfast()
     t_g9_threshold_clamp()
     n_ok = sum(PASS)
+    if SKIP:
+        print(f"（跳过 {len(SKIP)} 项：{'; '.join(SKIP)}）")
     print(f"\n== 结论：{n_ok}/{len(PASS)} 绿 ==")
     sys.exit(0 if n_ok == len(PASS) else 1)
