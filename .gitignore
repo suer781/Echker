@@ -1,0 +1,32 @@
+# ---- 权重与存档：二进制大文件，且可由代码重建（birth.pt = 随机初始化的出生体重现）----
+dolphin/*.pt
+dolphin/archive/
+*.bak
+
+# ---- 运行时状态与落盘记忆库：每次跑都变，不构成"源码基线" ----
+dolphin/memory_cold.jsonl
+
+# ---- 探测卷轮转池：真实候选流由滚动机制产生，属运行时产物 ----
+probes/probe_pool/
+probes/retired/
+
+# ---- 语料软链：datasets -> /o/数据集（2.36GB 用户自备语料，不入库）----
+datasets
+
+# ---- AI 工具链自身的运行日志（hook/会话历史/任务复盘），非项目源码 ----
+.mimosa/
+
+# ---- Python 缓存 ----
+__pycache__/
+*.pyc
+
+# ---- IDE / 编辑器 ----
+.vscode/
+.idea/
+
+# ---- 实验记录归档目录下的临时锁/临时文件 ----
+*.tmp
+*.log.tmp
+
+# 注意：probes/probe.txt（体检探测集，律 L8）**必须入库**——
+# 它是门控语义的一部分，且G7 校验其 sha256；不入库则基线无法复现"声明 vs 代码"。
