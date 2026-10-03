@@ -2,9 +2,12 @@
 dolphin/*.pt
 dolphin/archive/
 *.bak
+dolphin/*.bak_*
 
-# ---- 运行时状态与落盘记忆库：每次跑都变，不构成"源码基线" ----
-dolphin/memory_cold.jsonl
+# ---- 运行时状态：每次跑都变，不构成"源码基线" ----
+# 注意：dolphin/memory_cold.jsonl（冷层记忆库）**已改为入库**——
+# 它曾是生产资产却不受版本控制，2026-10-04 一次测试死循环把它撑到 16316 行
+# 且无法 git checkout 恢复。现已去重至 153 行入库，作为可回滚基线。
 
 # ---- 探测卷轮转池：真实候选流由滚动机制产生，属运行时产物 ----
 probes/probe_pool/
