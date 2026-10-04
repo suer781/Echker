@@ -1,0 +1,112 @@
+{
+ "torch": "2.6.0+cu118",
+ "cuda": "11.8",
+ "gpu": "NVIDIA GeForce GTX 1060 3GB",
+ "cfg": {
+  "d_model": 768,
+  "n_layers": 8,
+  "n_heads": 8,
+  "block_size": 256
+ },
+ "lr": 5e-05,
+ "wd": 0.01,
+ "kd_alpha": 0.5,
+ "kd_T": 2.0,
+ "cycle_steps": 120,
+ "probe_sha256": "48dd1459e7ce218439917657ae8cb9304ac5b871f58c55e9e14a7d575763048c",
+ "slice": 1,
+ "records": [
+  66,
+  132
+ ],
+ "stream_bytes": 45639,
+ "init_seed": 2024,
+ "seeds": [
+  11,
+  22,
+  33
+ ],
+ "steps": 120,
+ "mean_pre": 5.692134565558315,
+ "runs": [
+  {
+   "seed": 11,
+   "mean_post": 5.641357002179484,
+   "mean_d": 0.050778,
+   "eps": 0.005614,
+   "se_paired": 0.002807,
+   "passed": true,
+   "se_bootstrap_paired": 0.002879644711764109,
+   "p_boot_flip_le0": 0.0,
+   "p_boot_flip_le_eps": 0.0,
+   "se_unpaired": 0.005040107178463963,
+   "corr_pre_post": 0.6908037878865713,
+   "mean_d_pct_of_mean": 0.8920730775980771,
+   "se_pct_of_mean": 0.04931366199570291,
+   "ce_first_last": null
+  },
+  {
+   "seed": 22,
+   "mean_post": 5.598114384107353,
+   "mean_d": 0.09402,
+   "eps": 0.004335,
+   "se_paired": 0.002167,
+   "passed": true,
+   "se_bootstrap_paired": 0.0021289587211160105,
+   "p_boot_flip_le0": 0.0,
+   "p_boot_flip_le_eps": 0.0,
+   "se_unpaired": 0.004815721957666699,
+   "corr_pre_post": 0.8071762588288852,
+   "mean_d_pct_of_mean": 1.6517529393786918,
+   "se_pct_of_mean": 0.0380700767882751,
+   "ce_first_last": null
+  },
+  {
+   "seed": 33,
+   "mean_post": 5.607144505524438,
+   "mean_d": 0.08499,
+   "eps": 0.005238,
+   "se_paired": 0.002619,
+   "passed": true,
+   "se_bootstrap_paired": 0.002723884336254008,
+   "p_boot_flip_le0": 0.0,
+   "p_boot_flip_le_eps": 0.0,
+   "se_unpaired": 0.005044998152982915,
+   "corr_pre_post": 0.7315360262919645,
+   "mean_d_pct_of_mean": 1.49311297934264,
+   "se_pct_of_mean": 0.04601085884102099,
+   "ce_first_last": null
+  }
+ ],
+ "cross_seed": [
+  {
+   "seeds": [
+    11,
+    22
+   ],
+   "mean_diff": 0.04324261807213145,
+   "se_paired": 0.00199831526024679,
+   "max_abs_chunk_diff": 0.13390779495239258
+  },
+  {
+   "seeds": [
+    11,
+    33
+   ],
+   "mean_diff": 0.03421249665504645,
+   "se_paired": 0.0019860433176279494,
+   "max_abs_chunk_diff": 0.13754034042358398
+  },
+  {
+   "seeds": [
+    22,
+    33
+   ],
+   "mean_diff": -0.009030121417085,
+   "se_paired": 0.002247085174787089,
+   "max_abs_chunk_diff": 0.1208343505859375
+  }
+ ],
+ "peak_mem_mb": 1333.21337890625,
+ "elapsed_s": 57.92841553688049
+}

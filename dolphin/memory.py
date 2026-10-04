@@ -192,9 +192,9 @@ class MemoryStore:
         G1：冷层同样参与——冷层条目命中达标则升回热层（跨周期复活的完整闭环）。
         2026-10-04 修复两处：
         - 先 _ensure_cold()：与 retrieve()/dream() 一致。部署喂食路径
-          （feed.py --resume → trainer_cycle）只调 resurrect()、不调 serve()/retrieve()，
-          缺这一步则新进程冷层为空，上一进程逐出的知识重启后完全不可见，
-          违反 L9「可检索可复活」= 静默丢弃。
+          （feed.py --resume → life.run_cycle(feeding=True)）只调 resurrect()、
+          不调 serve()/retrieve()，缺这一步则新进程冷层为空，上一进程逐出的知识
+          重启后完全不可见，违反 L9「可检索可复活」= 静默丢弃。
         - 遍历副本：原来边遍历 cold_entries 边 remove()，索引左移导致隔一条漏一条，
           间隔重复通道吞吐减半、且残留条目 hits 已达标却未被消费（状态不一致）。
         锁：全程不持 _cold_lock——_ensure_cold() 内部自行取放，且下方 _evict()→_demote()

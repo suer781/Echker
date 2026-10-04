@@ -33,3 +33,6 @@ __pycache__/
 
 # 注意：probes/probe.txt（体检探测集，律 L8）**必须入库**——
 # 它是门控语义的一部分，且G7 校验其 sha256；不入库则基线无法复现"声明 vs 代码"。
+# ---- Q6 定标原始测量数据：exp1_data.npz 由 calibrate_q6.py 可重建（121MB），
+# 按项目惯例（可重建二进制不入库，同 dolphin/*.pt）忽略；定标报告/结果 JSON/脚本入库 ----
+定标/exp1_data.npz

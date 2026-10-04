@@ -18,6 +18,7 @@ import torch
 
 from .adapt import Plasticity
 from .experience import Experience, ExperienceBuffer
+from .life import LifeController
 from .memory import MemoryEntry, MemoryStore
 from .model import ByteTransformer, Config
 from .probe import evaluate as probe_eval
@@ -32,7 +33,8 @@ THRESHOLD_HI = 50.0
 
 def clamp_threshold(v):
     """G9：睡眠压力阈值域钳位——全部阈值修改点统一走此函数（maybe_sleep 与
-    feed._threshold_feedback，不许出现第三份乘法实现）。"""
+    life._threshold_feedback（喂食路径阈值反馈，现居 dolphin/life.py），不许出现
+    第三份乘法实现）。"""
     return max(THRESHOLD_LO, min(THRESHOLD_HI, float(v)))
 
 
@@ -96,6 +98,11 @@ class Dolphin:
         # 由 feed.py 全权维护，本类只做透传存取（职责分离）。
         self.learn_total = 0
         self.feed_cursor = None
+        # M4 生命节律（律 L11）：自生长/自凋零控制器 + 人工总开关安全阀。
+        # life_enabled=False 时 life.run_cycle 的全部 M4 钩子失效（纯 M0 语义）；
+        # 人工只保留这个总开关，禁止干预手术的时机/位置/幅度（律 L11）。
+        self.life_ctl = LifeController()
+        self.life_enabled = True
 
     def awake(self):
         return self.h[self.awake_idx]
@@ -112,7 +119,7 @@ class Dolphin:
     def gate(self, old_hem, new_hem):
         """律 L8 体检判决：全卷逐块评分 + 配对 margin 判决带。
 
-        唯一实现在此——sleep.run_cycle 与 feed.trainer_cycle 都调用本方法，
+        唯一实现在此——life.run_cycle（sleep.run_cycle 的 M4 继任者）调用本方法，
         判决逻辑（probe.gate_decision）与双模型评分编排零复制，两份
         训练路径的实现自此无从漂移（M4 评审警告消解）。
         返回 (passed, detail)；detail 直接并入睡眠报告。
@@ -124,8 +131,8 @@ class Dolphin:
     # ---------- 体检门控就绪检查（G8 护航骨） ----------
 
     def ensure_gate_ready(self):
-        """G8 fail-fast：开睡前必须通过的门控就绪检查（sleep.run_cycle 与
-        feed.trainer_cycle 共用同一入口，无从漂移）。
+        """G8 fail-fast：开睡前必须通过的门控就绪检查（life.run_cycle 的唯一
+        共用入口，无从漂移）。
 
         - 探测集就绪 → 放行（若此前曾缺失则自动重新加载并解除警报，自愈）；
         - 缺失/为空 → 醒目报警（stderr）、gate_disabled=True、抛 GateDisabled。
@@ -207,17 +214,17 @@ class Dolphin:
     # ---------- 睡眠触发（值自成：压力阈值 + 间隔反馈） ----------
 
     def maybe_sleep(self, force=False, **kw):
-        """单线程睡眠路径（M0 兼容）。
+        """单线程睡眠路径（M0 兼容）。M4 起派发到 life.run_cycle（唯一睡眠周期
+        实现；sleep.py 冻结为历史件，M0 等价性由 tests 钉死）。
 
         注意：与其他线程的 learn/serve 并发使用不安全（本方法不走 feed_lock
-        快照流程）——双线程部署请走 feed.py 的 SleepTrainer；M4 将由 life.py
-        的统一实现取代本方法与 trainer_cycle。
+        快照流程）——双线程部署请走 feed.py 的 SleepTrainer。
         """
         p = self.buffer.pressure()
         overflow = self.buffer.bytes > self.buffer.cap * 0.9
         if not (force or p >= self.buffer.sleep_threshold or overflow):
             return None
-        from .sleep import run_cycle
+        from .life import run_cycle
         report = run_cycle(self, **kw)
         if self._since_sleep < self.target_interval // 2:
             # 值自成：睡眠频率反馈（G9：乘法结果必须过 clamp_threshold 域钳位）
@@ -293,6 +300,10 @@ class Dolphin:
                 "probe_sha256": self.probe_sha256(),  # G7：体检卷面指纹，load 时校验
                 # G3 自续骨：喂食游标透传（语义与推进全权归 feed.py，本类只存取）
                 "feed_cursor": self.feed_cursor,
+                # M4（律 L11）：生命节律状态随档——历史最优 probe 锚（规格 C）、
+                # 状态机、双半球形态（手术后模型可跨重启复原）、营养因子账本。
+                # 战役进行中时 campaign 里含权重快照（体积翻倍仅限战役期）。
+                "life": self.life_ctl.to_state(),
             }
         # G7 原子写：先写同目录临时文件再 os.replace——任何瞬间断电，目标文件
         # 要么是旧版要么是新版，绝不出现写了一半的存档。
@@ -322,10 +333,23 @@ class Dolphin:
                 f"当前={self.probe_sha256()}（{self.probe_path}）。\n"
                 f"probe.txt 已被替换或损坏——门控语义完整性优先于可用性，拒绝加载。")
         self.cfg = Config(**ck["cfg"])
+        # M4：先恢复生命节律状态（形态记录是重建半球模型的前提——手术后模型
+        # 结构与 base cfg 不同，须按形态重放移植体/平铺，再装入权重）。
+        if ck.get("life"):
+            self.life_ctl.from_state(ck["life"])
+        from .surgery import apply_morphology
         lrs = ck.get("lrs", [h.opt.param_groups[0]["lr"] for h in self.h])
         for i, h in enumerate(self.h):
-            m = ByteTransformer(self.cfg).to(self.device)
-            m.load_state_dict(ck["states"][i])
+            morph = self.life_ctl.morphology.get(h.name) or {}
+            k = int(morph.get("d_model_k", 1) or 1)
+            # shrink（born-again 学生体型）也走形态重建——否则学生脑 load 按基座
+            # cfg 重建 → state_dict 形状不匹配崩溃。
+            if k > 1 or morph.get("mlp") or morph.get("attn_v") or morph.get("shrink"):
+                m, _ = apply_morphology(self.cfg, morph, self.device)
+                m.load_state_dict(ck["states"][i])
+            else:
+                m = ByteTransformer(self.cfg).to(self.device)
+                m.load_state_dict(ck["states"][i])
             h.model = m
             h.opt = torch.optim.AdamW(m.parameters(), lr=lrs[i], weight_decay=0.01)
             if "opt_states" in ck:  # v2 存档：动量一并恢复，续喂不再是热重启

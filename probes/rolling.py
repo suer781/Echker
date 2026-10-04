@@ -3,13 +3,13 @@
 问题：换卷原先必须人工重跑 build_logic_probe.py——体检卷终身制，
 模型长期成长后旧卷会失去分辨力，而人工换卷在自学习循环里等于不存在。
 
-机制（本轮只落地机制与接口，真实候选流接入留给下一棒）：
+机制（2026-10-04 起候选流已接通，供给侧见 probes/candidates.py）：
 - probes/probe_pool/  候选目录：从未进过卷面的题面按文件序排队等待转正；
 - 当前卷 = probes/probe.txt（门控正在批改的卷子）；
 - rotate()：把候选流的一小节转正入卷，同时把卷内最旧一段退休到
   probes/retired/——退休段可回流训练粮：卷子永不训练，但卷池内部滚动，
   L8"探测集永不训练"不破（一段内容要么在卷上、要么在粮里，从不同时）。
-- 指针 pool_pointer.json 记录候选流消费进度（文件序号/字节偏移）与退休序号，
+- 指针 pool_pointer.json 记录候选流消费进度（文件名/字节偏移）与退休序号，
   rotate 跨重启可续，候选绝不重复进场。
 
 安全栏：
@@ -18,16 +18,20 @@
 - 换卷先写临时文件再 os.replace，崩溃不会留下半截卷面；
 - 所有切段位置回退到 UTF-8 字符边界，多字节字符零割裂。
 
-候选内容与训练粮的重叠抽查（L8 硬性要求）属于候选流入池时的质检，
-沿用 build_logic_probe.py 的 overlap_check，不在本模块职责内。
+候选内容与训练粮/当前卷的重叠抽查（L8 硬性要求 + 入池质检）属于候选流入
+池时的质检，由 probes/candidates.py 在入池时强制调用公共引擎 probes/qc.py
+完成，不在本模块职责内。
 
 用法：
-  python probes/rolling.py --status    # 查看卷面/池/退休档现状
+  python probes/rolling.py --status    # 查看卷面/池/退休档/候选源现状
   python probes/rolling.py --rotate    # 手动滚动一次
 """
 import argparse
 import json
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROBE_PATH = os.path.join(ROOT, "probes", "probe.txt")
@@ -230,8 +234,24 @@ def status(probe_path=None, pool_dir=None, retired_dir=None, section_bytes=8192)
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="试卷池自滚动")
     ap.add_argument("--rotate", action="store_true", help="滚动一次（默认只看现状）")
+    ap.add_argument("--status", action="store_true",
+                    help="查看现状（与默认行为相同；补上交接文档承诺的显式旗标）")
     ap.add_argument("--section-kb", type=int, default=8, help="切段大小 KB")
     args = ap.parse_args()
     if args.rotate:
         print(rotate(section_bytes=args.section_kb * 1024))
     print(json.dumps(status(section_bytes=args.section_kb * 1024), ensure_ascii=False, indent=2))
+    # 候选源对账（2026-10-04 接入）：台账累计（入池供给侧的账，candidates.py 维护）。
+    # 缺模块/缺数据盘都不拖垮卷面对账——对账宁可少一节，不可整表崩掉。
+    try:
+        from probes.candidates import ledger_report
+        led = ledger_report()
+        per = {}
+        for run in led["runs"]:
+            for src, cnt in run.get("sources", {}).items():
+                per[src] = per.get(src, 0) + cnt.get("admitted", 0)
+        print("[候选源] 台账：" + json.dumps({
+            "填充次数": led["fills"], "累计入池题干指纹": led["stems_total"],
+            "各来源累计": per}, ensure_ascii=False))
+    except Exception as e:
+        print(f"[候选源] 台账对账不可用（{e!r}）——卷面/池/退休档对账不受影响")

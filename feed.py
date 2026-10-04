@@ -25,9 +25,11 @@ Ctrl+C 与 --max-idle（连续 N 个空选拔周期后允许收工，防真死�
   锁内只有名单级操作（毫秒级），变异重放、梯度训练、体检全部在锁外。
 - dolphin.learn_busy：在途 learn 计数。训练线程动手训练睡脑前等它清零——
   刚换班退休的醒脑可能还有 learn 在读，读静态权重是部署侧的底线（律 L3）。
-- sleep.py 禁改，故 run_cycle 的线程安全版在 feed.py 内复刻（trainer_cycle）。
-  与原版的已声明差异：a) 缓冲交接为摘除式快照（主线程喂入不丢）；b) 带通在
-  快照时取定（原版在周期末重取）；c) 早退/异常路径同样执行阈值反馈与睡脑回滚。
+- M4 取代路线：sleep.py 冻结为历史件，trainer_cycle 已删除——线程安全的睡眠
+  周期由 dolphin.life.run_cycle(feeding=True) 唯一实现（做梦注入、摘除式快照、
+  learn_busy 等待、锁内换班、内部阈值反馈全部在 life.py 内），本文件只剩
+  SleepTrainer 触发循环。与 M0 的已声明差异：a) 缓冲交接为摘除式快照（主线程
+  喂入不丢）；b) 带通在快照时取定；c) 早退/异常路径同样执行阈值反馈与睡脑回滚。
 
 优雅退出：Ctrl+C（或喂到 --limit / --max-idle 收工）→ 通知训练线程 → 当前
 睡眠周期完整收尾（不腰斩梯度更新）→ join → d.save() → 查房总结。
@@ -47,12 +49,12 @@ import threading
 import time
 
 import torch
-import torch.nn.functional as F
 
 from dolphin.datasets import DEFAULT_ORDER, SOURCES, iter_source, serialize
 from dolphin.dolphin import Dolphin, GateDisabled, clamp_threshold
+from dolphin.life import _threshold_feedback  # noqa: F401  兼容再导出（tests G9 用）
+from dolphin.life import run_cycle as life_run_cycle
 from dolphin.model import Config
-from dolphin.sleep import varied_replay  # 纯函数，线程安全，复用不复制
 
 FED_STATE = os.path.join("dolphin", "fed_state.pt")
 PROGRESS_EVERY = 20  # 部署侧进度打印节奏（也用于产出不停机的时间戳证据）
@@ -66,153 +68,6 @@ def log(tag, msg):
     """统一带相对时间戳的行打印（单次持打印锁，防两线程行内交错）。"""
     with _PRINT_LOCK:
         print(f"[+{time.monotonic() - _T0:8.3f}s][{tag}] {msg}", flush=True)
-
-
-# ---------------- 睡眠训练（run_cycle 的线程安全复刻，sleep.py 禁改） ----------------
-
-def _threshold_feedback(d):
-    """值自成：睡眠频率反馈（与 maybe_sleep 语义一致；全部早退/异常路径同样计入）。
-
-    模块级唯一实现：trainer_cycle 内部与 SleepTrainer.run 的异常兜底共用——
-    后者原先调用的是 trainer_cycle 作用域里的闭包，异常路径真到时会 NameError。
-    G9：乘法结果必须过 clamp_threshold 域钳位（与 maybe_sleep 同一公共函数）。
-    """
-    with d.feed_lock:
-        if d._since_sleep < d.target_interval // 2:
-            d.buffer.sleep_threshold = clamp_threshold(d.buffer.sleep_threshold * 1.10)
-        elif d._since_sleep > d.target_interval * 2:
-            d.buffer.sleep_threshold = clamp_threshold(d.buffer.sleep_threshold * 0.90)
-        d._since_sleep = 0
-
-
-def trainer_cycle(d, steps, kd_alpha=0.5, kd_T=2.0):
-    """在睡脑上跑一轮完整睡眠周期。锁内只做快照与换班，计算全在锁外。"""
-    # G8 fail-fast：探测集缺失 → GateDisabled 拒绝开睡（与 sleep.run_cycle 共用
-    # Dolphin.ensure_gate_ready 同一入口，无从漂移）。probe 恢复后自动解禁。
-    d.ensure_gate_ready()
-    lock = d.feed_lock
-    report = {"cycle": d.cycle}
-
-    # ① 锁内快照（毫秒级）：复活 + 做梦 + 选拔 + 摘除。主线程 add 最多排队这一下。
-    with lock:
-        report["candidates"] = len(d.buffer.items)
-        # 带通在摘除前取定（对完整缓冲计算，与 run_cycle 语义一致），复活注入也用它
-        center, width = d.buffer.band()
-        for rb in d.memory.resurrect():
-            d.buffer.add(rb, surprise=center)
-        # 做梦（G1）：按检索分数从记忆库抽样旧事注入缓冲——喂食模式的复活通道
-        # 不再依赖人工对话提供 hits。注入量 ≤ dream_k，防旧知识挤占新经验选拔
-        # 预算（审计 G11）。休眠路径（run_cycle）不做梦：交互模式由 serve 的
-        # 检索天然供血，此不对称是设计决定，非实现漂移。
-        queries = [e.data for e in d.buffer.items[-8:]]
-        dreamed = d.memory.dream(queries, k=d.dream_k)
-        for en in dreamed:
-            d.buffer.add(en.text.encode("utf-8", errors="replace"), surprise=center)
-        report["dreamed"] = len(dreamed)
-        sel, rest = d.buffer.select(d.budget)
-        report["selected"], report["residue"] = len(sel), len(rest)
-        d.buffer.clear()  # 摘除：名单已在本轮处置，缓冲即刻腾空，主线程继续喂数不丢
-
-    # ② L9 周期层：滞留一律降级进记忆库——包括空选拔周期（审计③-1 反例路径）。
-    # 注：此处的 memory.add 在 feed_lock 之外执行；memory 内部对热/冷层列表的
-    # 并发修改已通过"取快照"（见 memory.py retrieve/dream）保证安全，
-    # 但本路径与主线程 serve/retrieve 仍可能有短暂交错——由 memory 内部快照兜底，
-    # 不再依赖"此处无并发访问"的假设（该假设已证明不成立，2026-10-04 修正）。
-    for s, e in rest:
-        d.memory.add(e.data, s, d.cycle, "residue")
-
-    if not sel:
-        d.cycle += 1
-        _threshold_feedback(d)  # 早退路径同样计入睡眠频率统计（审计②-4）
-        report["note"] = "无可训经验（滞留已全部入记忆库）"
-        return report
-
-    # ③ 锁外（计算）：变异重放（L6，纯函数）拼成一条字节流
-    donors = [e.data for _, e in sel]
-    parts = []
-    for i, (_, e) in enumerate(sel):
-        donor = donors[(i + 1) % len(donors)] if len(donors) > 1 else None
-        parts.append(varied_replay(e.data, d.rng, donor))
-    stream = b"\n".join(parts)
-    blk = d.cfg.block_size
-    bt = torch.tensor(list(stream), dtype=torch.long, device=d.device)
-    if bt.numel() < blk + 2:
-        for s, e in sel:  # L9：训不了的选拔经验同样降级记忆库（审计③-1 同族路径）
-            d.memory.add(e.data, s, d.cycle, "residue")
-        d.cycle += 1
-        _threshold_feedback(d)
-        report["note"] = "样本过短"
-        return report
-
-    # ④ 动睡脑前等在途 learn 清零：刚退休的醒脑此刻变睡脑，不能边训边被读（L3）
-    sleeping, awake = d.sleeping(), d.awake()
-    while d.learn_busy > 0:
-        time.sleep(0.001)
-
-    # ⑤ 锁外（计算）：睡脑训练（L5：硬标签 + 蒸馏软标签锚定同一份真实数据）
-    sleeping.model.train()
-    awake.model.eval()
-    opt = sleeping.opt
-    ce_hist, kd_hist = [], []
-    N = bt.numel()
-    for _ in range(steps):
-        s0 = d.rng.randrange(0, N - blk - 1)
-        x = bt[s0:s0 + blk].unsqueeze(0)
-        y = bt[s0 + 1:s0 + blk + 1].unsqueeze(0)
-        with torch.no_grad():
-            t_logits, _ = awake.model(x)
-        s_logits, _ = sleeping.model(x)
-        ce = F.cross_entropy(s_logits.reshape(-1, d.cfg.vocab), y.reshape(-1))
-        p_t = F.softmax(t_logits / kd_T, dim=-1)
-        kd = (kd_T ** 2) * F.kl_div(
-            F.log_softmax(s_logits / kd_T, dim=-1), p_t, reduction="batchmean")
-        loss = (1 - kd_alpha) * ce + kd_alpha * kd
-        opt.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(sleeping.model.parameters(), 1.0)
-        opt.step()
-        ce_hist.append(ce.item())
-        kd_hist.append(kd.item())
-
-    # ⑥ 体检（L8）：全卷逐块评分 + margin 判决带。判决唯一实现在 Dolphin.gate
-    # （→ probe.gate_decision），sleep.run_cycle 调用同一方法——零复制，无从漂移
-    passed, gate = d.gate(awake, sleeping)
-    report.update(gate)
-    report["passed"] = passed
-    report["ce_last"] = round(ce_hist[-1], 4)
-    report["kd_last"] = round(kd_hist[-1], 4)
-
-    # ⑦ 换班/回滚：awake_idx 只在锁内翻（一次赋值），锁绝不覆盖训练计算
-    if passed:
-        with lock:
-            d.swap()
-        report["swapped"] = True
-        # L10 快通道：新醒脑最自信的片段入记忆库（预支）。memory 训练线程独占
-        # 必须显式给 key：并列 NLL 会让元组比较去比 Experience，而它没有 __lt__（律：不可比语义）
-        # 次级键用稳定的 Experience.id，保证并列时顺序确定、可复现（禁止随机）
-        ranked = sorted(
-            ((d.awake().model.mean_nll(e.data, d.device), e) for _, e in sel),
-            key=lambda t: (t[0], t[1].id),
-        )
-        for nll, e in ranked[: d.note_k]:
-            d.memory.add(e.data, nll, d.cycle, "note")
-        d.budget = min(0.60, d.budget * 1.05)  # 值自成：体检连续通过 → 预算放宽
-    else:
-        report["swapped"] = False
-        sleeping.model.load_state_dict(awake.model.state_dict())  # 作废回滚
-        d.budget = max(0.25, d.budget * 0.90)
-
-    # ⑧ 值自成：学习率反馈（Plasticity，带通已在快照时取定）+ 睡眠阈值反馈
-    _threshold_feedback(d)
-    mean_surp = sum(e.surprise for _, e in sel) / len(sel)
-    cur_lr = sleeping.opt.param_groups[0]["lr"]
-    new_lr = d.plasticity.next_lr(cur_lr, mean_surp, center, width, passed)
-    for h in d.h:
-        h.opt.param_groups[0]["lr"] = new_lr
-    report["lr"] = new_lr
-
-    d.cycle += 1
-    return report
 
 
 class SleepTrainer(threading.Thread):
@@ -258,7 +113,9 @@ class SleepTrainer(threading.Thread):
                 f"缓冲 {self.d.buffer.bytes}B  触发={'通知' if triggered else '压力'}")
             t0 = time.monotonic()
             try:
-                report = trainer_cycle(self.d, self.steps)
+                # M4：睡眠周期唯一实现在 dolphin.life.run_cycle（feeding=True =
+                # 原 trainer_cycle 的线程安全语义；trainer_cycle 已删除）
+                report = life_run_cycle(self.d, self.steps, feeding=True)
             except GateDisabled as e:  # G8：探测集缺失，拒绝开睡（fail-fast，非静默回滚）
                 self.busy += time.monotonic() - t0
                 log("训练线程", f"门控不可用，拒绝开睡（部署喂入继续，等 probe 恢复自动解禁）：{e}")

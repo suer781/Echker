@@ -5,8 +5,9 @@
 2026-10-03 G2 施工：
 - 全卷逐块独立评分（旧版 max_chunks=48 + 50% 重叠在 61.9KB 卷面上只批 10.1%）。
 - gate_decision：配对 margin 判决带——亚噪声改善一律拒绝（旧版零 margin
-  掷硬币，实测 40 次放行 19 次）。判决逻辑唯一实现于此，sleep.run_cycle 与
-  feed.trainer_cycle 经 Dolphin.gate 共用，两份复刻实现不再漂移（M4 评审警告）。
+  掷硬币，实测 40 次放行 19 次）。判决逻辑唯一实现于此，life.run_cycle（唯一
+  睡眠周期实现）与 sleep.run_cycle（冻结历史件，M4-E 等价性测试仍用）经
+  Dolphin.gate 共用（feed.trainer_cycle 已随 M4 取代一并删除——监督审计 P1-2）。
 """
 import torch
 

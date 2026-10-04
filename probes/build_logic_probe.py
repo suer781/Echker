@@ -5,24 +5,41 @@
   2. LogiQA-1.0 的 test/eval split（zh_test.txt / zh_eval.txt）
   3. CMATH 的 cmath_test.jsonl
 
-构建前把旧探测集备份为 probe_medical.txt.bak；构建后做重叠抽查：
-随机取 5 个 100 字符片段，在全部训练粮来源中搜索，要求零命中。
+构建前把旧探测集备份为 probe_medical.txt.bak；构建后做重叠抽查
+（probes/qc.py 公共引擎）：对入选题面按 100 字符滑窗全量切片、与全部训练粮
+来源做 n-gram 比对，覆盖率 100%（旧版随机抽 5 片段仅 ≈2.25%，2026-10-04 升级）。
 
 用法：python probes/build_logic_probe.py [--target-kb 60]
 """
 import argparse
 import json
 import os
-import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dolphin.datasets import _iter_jsonl, serialize, iter_source  # noqa: E402
 
+try:  # 重叠抽查公共引擎（candidates.py 与本模块共用，零复制）
+    from probes import qc
+except ImportError:  # 同目录直跑时
+    import qc
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROBE_PATH = os.path.join(ROOT, "probes", "probe.txt")
 BAK_PATH = os.path.join(ROOT, "probes", "probe_medical.txt.bak")
+
+# 重叠抽查的训练粮来源表（与 dolphin.datasets.SOURCES 同一口径；candidates.py 复用）
+TRAIN_SOURCES = ["logiqa", "logiqa2", "cmath", "gsm8k", "distil",
+                 "coig", "synlogic", "metamath", "logiconbench"]
+
+
+def grain_stream(name):
+    """训练粮来源的序列化文本流（重叠抽查用，单遍流式消费，不整仓进内存）。"""
+    for rec in iter_source(name):
+        text = serialize(rec)
+        if text:
+            yield text
 
 DR = "O:/数据集"
 LLMEVAL_BASE = DR + "/02_LLMEval-Logic/LLMEval-Logic-main/bench/base/llmeval_logic_base.json"
@@ -136,42 +153,23 @@ def build_probe(items, target_bytes):
     return "".join(parts), chosen
 
 
-def overlap_check(probe_items, n_frags=5, frag_len=100):
-    """重叠抽查：随机片段在全部训练粮来源中必须零命中（律 L8 硬性要求）。
+def overlap_check(probe_items, frag_len=100):
+    """重叠抽查：全部入选题面 vs 训练粮，零命中才放行（律 L8 硬性要求）。
 
-    片段取自单个探测题内部（而非拼接边界），与逐条喂入的训练记录同粒度比对。
+    2026-10-04 升级：实现移交 probes/qc.py 公共引擎（candidates.py 入池质检
+    共用同一实现，零复制）。旧版随机抽 5 个 100 字符片段（覆盖率 ≈2.25%），
+    现为对每道入选题面按 100 字符滑窗全量切片、与训练粮 n-gram 集合比对，
+    覆盖率 100%、检测灵敏度提高到 ≥50 字符共享子串（引擎契约见 qc.py）。
+    片段仍取自单个探测题内部（而非拼接边界），与逐条喂入的训练记录同粒度比对。
+    返回 True=零命中（L8 达成）；False=发现命中（构建失败，main 退出码 1）。
     """
-    rng = random.Random(20261003)
-    long_items = [q + "\n答：" + a for _, q, a in probe_items if len(q) + len(a) >= frag_len + 20]
-    frags = []
-    for s in rng.sample(long_items, min(n_frags, len(long_items))):
-        i = rng.randrange(0, len(s) - frag_len)
-        frags.append(s[i:i + frag_len])
-    print(f"\n[重叠抽查] 抽取 {len(frags)} 个 {frag_len} 字符片段：")
-    for i, f in enumerate(frags):
-        print(f"  片段{i + 1}: {f[:50]}...")
-
-    sources = ["logiqa", "logiqa2", "cmath", "gsm8k", "distil",
-               "coig", "synlogic", "metamath", "logiconbench"]
-    hits = []
-    for name in sources:
-        n = 0
-        try:
-            for rec in iter_source(name):
-                text = serialize(rec)
-                if not text:
-                    continue
-                n += 1
-                for fi, frag in enumerate(frags):
-                    if frag in text:
-                        hits.append((name, fi))
-                        print(f"  !! 命中：来源 {name} 片段{fi + 1}")
-        except Exception as e:  # 某来源缺失（如未装 pyarrow）不应掩盖其他来源的检查
-            print(f"  [警告] 来源 {name} 检查中断：{e!r}")
-            continue
-        print(f"  来源 {name:<13} 扫描 {n} 条")
-    if hits:
-        print(f"\n[重叠抽查] 发现 {len(hits)} 处命中——律 L8 被违反，请处理后再上线！")
+    texts = [q + "\n答：" + a for _, q, a in probe_items]
+    sources = [(f"训练粮:{name}", grain_stream(name)) for name in TRAIN_SOURCES]
+    print(f"\n[重叠抽查] 训练粮来源：{', '.join(TRAIN_SOURCES)}")
+    report = qc.overlap_check(texts, sources, log=print)
+    if not report["passed"]:
+        print(f"\n[重叠抽查] 发现 {report['hit_grams']} 处共享片段——"
+              f"律 L8 被违反，请处理后再上线！")
         return False
     print("\n[重叠抽查] 全部训练粮来源零命中 ✓（律 L8 达成）")
     return True

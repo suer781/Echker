@@ -9,6 +9,7 @@
 import atexit
 import contextlib
 import hashlib
+import math
 import os
 import secrets
 import shutil
@@ -298,12 +299,14 @@ def t_l9_negative_reward():
 
 
 def t_l5_l8_training_paths():
-    """L5：全部训练路径（sleep.py 与 feed.py 复刻体）无 generate 调用；回滚逐张量。"""
+    """L5：全部训练路径（sleep/life 与 feed 驱动器）无 generate 调用；回滚逐张量。"""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for rel in ("dolphin/sleep.py", "feed.py"):  # 审计④：两条训练路径都要扫
+    for rel in ("dolphin/sleep.py", "dolphin/life.py"):  # 审计④：两条训练路径都要扫
         src = open(os.path.join(root, rel), encoding="utf-8").read()
         check(f"L5 训练路径无自生成（{rel}）", "generate(" not in src)
         check(f"L5 训练用真实字节流（{rel}）", "varied_replay" in src)
+    src = open(os.path.join(root, "feed.py"), encoding="utf-8").read()
+    check("L5 驱动器无自生成（feed.py）", "generate(" not in src)
 
     with _probe_fixture("dolphin_l5l8_") as probe:
         d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
@@ -538,7 +541,7 @@ def t_g1_no_suicide():
 def t_g1_dream_feed():
     """G1-c：喂食模式做梦采样注入发生，hits 由做梦供血（复活通道不再死亡）。"""
     from dolphin.memory import MemoryStore
-    from feed import trainer_cycle
+    from dolphin.life import run_cycle
     # 冷层落盘与探测集都隔离到临时目录：吃生产默认 probes/probe.txt 会让
     # 探测集一挪走就G8 fail-fast 拒绝开睡，做梦注入照常但断言全灭。
     with _probe_fixture("dolphin_g1c_") as probe:
@@ -549,7 +552,8 @@ def t_g1_dream_feed():
         d.memory.add(cue.encode(), 3.0, 0, "residue")
         d.learn(f"喂食记录携带与旧事重叠的联想线索：{cue}", source="test")
         hits0 = d.memory.entries[0].hits
-        report = trainer_cycle(d, steps=2)
+        # M4 取代：feed.trainer_cycle 已删，喂食语义由 life.run_cycle(feeding=True) 唯一实现
+        report = run_cycle(d, steps=2, feeding=True)
         check("G1-c 做梦注入发生", report.get("dreamed", 0) >= 1,
               f"dreamed={report.get('dreamed')}")
         check("G1-c 做梦计入检索命中（复活供血）",
@@ -699,8 +703,9 @@ def t_g2_gate_margin():
           p_min is True and d_min["chunks"] == MIN_GATE_CHUNKS,
           f"n={d_min['chunks']} passed={p_min}")
     # 同步守卫（M4 漂移警告）：两条训练路径都必须走公共判决，掷硬币判决不得复活
+    # （M4 取代：feed.trainer_cycle 已删，喂食路径在 dolphin/life.py）
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for rel, call in (("dolphin/sleep.py", "dolphin.gate("), ("feed.py", "d.gate(")):
+    for rel, call in (("dolphin/sleep.py", "dolphin.gate("), ("dolphin/life.py", "dolphin.gate(")):
         src = open(os.path.join(root, rel), encoding="utf-8").read()
         check(f"G2-b 公共判决唯一接入（{rel}）",
               call in src and "probe_new < probe_old" not in src)
@@ -796,7 +801,8 @@ def t_g3_guard_ruminate():
 
     # 测试夹具自造探测集，不绑死生产 probes/probe.txt（与 t_g8_gate_failfast 同一套做法）：
     # 本组要验的是反刍自续，不是探测集。若吃生产默认路径，探测卷一旦被挪走/改名/清空，
-    # G8 fail-fast 会让 trainer_cycle 拒绝开睡 → 反刍注入照常但周期恒为 0，
+    # G8 fail-fast 会让睡眠周期（life.run_cycle，监督审计 P1-2 名词修正：trainer_cycle
+    # 已删）拒绝开睡 → 反刍注入照常但周期恒为 0，
     # 且场景 2 的 guard_loop 因idle_cycles永不递增而死挂——让一个无关的外部文件
     # 成为本组通过的前提。生产律不动，这里只换夹具。
     tmp = tempfile.mkdtemp(prefix="dolphin_g3a_")
@@ -1070,7 +1076,8 @@ def t_g8_gate_failfast():
     import shutil
     import time as _time
     from dolphin.dolphin import GateDisabled
-    from feed import SleepTrainer, trainer_cycle
+    from dolphin.life import run_cycle
+    from feed import SleepTrainer
     tmp = tempfile.mkdtemp(prefix="dolphin_g8_")
     try:
         probe = os.path.join(tmp, "probe.txt")
@@ -1091,7 +1098,7 @@ def t_g8_gate_failfast():
         check("G8 单线程睡眠路径拒绝开睡（fail-fast 非静默）", raised)
         raised2 = False
         try:
-            trainer_cycle(d, steps=2)
+            run_cycle(d, steps=2, feeding=True)  # 喂食训练路径（M4 唯一实现）
         except GateDisabled:
             raised2 = True
         check("G8 喂食训练路径拒绝开睡（同一入口）", raised2)
@@ -1192,7 +1199,8 @@ def t_g10_resurrect_all():
 def t_g10_resurrect_cold_load():
     """缺陷 B：resurrect() 不调 _ensure_cold() → 断电重启后冷层失聪（违反 L9）。
 
-    部署喂食路径 feed.py --resume 走 trainer_cycle → resurrect()，不调 serve()
+    部署喂食路径 feed.py --resume 走 life.run_cycle(feeding=True) → resurrect()
+    （监督审计 P1-2 名词修正：trainer_cycle 已删），不调 serve()
     也就不会触发 retrieve()，于是上一进程逐出的知识在新进程完全不可见，
     记忆写了落盘却在重启后失聪 = 静默丢弃。本测试用新建实例（不经 retrieve）
     复现该路径。冷层一律落临时目录，绝不碰生产 dolphin/memory_cold.jsonl。
@@ -1234,6 +1242,607 @@ def t_g10_resurrect_cold_load():
                   os.path.abspath(__file__)))))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ==================== 2026-10-04 M4 自生长/自凋零施工新增（交接 §6 规格 A-E） ====================
+
+
+def t_m4_vitals():
+    """M4-A 账本：双时间尺度、stable-Taylor 周期中位数重整（量级衰减≠全员凋零）、
+    休眠=bottom-5%+连续 2 周期确认、复制分裂守恒继承、probation 豁免、随档回环。"""
+    from dolphin.vitals import (DORMANT_CONFIRM, PROBATION_CYCLES, SiteLedger, Vitals)
+    led = SiteLedger("t.mlp_hidden", 8)
+    # ① stable-Taylor 重整：整层等比例衰减（梯度量级系统性衰减，Q6 trend=-0.27）
+    #    → 归一化份额与相对距离必须不变（否则会把全局衰减误读成"全员凋零"）
+    led.observe([1.0] * 8, [4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
+    led.end_cycle(10)
+    r1 = (led.stable_tay[0] / led.stable_tay[1], led.stable_act[0])
+    led.observe([0.5] * 8, [2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])  # 全体减半
+    led.end_cycle(10)
+    r2 = led.stable_tay[0] / led.stable_tay[1]
+    check("M4-A stable-Taylor 中位数重整抗量级衰减", abs(r1[0] - 2.0) < 1e-6
+          and abs(r2 - 2.0) < 1e-6, f"份额比 c1={r1[0]:.4f} c2={r2:.4f}（应恒为 2）")
+    # ② 休眠判决：bottom-5% 单周期不计入，连续 2 周期确认（定标 D）
+    led2 = SiteLedger("t2.mlp_hidden", 8)
+    led2.observe([5.0] * 7 + [0.01], [1.0] * 8)
+    led2.end_cycle(10)
+    check("M4-A 单周期 bottom 不判休眠（需连续确认）",
+          7 not in led2.dormant() and led2.dorm_cycles[7] == 1,
+          f"dorm={led2.dormant()} 计数={led2.dorm_cycles[7]}")
+    led2.observe([5.0] * 7 + [0.01], [1.0] * 8)
+    led2.end_cycle(10)
+    check("M4-A 连续 2 周期确认休眠", led2.dormant() == [7],
+          f"确认={DORMANT_CONFIRM} dorm={led2.dormant()}")
+    # ③ 复制分裂（轴③）：值/k 继承、合起来守恒（规格 A"各半"的 k 份推广）
+    led3 = SiteLedger("t3.ln1_out", 4)
+    led3.stable_act = [8.0, 4.0, 2.0, 1.0]
+    led3.remap_split(2)
+    check("M4-A 复制分裂继承父账本各半（守恒）",
+          led3.C == 8 and led3.stable_act == [4.0, 4.0, 2.0, 2.0, 1.0, 1.0, 0.5, 0.5],
+          f"{led3.stable_act}")
+    # ④ ReDo 账本重置 + probation 豁免（规格：回收通道账本重置、probation 生效）
+    led3.remap_reset([0, 1])
+    check("M4-A 回收通道账本重置+probation 生效",
+          led3.probation[0] == PROBATION_CYCLES and led3.is_new[0]
+          and led3.dorm_cycles[0] == 0 and 0 not in led3.dormant(),
+          f"probation={led3.probation[0]}")
+    # ⑤ 逐层分位归一化：份额在 [0,1] 且单调对应原值（禁全局绝对阈值）
+    sh = led2.shares()
+    ok = all(0.0 <= v <= 1.0 for v in sh.values()) and \
+        sh[0] > sh[7]  # 激活 5.0 的通道份额高于 0.01 的通道
+    check("M4-A 逐层分位数归一化（相对份额）", ok, f"shares={ {k: round(v,2) for k,v in sh.items()} }")
+    # ⑥ 随档回环（weights_only 安全反序列化兼容：纯 list/dict）
+    v = Vitals()
+    v.sites = {"a.mlp_hidden": led2, "a.ln1_out": led3}
+    st = v.to_state()
+    import json
+    json.dumps(st)  # 必须可 JSON 化（torch.save weights_only 的载荷纪律）
+    v2 = Vitals().from_state(st)
+    check("M4-A 账本随档回环一致",
+          v2.sites["a.mlp_hidden"].stable_act == led2.stable_act
+          and v2.sites["a.ln1_out"].C == led3.C)
+
+
+def t_m4_widen_exact():
+    """M4-B 宽化精确保持（本工程命门）：随机输入下三轴分别验证——轴①②逐位相等
+    （torch.equal），轴③数学精确（allclose，浮点 K 维变化的物理极限 ~3e-6 相对）。
+    另验：对称破缺、训练可跑、轴③拒绝对带移植体模型叠加、attn_v 整除保持。"""
+    from dolphin.surgery import (break_symmetry_dmodel, has_transplants, widen_attn_v,
+                                 widen_d_model, widen_mlp)
+    cfg = Config(d_model=64, n_layers=2, n_heads=4, block_size=64)
+    torch.manual_seed(11)
+    m = ByteTransformer(cfg)
+    m.eval()
+    x = torch.randint(0, 256, (1, 48))
+    with torch.no_grad():
+        l0, _ = m(x[:, :-1], x[:, 1:])
+
+    # 轴①：MLP 隐层（fc 新行=对称破缺噪声，被零输出权重掩蔽 → 逐位）
+    rec1 = widen_mlp(m, 0, 16, seed=5)
+    with torch.no_grad():
+        l1, _ = m(x[:, :-1], x[:, 1:])
+    check("M4-B 轴① MLP 隐层宽化逐位相等", torch.equal(l0, l1),
+          f"max|Δ|={(l0 - l1).abs().max().item():.3e}")
+    # 移植体形态（精确性的根基=老 GEMM 原封不动：GEMM 内核按形状选择，原地
+    # 加行/列会改变 K 维归约次序 → 老输出 ~4e-7 抖动，逐位相等即破——前置浮点
+    # 实验定标，见 surgery.py 模块 docstring）。新单元走旁路：零输出权重掩蔽
+    # （精确 +0），对称破缺噪声藏在掩蔽后面就位。
+    check("M4-B 轴① 移植体就位（老 GEMM 原封+旁路新单元+零输出掩蔽+破缺噪声）",
+          m.blocks[0].mlp.fc.out_features == 4 * 64
+          and m.blocks[0].mlp.bypass_width() == 16
+          and float(m.blocks[0].mlp.proj_new_ws[0].abs().sum()) == 0.0
+          and float(m.blocks[0].mlp.bypass_fcs[0].weight.abs().sum()) > 0.0)
+    # 宽化后训练可跑（新单元梯度通路活着：proj_new_w 有梯度）
+    m.train()
+    tgt = torch.randint(0, 256, (1, 48))
+    _, loss = m(x[:, :-1], x[:, 1:])
+    loss.backward()
+    gw = m.blocks[0].mlp.proj_new_ws[0].grad
+    check("M4-B 轴① 新单元梯度通路活着", gw is not None and float(gw.abs().sum()) > 0,
+          f"|g|={float(gw.abs().sum()):.3e}" if gw is not None else "无梯度")
+    m.eval()
+
+    # 轴②：attn-v 路径（delta 自动向下取整到 n_heads 倍数）
+    rec2 = widen_attn_v(m, 1, 7, seed=6)  # 7 不是 4 的倍数 → 取整为 4
+    with torch.no_grad():
+        l2, _ = m(x[:, :-1], x[:, 1:])
+    check("M4-B 轴② attn-v 宽化逐位相等", torch.equal(l1, l2),
+          f"max|Δ|={(l1 - l2).abs().max().item():.3e}")
+    check("M4-B 轴② delta 整除取整（n_heads 整除保持）",
+          rec2["delta"] == 4 and m.blocks[1].attn.bypass_width() == 4)
+    check("M4-B 注意力权重不受旁路影响（免疫位成立）",
+          float(m.blocks[1].attn.proj_new_ws[0].abs().sum()) == 0.0)
+    # 监督审计 P0-1（变异 A2 漏抓）：轴②旁路新行的**破缺噪声必须在位**。审计实验
+    # 证明：把 surgery.WidenedAttn 的噪声行清零后全套件 174/174 依然绿——未来重构
+    # 悄悄删掉这行噪声，自生长会静默退化成"精确但无用"（新通道梯度逐位相同永不
+    # 分化），测试网防不住。本条补上轴②在位断言；对偶现状：轴①噪声在位已由上方
+    # "移植体就位"断言钉死，轴③噪声由下方"副本分化"断言钉死——三轴自此各自有网。
+    check("M4-B 轴② 破缺噪声在位（旁路 qkv 新行权重非零——零输出掩蔽下的分化根基）",
+          float(m.blocks[1].attn.bypass_qkvs[0].weight.abs().sum()) > 0.0,
+          f"|W|_1={float(m.blocks[1].attn.bypass_qkvs[0].weight.abs().sum()):.3e}")
+
+    # 轴③：d_model 复制平铺（需要无移植体模型）——数学精确 + allclose 自检
+    torch.manual_seed(12)
+    m2 = ByteTransformer(cfg)
+    m2.eval()
+    with torch.no_grad():
+        g0, _ = m2(x[:, :-1], x[:, 1:])
+    m3, cfg3 = widen_d_model(m2, 2, device="cpu")
+    m3.eval()
+    with torch.no_grad():
+        g1, _ = m3(x[:, :-1], x[:, 1:])
+    rel = float((g0 - g1).abs().max() / g0.abs().max())
+    check("M4-B 轴③ d_model 平铺数学精确（allclose）",
+          torch.allclose(g0, g1, atol=1e-4, rtol=1e-4),
+          f"相对误差={rel:.2e}（浮点 K 维物理极限，逐位不可达——见 surgery.py docstring）")
+    check("M4-B 轴③ 形态倍增与 eps 同步（LN eps/k 是 LN(平铺)=平铺(LN) 的前提）",
+          m3.cfg.d_model == 128
+          and m3.blocks[0].mlp.fc.out_features == 512
+          and abs(m3.blocks[0].ln1.eps - m2.blocks[0].ln1.eps / 2) < 1e-12)
+    # 轴③对称破缺：副本行加噪后输出改变（不加则梯度逐位相同永不分化）
+    with torch.no_grad():
+        before, _ = m3(x[:, :-1], x[:, 1:])
+    break_symmetry_dmodel(m3, 2, seed=9)
+    with torch.no_grad():
+        after, _ = m3(x[:, :-1], x[:, 1:])
+    check("M4-B 轴③ 对称破缺噪声使副本分化", not torch.equal(before, after))
+    # 轴③拒绝叠加：带移植体的模型（m 已有轴①②）必须 ValueError
+    refused = False
+    try:
+        widen_d_model(m, 2, device="cpu")
+    except ValueError:
+        refused = True
+    check("M4-B 轴③ 拒绝与移植体叠加（留待下一棒；控制器排程本就只用①/②轴，"
+          "并无自动改轴动作——监督审计 P1-2 措辞修正）",
+          refused and has_transplants(m))
+
+
+def t_m4_ghost_probe():
+    """M4-C 幽灵探测：LN 免疫位可测出容量增益（有限、正、可复现）；残差流位
+    拒绝挂载（√(1+Δ/d) 污染测量，对质已证伪）。"""
+    from dolphin.surgery import ghost_probe
+    cfg = Config(d_model=64, n_layers=2, n_heads=4, block_size=64)
+    torch.manual_seed(21)
+    model = ByteTransformer(cfg)
+    data = ("逻辑推理探测片段：若甲高于乙，乙高于丙，则甲高于丙；所有金属都导电，"
+            "铁是金属，故铁导电。此段仅供幽灵探测使用。".encode() * 8)
+    r1 = ghost_probe(model, 0, data, n_ghosts=6, seed=3)
+    check("M4-C 免疫位（MLP 隐层）测出容量增益",
+          r1["mlp_hidden"] is not None and r1["mlp_hidden"] > 0
+          and math.isfinite(r1["mlp_hidden"]), f"gain={r1['mlp_hidden']:.3e}")
+    check("M4-C 免疫位（attn-v）测出容量增益",
+          r1["attn_v"] is not None and r1["attn_v"] > 0
+          and math.isfinite(r1["attn_v"]) and len(r1["attn_v_per_head"]) == 4,
+          f"gain={r1['attn_v']:.3e} per_head={[round(v, 4) for v in r1['attn_v_per_head']]}")
+    r2 = ghost_probe(model, 0, data, n_ghosts=6, seed=3)
+    check("M4-C 探测可复现（自带种子，不碰全局随机源）",
+          abs(r1["mlp_hidden"] - r2["mlp_hidden"]) < 1e-12
+          and abs(r1["attn_v"] - r2["attn_v"]) < 1e-12)
+    refused = []
+    for bad in ("residual_stream", "ln1_out", "ln2_out", "attn_out"):
+        try:
+            ghost_probe(model, 0, data, site=bad)
+        except ValueError:
+            refused.append(bad)
+    check("M4-C 残差流位拒绝挂载（对质已证伪）", len(refused) == 4, f"拒绝={refused}")
+
+
+def t_m4_shrink_born_again():
+    """M4-D 收缩与 born-again：学生 config 更小且 n_heads 整除；born-again 战役
+    （kd_alpha 手术验收档）+ 体检门控验收流程端到端可跑通。"""
+    from dolphin.life import STATE_WITHERING, STATE_WITHER_PLAN, WITHER_KD_ALPHA, run_cycle
+    from dolphin.surgery import born_again_student, shrink_config
+    cfg = Config(d_model=64, n_layers=4, n_heads=4, block_size=64)
+    from dolphin.vitals import Vitals
+    v = Vitals()
+    s_cfg, info = shrink_config(cfg, v, target=0.5)
+    check("M4-D shrink_config 更小", s_cfg.n_layers == 2 and s_cfg.d_model == 32,
+          f"{info['d_model']} {info['n_layers']}")
+    check("M4-D n_heads 整除保持", s_cfg.d_model % s_cfg.n_heads == 0
+          and info["n_heads_divisible"])
+    student, opt, _ = born_again_student(cfg, v, 0.5, "cpu", seed=1)
+    n_teach = sum(p.numel() for p in ByteTransformer(cfg).parameters())
+    n_stud = sum(p.numel() for p in student.parameters())
+    check("M4-D born-again 学生从头初始化且更小", n_stud < n_teach,
+          f"{n_stud / 1e6:.3f}M < {n_teach / 1e6:.3f}M")
+
+    with _probe_fixture("dolphin_m4d_") as probe:
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=4, block_size=256),
+                         probe_path=probe, device="cpu")
+        for i in range(12):
+            d.learn(f"凋零战役验证记录第{i}条，内容足够长以稳定通过选拔训练。{i}", source="test")
+        ctl = d.life_ctl
+        # 直接排程 born-again 战役（绕过平台期阶梯——阶梯由 t_m4_state_machine 验）
+        ctl.plan = {"kind": "wither", "mode": "born_again"}
+        ctl.state = STATE_WITHER_PLAN
+        r1 = run_cycle(d, steps=3, verbose=False)
+        # 战役开打是周期内事实（学生换装 + 手术验收 kd 档）；周期末门控二选一：
+        # 通过 → 学生上岗（awake=学生），未过 → 学生保留续训（sleeping=学生）。
+        # 不赌门控抛硬币——3 步学生与教师的 probe 差在 ±1e-4 量级，换班与否随
+        # 权重初始化摇摆，两种结局都是合法战役状态。
+        check("M4-D born-again 战役开打（学生换装睡脑）",
+              r1.get("m4_wither_start", {}).get("mode") == "born_again"
+              and ((r1.get("swapped") and d.awake().model.cfg.d_model == 44
+                    and d.awake().model.cfg.n_layers == 1)
+                   or (ctl.state == STATE_WITHERING
+                       and d.sleeping().model.cfg.d_model == 44
+                       and d.sleeping().model.cfg.n_layers == 1)),
+              f"swapped={r1.get('swapped')} state={ctl.state} "
+              f"sleeping={d.sleeping().model.cfg.d_model}x{d.sleeping().model.cfg.n_layers}")
+        check("M4-D 手术验收周期 kd_alpha 提到定标档",
+              r1.get("m4_kd_alpha") == WITHER_KD_ALPHA,
+              f"kd_alpha={r1.get('m4_kd_alpha')}（0.7–0.8 带中值）")
+        for i in range(12):  # r1 已把缓冲清空：不补喂则 r2 空选拔早退、体检键缺席
+            d.learn(f"凋零战役续训记录第{i}条，内容足够长以稳定通过选拔训练。{i}", source="test")
+        r2 = run_cycle(d, steps=3, verbose=False)  # 验收 or 学生保留续训
+        ok = (ctl.state == STATE_WITHERING and r2.get("m4_wither_keep") is not None) or \
+             (ctl.state == "NORMAL" and "swapped" in r2)
+        check("M4-D 体检门控验收流程跑通（验收换班 or 学生保留续训）", ok,
+              f"state={ctl.state} swapped={r2.get('swapped')} keep={r2.get('m4_wither_keep')}")
+        check("M4-D 门控判决始终在场（体检未绕过）",
+              "probe_new" in r1 and "probe_new" in r2 and "gate_margin" in r2)
+
+def t_m4_life_equivalence():
+    """M4-E M0 等价性（迁移安全网）：同种子同输入下 life.run_cycle 与
+    sleep.run_cycle 行为一致——报告键、权重逐位、记忆库、缓冲、换班。"""
+    import random as _random
+    from dolphin.life import run_cycle as life_run
+    from dolphin.sleep import run_cycle as sleep_run
+
+    with _probe_fixture("dolphin_m4e_") as probe:
+        outs = []
+        for impl in (sleep_run, life_run):
+            torch.manual_seed(4242)
+            d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                             probe_path=probe, device="cpu")
+            d.rng = _random.Random(1234)  # 生产为 SystemRandom；测试注入种子化随机源
+            for i in range(12):
+                d.learn(f"等价性验证记录第{i}条，内容足够长以稳定通过选拔训练。{i}",
+                        source="test")
+            r1 = impl(d, steps=5, verbose=False)
+            r2 = impl(d, steps=5, verbose=False)  # 第二周期（账本/状态跨周期累积后仍等价）
+            outs.append((d, r1, r2))
+        (d0, a1, a2), (d1, b1, b2) = outs
+        keys = ("selected", "residue", "passed", "swapped", "probe_old", "probe_new",
+                "gate_margin", "lr", "cycle")
+        same1 = all(a1.get(k) == b1.get(k) for k in keys)
+        same2 = all(a2.get(k) == b2.get(k) for k in keys)
+        check("M4-E 周期报告逐键一致（两周期）", same1 and same2,
+              f"c1={ {k: (a1.get(k), b1.get(k)) for k in keys if a1.get(k) != b1.get(k)} }"
+              f" c2 diff={[k for k in keys if a2.get(k) != b2.get(k)]}")
+        w_same = all(torch.equal(pa, pb)
+                     for h0, h2 in ((d0.h[0], d1.h[0]), (d0.h[1], d1.h[1]))
+                     for pa, pb in zip(h0.model.parameters(), h2.model.parameters()))
+        check("M4-E 双半球权重逐位一致（M4 钩子是纯观察者）", w_same)
+        m_same = ([(e.text, e.score, e.hits, e.cycle, e.kind) for e in d0.memory.entries]
+                  == [(e.text, e.score, e.hits, e.cycle, e.kind) for e in d1.memory.entries])
+        check("M4-E 记忆库（滞留+笔记）逐条一致", m_same,
+              f"{len(d0.memory.entries)} vs {len(d1.memory.entries)} 条")
+        check("M4-E 缓冲/醒脑指针/预算一致",
+              len(d0.buffer.items) == len(d1.buffer.items)
+              and d0.awake_idx == d1.awake_idx
+              and abs(d0.budget - d1.budget) < 1e-12
+              and abs(d0.buffer.sleep_threshold - d1.buffer.sleep_threshold) < 1e-12)
+
+
+def t_m4_redo_recycle():
+    """M4-F ReDo 回收：休眠通道被重置（输入行重随机、输出列清零）、账本重置、
+    probation 生效（观察期内豁免休眠判决）。"""
+    import random as _random
+    from dolphin.life import run_cycle  # noqa: F401  集成段用（缺导入=前任遗留 NameError）
+    from dolphin.vitals import PROBATION_CYCLES, SiteLedger
+    with _probe_fixture("dolphin_m4f_") as probe:
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=4, block_size=256),
+                         probe_path=probe, device="cpu")
+        for i in range(10):
+            d.learn(f"回收验证记录第{i}条，内容足够长。{i}", source="test")
+        ctl = d.life_ctl
+        h = d.sleeping()
+        v = ctl.vitals_for(d, h.name)
+        C = h.model.blocks[0].mlp.fc.out_features
+        led = SiteLedger("b0.mlp_hidden", C)
+        for c in (0, 1, 2):  # 伪造连续 2 周期 bottom-5% 的休眠通道
+            led.dorm_cycles[c] = 2
+            led.stable_act[c] = 0.0
+        v.sites["b0.mlp_hidden"] = led
+        before_fc = h.model.blocks[0].mlp.fc.weight[0].clone()
+        before_proj = h.model.blocks[0].mlp.proj.weight[:, 0].clone()
+        # 单元级：直接调回收（权重断言与训练解耦）
+        res = ctl._redo(d, h, v)
+        picked = res["recycled"].get("b0.mlp_hidden", [])
+        check("M4-F 确认休眠通道进入回收名单", 0 in picked and len(picked) == 1,
+              f"picked={picked}（单周期上限 REDO_MAX_FRAC）")
+        check("M4-F 输入行被重随机（不再是原权重）",
+              not torch.equal(before_fc, h.model.blocks[0].mlp.fc.weight[0]))
+        check("M4-F 输出列清零（ReDo 重生单元从零贡献起步）",
+              float(h.model.blocks[0].mlp.proj.weight[:, 0].abs().sum()) == 0.0
+              and float(before_proj.abs().sum()) > 0)
+        led2 = v.sites["b0.mlp_hidden"]
+        check("M4-F 账本重置 + probation 生效",
+              led2.probation[0] == PROBATION_CYCLES and led2.is_new[0]
+              and led2.dorm_cycles[0] == 0 and 0 not in led2.dormant())
+        # probation 豁免：观察期内即使激活垫底也不判休眠、不重复回收
+        led2.observe([0.001] * C, [0.001] * C)
+        led2.end_cycle(10)
+        check("M4-F 观察期豁免休眠判决（防回收抖动）", 0 not in led2.dormant())
+        # 集成：run_cycle 的 REM 相位会真的执行回收钩子。
+        # 注入种子化 rng（生产是 SystemRandom）+ 加长记录：否则选拔/回放流长
+        # 非确定，可能撞上"样本过短"早退、REM 相位整段不执行（实测 1/4 概率红）
+        d2 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=4, block_size=256),
+                          probe_path=probe, device="cpu")
+        d2.rng = _random.Random(4321)
+        for i in range(10):
+            d2.learn(f"回收集成验证记录第{i}条，内容足够长。{i}" * 6, source="test")
+        v2 = d2.life_ctl.vitals_for(d2, d2.sleeping().name)
+        led3 = SiteLedger("b1.mlp_hidden", d2.sleeping().model.blocks[1].mlp.fc.out_features)
+        led3.dorm_cycles[5] = 2
+        led3.stable_act[5] = 0.0
+        v2.sites["b1.mlp_hidden"] = led3
+        r = run_cycle(d2, steps=2, verbose=False)
+        check("M4-F REM 相位集成：回收钩子在周期内发生",
+              "b1.mlp_hidden" in r.get("m4_redo", {}).get("recycled", {}),
+              f"recycled={list(r.get('m4_redo', {}).get('recycled', {}))}")
+
+
+def t_m4_anchor_persistence():
+    """M4-G 锚与形态持久化：save/load 后历史最优 probe 锚不丢；手术后形态与
+    营养账本随档复原（规格 C：锚=历史最优 probe，持久化进 save/load）。"""
+    from dolphin.life import run_cycle  # noqa: F401  产生真实账本用
+    from dolphin.surgery import morphology_of, rebuild_optimizer, widen_mlp
+    from dolphin.vitals import SiteLedger
+    with _probe_fixture("dolphin_m4g_") as probe:
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=4, block_size=256),
+                         probe_path=probe, device="cpu")
+        for i in range(10):
+            d.learn(f"锚持久化验证记录第{i}条，内容足够长。{i}", source="test")
+        ctl = d.life_ctl
+        r = run_cycle(d, steps=3, verbose=False)  # 产生真实账本（可能换班）
+        # 人工注入确定值便于断言（真实锚由 post_exam 更新，已在 r 里验证机制）
+        ctl.anchor_best = 5.4321
+        ctl.plateau = 2
+        v = ctl.vitals_for(d, d.sleeping().name)
+        v.sites["b0.mlp_hidden"] = SiteLedger("b0.mlp_hidden", 256)
+        v.sites["b0.mlp_hidden"].stable_act = [0.5] * 256
+        widen_mlp(d.sleeping().model, 1, 8, seed=2)  # 手术：形态变化
+        # 真实手术流程含优化器重建（规格 B）——缺了它，save 的 opt_states 参数组
+        # 与移植体参数数目不符，load 时 opt.load_state_dict 必炸（前任漏步）
+        _h = d.sleeping()
+        _h.opt, _ = rebuild_optimizer(_h.model, _h.opt, _h.model,
+                                      _h.opt.param_groups[0]["lr"])
+        ctl.morphology[d.sleeping().name] = morphology_of(d.sleeping().model)
+        path = os.path.join(tempfile.gettempdir(), "dolphin_m4g_state.pt")
+        d.save(path)
+        d2 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=4, block_size=256),
+                          probe_path=probe, device="cpu")
+        d2.load(path)
+        os.remove(path)
+        check("M4-G 历史最优 probe 锚随档不丢（规格 C）",
+              d2.life_ctl.anchor_best == 5.4321 and d2.life_ctl.plateau == 2,
+              f"anchor={d2.life_ctl.anchor_best}")
+        check("M4-G 手术后形态随档复原（宽化脑跨重启）",
+              morphology_of(d2.sleeping().model) == ctl.morphology[d.sleeping().name]
+              and d2.sleeping().model.blocks[1].mlp.bypass_width() == 8,
+              f"morph={morphology_of(d2.sleeping().model)}")
+        check("M4-G 营养账本随档复原",
+              d2.life_ctl.vitals.get(d.sleeping().name) is not None
+              and d2.life_ctl.vitals[d.sleeping().name].sites["b0.mlp_hidden"].stable_act[0] == 0.5)
+        w_same = all(torch.equal(pa, pb)
+                     for h0, h2 in ((d.h[0], d2.h[0]), (d.h[1], d2.h[1]))
+                     for pa, pb in zip(h0.model.parameters(), h2.model.parameters()))
+        check("M4-G 权重逐位回环（含移植体参数）", w_same)
+
+
+def t_m4_state_machine():
+    """M4-H 状态机与钩子：GROW 战役（执行→验收→NORMAL / 回滚→形态还原）、
+    WITHER 战役（keep 保留标志→放弃还原 / born-again 一锤定音）、睡眠债守卫、
+    显存预算推迟、固定干预次序阶梯、总开关（L11 人工安全阀）。"""
+    from dolphin import life as life_mod
+    from dolphin.life import (STATE_GROWN, STATE_NORMAL, STATE_WITHERING,
+                              STATE_WITHER_PLAN, LifeController, run_cycle)
+    from dolphin.surgery import MEM_BUDGET, mem_budget_ok, widen_mlp
+    with _probe_fixture("dolphin_m4h_") as probe:
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=4, block_size=256),
+                         probe_path=probe, device="cpu")
+        for i in range(10):
+            d.learn(f"状态机验证记录第{i}条，内容足够长。{i}", source="test")
+        ctl = d.life_ctl
+        h = d.sleeping()
+
+        # —— GROW 成功：GROWN → 体检通过 → swap + NORMAL + 锚更新
+        ctl.state = STATE_GROWN
+        ctl.campaign = {"kind": "grow", "gen": 1, "snap": ctl._snapshot(d, h)}
+        rep = {"probe_new": 5.0, "gate_margin": 0.05}
+        check("M4-H GROW 验收通过 → 换班",
+              ctl.post_exam(d, rep, True) == "swap" and ctl.state == STATE_NORMAL
+              and ctl.anchor_best == 5.0 and ctl.campaign is None)
+
+        # —— GROW 失败：GROWN → ROLLBACK → 形态还原 + 与醒脑同源
+        snap = ctl._snapshot(d, h)
+        widen_mlp(h.model, 0, 8, seed=3)  # 模拟已手术
+        ctl.state = STATE_GROWN
+        ctl.campaign = {"kind": "grow", "gen": 1, "snap": snap}
+        rep = {"probe_new": 6.0, "gate_margin": -0.01}
+        check("M4-H GROW 验收失败 → 回滚指令",
+              ctl.post_exam(d, rep, False) == "rollback" and ctl.state == STATE_NORMAL)
+        check("M4-H 回滚后形态还原（移植体消失）",
+              h.model.blocks[0].mlp.fc.out_features == 4 * 64
+              and not hasattr(h.model.blocks[0].mlp, "bypass_fcs"))
+        check("M4-H 回滚后与醒脑同源（M0 回滚语义）",
+              all(torch.equal(pa, pb) for pa, pb in
+                  zip(h.model.parameters(), d.awake().model.parameters())))
+
+        # —— WITHER decay：失败不回滚（学生保留标志）→ 分代耗尽放弃还原
+        snap2 = ctl._snapshot(d, h)
+        ctl.state = STATE_WITHERING
+        ctl.campaign = {"kind": "wither", "mode": "decay", "gen": 1, "max_gen": 3,
+                        "snap": snap2, "targets": {}}
+        rep = {"probe_new": 6.0, "gate_margin": -0.01}
+        ctl.consec_rollback = 0  # 基线清零（前面 GROW 回滚已合法 +1）：本段只验 keep/放弃的增量归属
+        check("M4-H WITHER 失败 → 学生保留（不回滚，规格 C）",
+              ctl.post_exam(d, rep, False) == "keep" and ctl.state == STATE_WITHERING
+              and ctl.campaign["gen"] == 2)
+        # 监督审计 P1-1c：keep 是"学生保留续训"，不是回滚——误递增会让
+        # ROLLBACK_GUARD 把正常的多周期战役读成"脑在挣扎"
+        check("M4-H keep 不递增 consec_rollback（P1-1c：学生保留≠挣扎回滚）",
+              ctl.consec_rollback == 0, f"consec_rollback={ctl.consec_rollback}")
+        ctl.post_exam(d, rep, False)   # gen 3
+        check("M4-H WITHER 分代耗尽 → 放弃并还原",
+              ctl.post_exam(d, rep, False) == "rollback" and ctl.state == STATE_NORMAL
+              and ctl.campaign is None)
+        check("M4-H 放弃凋零战役计入一次回滚（与 keep 区分，P1-1c 对偶）",
+              ctl.consec_rollback == 1, f"consec_rollback={ctl.consec_rollback}")
+        # —— WITHER born-again：学生保留（规格 C 多周期分代——从头初始化的学生
+        # 不可能一个周期内赢过教师，"失败即放弃"会让 born-again 永不收敛）；
+        # 分代耗尽同样放弃还原
+        ctl.state = STATE_WITHERING
+        ctl.campaign = {"kind": "wither", "mode": "born_again", "gen": 1,
+                        "max_gen": 3, "snap": snap2}
+        check("M4-H born-again 失败 → 学生保留（规格 C，与 decay 同一保留标志）",
+              ctl.post_exam(d, rep, False) == "keep" and ctl.state == STATE_WITHERING)
+        check("M4-H born-again keep 同样不计入 consec_rollback（P1-1c）",
+              ctl.consec_rollback == 1, f"consec_rollback={ctl.consec_rollback}")
+        ctl.post_exam(d, rep, False)   # gen 3
+        check("M4-H born-again 分代耗尽 → 放弃并还原",
+              ctl.post_exam(d, rep, False) == "rollback" and ctl.state == STATE_NORMAL
+              and ctl.campaign is None)
+        check("M4-H born-again 放弃计入回滚（keep/放弃增量归属对偶闭环，P1-1c）",
+              ctl.consec_rollback == 2, f"consec_rollback={ctl.consec_rollback}")
+
+        # —— 守卫：睡眠债（Bellesi 2017）与冷却
+        d._since_sleep = d.target_interval * (life_mod.SLEEP_DEBT_GUARD + 1)
+        ok, why = ctl.surgery_allowed(d)
+        check("M4-H 睡眠债守卫禁手术（Bellesi 2017）", not ok and "睡眠债" in why, why)
+        d._since_sleep = 0
+        ctl.cooldown = 2
+        ok, why = ctl.surgery_allowed(d)
+        check("M4-H 冷却期禁手术", not ok and "冷却" in why, why)
+        ctl.cooldown = 0
+
+        # —— 显存预算：超 1.9GB 推迟（规格 B；WDDM 倒页教训）
+        ok, why = mem_budget_ok("cuda", 10 ** 9, reserved=MEM_BUDGET - 1024)
+        check("M4-H 显存预算超 1.9GB → 拒绝变宽", not ok, why)
+        ok, why = mem_budget_ok("cuda", 10 ** 6, reserved=0)
+        check("M4-H 预算内放行", ok, why)
+
+        # 第三阶梯 + 伪造幽灵增益 → GROW_PLAN（mlp 轴）
+        ctl2 = LifeController()
+        d.life_ctl = ctl2
+        ctl2.plateau = life_mod.PLATEAU_CYCLES * 2  # 第二阶梯
+        rep = {}
+        ctl2._schedule(d, rep, ctl2.vitals_for(d, d.sleeping().name), b"")
+        check("M4-H 第二阶梯先 LR 退火（不许跳级）",
+              ctl2.anneal_pending is True and ctl2.plan is None
+              and ctl2.state == STATE_NORMAL, f"rep={ {k: rep[k] for k in rep if k.startswith('m4')} }")
+        # 第三阶梯 + 伪造幽灵增益 → GROW_PLAN（mlp 轴）——ghost_scan 测试桩（用后还原）
+        ctl2.plateau = life_mod.PLATEAU_CYCLES * 3
+        orig_scan = life_mod.ghost_scan
+        life_mod.ghost_scan = lambda *a, **k: {(0, "mlp_hidden"): 0.01}
+        try:
+            rep = {}
+            ctl2._schedule(d, rep, ctl2.vitals_for(d, d.sleeping().name),
+                           b"x" * (d.cfg.block_size + 8))
+            check("M4-H 第三阶梯排程手术：幽灵有增益 → GROW_PLAN（mlp 轴）",
+                  ctl2.state == "GROW_PLAN" and ctl2.plan["axis"] == "mlp"
+                  and ctl2.plan["layer"] == 0 and ctl2.plan["delta"] >= 8,
+                  f"plan={ctl2.plan}")
+        finally:
+            life_mod.ghost_scan = orig_scan
+        # 幽灵无增益 + 高休眠占比 → born-again 凋零排程。
+        # ghost_scan 用测试桩钉死"无增益"前提——真扫描在随机初始化权重上会偶尔
+        # 测出 >GHOST_GAIN_MIN 的增益，把排程抢到 grow 轴（检查的是凋零分支）
+        ctl3 = LifeController()
+        d.life_ctl = ctl3
+        ctl3.plateau = life_mod.PLATEAU_CYCLES * 3
+        from dolphin.vitals import SiteLedger
+        C = d.sleeping().model.blocks[0].mlp.fc.out_features
+        led = SiteLedger("b0.mlp_hidden", C)
+        for c in range(int(0.3 * C)):
+            led.dorm_cycles[c] = 2
+        ctl3.vitals_for(d, d.sleeping().name).sites["b0.mlp_hidden"] = led
+        orig_scan = life_mod.ghost_scan
+        life_mod.ghost_scan = lambda *a, **k: {}
+        try:
+            rep = {}
+            ctl3._schedule(d, rep, ctl3.vitals_for(d, d.sleeping().name),
+                           b"x" * (d.cfg.block_size + 8))
+            check("M4-H 幽灵无增益+高休眠占比 → born-again 凋零排程",
+                  ctl3.state == "WITHER_PLAN" and ctl3.plan["mode"] == "born_again",
+                  f"rep={ {k: rep[k] for k in rep if k.startswith('m4')} }")
+        finally:
+            life_mod.ghost_scan = orig_scan
+
+        # —— 监督审计 P1-1b：WITHER 执行前守卫复查（与 _execute_grow 对称）：
+        # 排程后守卫恶化 → 推迟一周期且计划保留；守卫解除 → 同计划正常执行
+        ctl4 = LifeController()
+        ctl4.plan = {"kind": "wither", "mode": "decay", "targets": {}}
+        ctl4.state = STATE_WITHER_PLAN
+        ctl4.cooldown = 2  # 制造守卫恶化：手术冷却中
+        rep4 = {}
+        ctl4.pre_train(d, rep4, b"")
+        check("M4-H WITHER 执行前守卫复查：恶化 → 推迟且计划保留（与 GROW 对称，P1-1b）",
+              ctl4.state == STATE_WITHER_PLAN and ctl4.plan is not None
+              and "m4_defer" in rep4,
+              f"state={ctl4.state} defer={rep4.get('m4_defer')}")
+        ctl4.cooldown = 0  # 守卫解除
+        rep4 = {}
+        ctl4.pre_train(d, rep4, b"")
+        check("M4-H 守卫解除后 WITHER 计划正常执行（战役开打）",
+              ctl4.state == STATE_WITHERING and ctl4.campaign is not None
+              and "m4_wither_start" in rep4,
+              f"state={ctl4.state} start={rep4.get('m4_wither_start')}")
+
+        # —— L11 人工总开关：life_enabled=False 时 M4 钩子全灭（纯 M0 语义）
+        d.life_enabled = False
+        r = run_cycle(d, steps=2, verbose=False)
+        check("M4-H 总开关关闭：M4 钩子零输出（人工安全阀，律 L11）",
+              not any(k.startswith("m4_") for k in r),
+              f"m4 keys={[k for k in r if k.startswith('m4_')]}")
+        d.life_enabled = True
+
+        # —— 监督审计 P0-2：手术幅度必须按睡脑**真实**脑形（d.sleeping().model.cfg）
+        # 计算，不能用基座 d.cfg——born-again 学生脑（morphology 含 shrink 记录）上
+        # 基座口径会把名义 5% 排成 7%+。学生脑上换算回实际通道数的占比偏差 ≤ ε。
+        from dolphin.surgery import born_again_student, morphology_of
+        d5 = make_dolphin(cfg=Config(d_model=256, n_layers=2, n_heads=4, block_size=256),
+                          probe_path=probe, device="cpu")
+        h5 = d5.sleeping()
+        ctl5 = d5.life_ctl
+        stud, _opt5, _info5 = born_again_student(h5.model.cfg, None, 0.7, "cpu", seed=7)
+        h5.model = stud  # 模拟 born-again 学生换装后的睡脑
+        C_real = stud.cfg.d_model  # = 4×round(64×0.7)=180；基座 256
+        ctl5.morphology[h5.name] = {**morphology_of(stud),
+                                    "shrink": {"d_model": stud.cfg.d_model,
+                                               "n_layers": stud.cfg.n_layers}}
+        check("M4-H P0-2 场景前提：学生脑换装且形态含 shrink 记录",
+              d5.sleeping().model.cfg.d_model == C_real
+              and ctl5.morphology[h5.name]["shrink"]["d_model"] == C_real
+              and d5.cfg.d_model == 256,
+              f"真实 d_model={C_real} 基座={d5.cfg.d_model}")
+        for axis, base in (("mlp", 4 * C_real), ("attn_v", C_real)):
+            delta = ctl5._grow_delta(d5, axis)
+            frac = delta / base
+            base_stale = max(8, round(life_mod.GROW_DELTA_FRAC
+                                      * (4 * d5.cfg.d_model if axis == "mlp"
+                                         else d5.cfg.d_model)))  # 基座口径（旧缺陷）
+            check(f"M4-H P0-2 学生脑上 {axis} 轴手术幅度守住名义 5%（偏差≤0.005）",
+                  delta > 8  # 下限不绑定，占比检查才有意义
+                  and abs(frac - life_mod.GROW_DELTA_FRAC) <= 0.005,
+                  f"delta={delta} 真实宽度={base} 实际占比={frac:.4f}"
+                  f"（基座口径会排 {base_stale}，占比 {base_stale / base:.4f}）")
+        # _mem_ok 的 Δ参数核算同样按真实脑形通道数（基座 256 会虚报显存账）
+        calls = {}
+        orig_dp = life_mod.delta_params_mlp
+        def _spy_dp(C, delta, _o=orig_dp):
+            calls["C"] = C
+            return _o(C, delta)
+        life_mod.delta_params_mlp = _spy_dp
+        try:
+            okm, why = ctl5._mem_ok(d5, "mlp", ctl5._grow_delta(d5, "mlp"))
+        finally:
+            life_mod.delta_params_mlp = orig_dp
+        check("M4-H P0-2 显存核算按真实脑形通道数（delta_params_mlp 收到 C_real）",
+              okm and calls.get("C") == C_real,
+              f"C={calls.get('C')} 真实={C_real} ok={okm}")
 
 
 # ============ 冷层隔离总闸自检（本身也是断言） ============
@@ -1314,6 +1923,14 @@ if __name__ == "__main__":
     t_g9_threshold_clamp()
     t_g10_resurrect_all()
     t_g10_resurrect_cold_load()
+    t_m4_vitals()
+    t_m4_widen_exact()
+    t_m4_ghost_probe()
+    t_m4_shrink_born_again()
+    t_m4_life_equivalence()
+    t_m4_redo_recycle()
+    t_m4_anchor_persistence()
+    t_m4_state_machine()
     t_cold_quarantine()   # 隔离机制自检（先跑：此时污染若已发生，下面那条会一并变红）
     t_cold_untouched()    # 收尾红线：必须最后跑
     n_ok = sum(PASS)
