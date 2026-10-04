@@ -199,7 +199,13 @@ def ghost_probe(model, layer, data, site=None, n_ghosts=8, seed=0, device=None):
         raise ValueError(f"未知探测位 {site}（免疫位：{IMMUNE_SITES}）")
     device = device or next(model.parameters()).device
     blk = model.blocks[layer]
-    gen = torch.Generator().manual_seed(int(seed))  # 探测不碰全局随机源（M0 等价性）
+    # 2026-10-05 呼吸实验发现并修复：与 life._redo 同款设备 bug——torch.Generator()
+    # 默认 CPU，而 CUDA 上 randn(device=cuda, generator=cpu_gen) 抛 RuntimeError。
+    # 幽灵探测此前从未在 CUDA 真实运行过（只在平台期第三阶梯排程时执行），
+    # 且 life._schedule 的 except (ValueError, RuntimeError) 会把该异常静默吞成
+    # "无增益"——即阶梯哪天打开，生长判决也会在 GPU 上静默失效。本修复只动
+    # generator 设备侧，CPU 路径语义不变（种子口径原样保留）。
+    gen = torch.Generator(device=device).manual_seed(int(seed))  # 探测不碰全局随机源（M0 等价性）
     out = {"mlp_hidden": None, "attn_v": None, "attn_v_per_head": [], "loss": None}
     T = min(model.cfg.block_size, len(data) - 1)
 

@@ -180,6 +180,31 @@ class SiteLedger:
         pt = pct(self.stable_tay)
         return {c: 0.5 * (pa[c] + pt[c]) for c in range(self.C)}
 
+    def utilization_indices(self, q=DORMANT_QUANTILE, p=0.10):
+        """连续利用率指数（研究报告_自适应原理 §3.1：恒温器的"钙"）。
+
+        返回 (utilization_gap, headroom_hot)，均从 **stable 激活**（禁止 tag——
+        测量阻尼第一重）构造，分位池与休眠判决同域（probation 豁免）：
+          gap = (med − bottom-q 均值) / med ∈ [0,1]——尾部落后量（过剩信号，
+                连续化的休眠占比；0=尾部齐平，1=尾部死透）；
+          hot = top-p 均值 / med——头部过热程度（1=完全齐平，>1 有过热）。
+        med ≤ 1e-12（冷账本/全零）→ (0.0, 1.0)（既不过剩也不过热——无信号）。
+        分位并列不再特殊处理：指数读的是均值距离不是名单，并列天然给中性值。
+        """
+        pool = [c for c in range(self.C) if self.probation[c] == 0]
+        if not pool:
+            return 0.0, 1.0
+        vals = sorted(self.stable_act[c] for c in pool)
+        n = len(vals)
+        med = vals[n // 2]
+        if med <= 1e-12:
+            return 0.0, 1.0
+        k = max(1, int(round(q * n)))
+        tail = sum(vals[:k]) / k
+        kp = max(1, int(round(p * n)))
+        top = sum(vals[-kp:]) / kp
+        return (med - tail) / med, top / med
+
     def median_share(self):
         sh = self.shares()
         return sorted(sh.values())[len(sh) // 2] if sh else 0.0

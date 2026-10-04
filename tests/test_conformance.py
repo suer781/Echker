@@ -1845,6 +1845,541 @@ def t_m4_state_machine():
               f"C={calls.get('C')} 真实={C_real} ok={okm}")
 
 
+def t_m4_thermostat():
+    """M4-T 连续结构恒温器（研究报告_自适应原理 §3；2026-10-05 呼吸实验触发链
+    诊断吸收）：双信号钙公式、设定点带语义（带内持有/越带收缩/确认窗回滞）、
+    乘性生长律 delta=λ_g·W·e、born-again 目标从 gap̄ 导出（废除写死 0.7）、
+    五重阻尼（确认窗/限频/振荡熔断/λ_g 自适应/成熟刹车）、四条守卫（数据供给门/
+    预算供给比/选址禁用探测集/容量下限非零）、需求波动跟随时间线（涨/持有/缩）、
+    L5/L8 不破、随档回环、触发可达性（现实信号链在受限场景真实开刀——
+    平台期阶梯 9 连击数学不可达的反面证据）。"""
+    import json
+    import random as _random
+
+    from dolphin import life as life_mod
+    from dolphin.experience import Experience
+    from dolphin.life import (LAMBDA_G, LAMBDA_MIN, MATURITY_NARROW, LifeController,
+                              OSC_FUSE_CYCLES, STATE_GROWN, STATE_GROW_PLAN,
+                              STATE_NORMAL, STATE_WITHERING, STATE_WITHER_PLAN,
+                              XI_HI, run_cycle)
+    from dolphin.vitals import SiteLedger
+
+    with _probe_fixture("dolphin_m4t_") as probe:
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=4, block_size=256),
+                         probe_path=probe, device="cpu")
+
+        # —— 夹具：按目标 (gap, hot) 反解 stable_act 的账本注入器 ——
+        # med=1.0（中带）、bottom-5% 均值=1−gap（gap 精确）、top-10% 均值=hot。
+        def set_ledger(key, C, gap, hot=1.0, dorm=False):
+            k = max(1, int(round(0.05 * C)))
+            kp = max(1, int(round(0.10 * C)))
+            led = SiteLedger(key, C)
+            led.stable_act = [1.0 * hot] * kp + [1.0] * (C - k - kp) + [1.0 - gap] * k
+            if dorm:
+                led.dorm_cycles = [0] * (C - k) + [2] * k  # 尾部通道连续 2 周期确认
+            return led
+
+        def inject(v, gap, hot=1.0, dorm=False):
+            v.sites["b0.mlp_hidden"] = set_ledger("b0.mlp_hidden", 256, gap, hot, dorm)
+            v.sites["b1.mlp_hidden"] = set_ledger("b1.mlp_hidden", 256, gap, hot, dorm)
+            v.sites["b0.attn_out"] = set_ledger("b0.attn_out", 64, gap, hot, dorm)
+            v.sites["b1.attn_out"] = set_ledger("b1.attn_out", 64, gap, hot, dorm)
+
+        STREAM = "恒温器测试回放流".encode() * 30  # ≥ block_size+2，供幽灵扫描
+
+        def fresh_ctl():
+            c = LifeController()
+            d.life_ctl = c
+            return c, c.vitals_for(d, d.sleeping().name)
+
+        def thermo(ctl, v, rep=None):
+            d.cycle += 1
+            rep = {} if rep is None else rep
+            ctl.thermo_cycle(d, rep, v, STREAM, sel=None)
+            # run_cycle 的 LR 段每周期对手术 LR 重启窗递减（life.py 周期末）；
+            # 本尺级驱动不经 run_cycle，镜像该递减以保持限频③语义真实。
+            if ctl.lr_window > 0:
+                ctl.lr_window -= 1
+            return rep
+
+        def resolve(ctl):  # 测试桩：战役按"已验收/已放弃"收场，回 NORMAL 续演
+            ctl.state = STATE_NORMAL
+            ctl.campaign = None
+            ctl.plan = None
+
+        # ================= T1 利用率指数公式（双信号"钙"的测量层） =================
+        led = set_ledger("t.mlp_hidden", 256, 0.30, hot=1.5)
+        gap, hot = led.utilization_indices(p=0.10)
+        check("M4-T 利用率指数公式（gap=(med−tail)/med、hot=top10%/med）",
+              abs(gap - 0.30) < 1e-9 and abs(hot - 1.5) < 1e-9,
+              f"gap={gap:.6f} hot={hot:.6f}")
+        g0, h0 = SiteLedger("t.zero", 8).utilization_indices()
+        check("M4-T 冷账本无信号（gap=0, hot=1——既不过剩也不过热）",
+              g0 == 0.0 and h0 == 1.0)
+
+        # ================= T2 设定点带语义（带内持有/确认窗/越带收缩） =================
+        ctl, v = fresh_ctl()
+        inject(v, 0.10)  # 带内（XI_HI=0.20 + 死区之下）
+        rep = thermo(ctl, v)
+        check("M4-T 带内 → 持有（设定点带语义）",
+              rep["body"]["action"]["kind"] == "hold" and ctl.plan is None
+              and ctl.state == STATE_NORMAL, rep["body"]["action"])
+        inject(v, 0.35, dorm=True)  # 越带第 1 窗口
+        thermo(ctl, v)
+        check("M4-T 越带 1 窗口不动作（Schmitt 确认窗，阻尼②）",
+              ctl.plan is None and ctl.state == STATE_NORMAL)
+        inject(v, 0.35, dorm=True)  # 连续第 2 窗口
+        rep = thermo(ctl, v)
+        check("M4-T 连续 2 窗口越带 → 收缩计划（衰减，目标=确认休眠名单）",
+              ctl.state == STATE_WITHER_PLAN and ctl.plan
+              and ctl.plan["mode"] == "decay" and len(ctl.plan["targets"]) > 0,
+              f"plan={ctl.plan and ctl.plan['mode']}")
+
+        # ================= T3 born-again 目标从 gap̄ 导出 + 连环缩阻尼 =================
+        ctl, v = fresh_ctl()
+        inject(v, 0.60, dorm=True)  # gap̄=0.6 → T=1−0.6×0.6=0.64（非写死 0.7）
+        thermo(ctl, v)
+        rep = thermo(ctl, v)
+        check("M4-T 结构级错配 → born-again，目标 T 从 gap̄ 导出（0.64≠0.7）",
+              ctl.plan and ctl.plan["mode"] == "born_again"
+              and abs(ctl.plan["target"] - 0.64) < 1e-6,
+              f"target={ctl.plan and ctl.plan.get('target')}")
+        ctl.last_born_again = d.cycle  # 模拟刚 born-again 过（3 周期内再缩）
+        resolve(ctl)
+        inject(v, 0.60, dorm=True)
+        thermo(ctl, v)
+        thermo(ctl, v)
+        check("M4-T 连环缩阻尼：3 周期内再 born-again → 收缩系数减半（T=0.82）",
+              ctl.plan and ctl.plan["mode"] == "born_again"
+              and abs(ctl.plan["target"] - 0.82) < 1e-6,
+              f"target={ctl.plan and ctl.plan.get('target')}")
+
+        # ================= T4 乘性生长律 + ghost 需求门槛 + 确认窗（公式级） =================
+        ctl, v = fresh_ctl()
+        ghost_now = {(0, "mlp_hidden"): 1e-4, (0, "attn_v"): 1e-4,
+                     (1, "mlp_hidden"): 1e-4, (1, "attn_v"): 1e-4}
+        orig_scan = life_mod.ghost_scan
+        life_mod.ghost_scan = lambda model, data, **kw: dict(ghost_now)
+        try:
+            inject(v, 0.10, hot=1.0)  # 带内：收缩不抢跑
+            thermo(ctl, v)
+            inject(v, 0.10, hot=1.5)  # 需求上升：b0.mlp_hidden 过热
+            thermo(ctl, v)            # c4：过热第 1 窗
+            inject(v, 0.10, hot=1.5)
+            rep = thermo(ctl, v)      # c5：过热确认 → 首次幽灵扫描（基线）
+            check("M4-T 幽灵基线未建立 → 不排程（自身基线门槛，防漂移误判）",
+                  ctl.plan is None and ctl.state == STATE_NORMAL,
+                  rep["body"]["action"].get("reason"))
+            ctl.fresh_since_surgery = 10 ** 7  # 守卫④：充足证据流（预算放行）
+            inject(v, 0.10, hot=1.5)
+            ghost_now[(0, "mlp_hidden")] = 2e-4  # 需求跳变（对自身基线 2×）
+            thermo(ctl, v)            # c6：扫描 #2（确认窗 1/2）
+            inject(v, 0.10, hot=1.5)
+            rep = thermo(ctl, v)      # c7：扫描 #3 → 确认窗满 → 排程
+            W = 4 * 64  # b0.mlp_hidden 真实宽度（无移植体基座）
+            exp_delta = max(8, round(ctl.lambda_g_eff() * W
+                                     * max(0.0, min(2.0, 2.0 - 1.0))))
+            check("M4-T ghost 需求 2× 自身基线 + 过热确认 → GROW_PLAN（mlp 轴）",
+                  ctl.state == STATE_GROW_PLAN and ctl.plan
+                  and ctl.plan["axis"] == "mlp" and ctl.plan["layer"] == 0,
+                  f"plan={ctl.plan}")
+            check("M4-T 乘性生长律 delta=λ_g·W·e（公式值断言，研究报告 §3.3）",
+                  ctl.plan and ctl.plan["delta"] == exp_delta,
+                  f"delta={ctl.plan and ctl.plan['delta']} 期望 {exp_delta}"
+                  f"（λ_g_eff={ctl.lambda_g_eff():.4f} W={W} e=1.0）")
+            # —— 限频③闭环：生长计划刚记录，同 site 冷却期内不得再排 ——
+            resolve(ctl)
+            inject(v, 0.10)  # 其余轴位撤除过热，只留 b0.mlp_hidden 过热
+            v.sites["b0.mlp_hidden"] = set_ledger("b0.mlp_hidden", 256, 0.10, 1.5)
+            rep = thermo(ctl, v)      # c8：同 site 间隔未满
+            check("M4-T 同 site 动作间隔 ≥6 周期（限频③，冷却让位收缩前先挡生长）",
+                  ctl.plan is None and "限频" == rep["body"]["action"].get("class"),
+                  rep["body"]["action"])
+        finally:
+            life_mod.ghost_scan = orig_scan
+
+        # ================= T5 需求波动跟随：涨 / 持有 / 缩 时间线（核心证据） =================
+        ctl, v = fresh_ctl()
+        kinds, params_t = [], []
+        params = lambda: sum(p.numel() for p in d.sleeping().model.parameters())
+        snap_base = ctl._snapshot(d, d.sleeping())  # 收尾还原点（born-again 异构兜底）
+        ghost_now = {(0, "mlp_hidden"): 1e-4, (0, "attn_v"): 1e-4,
+                     (1, "mlp_hidden"): 1e-4, (1, "attn_v"): 1e-4}
+        orig_scan = life_mod.ghost_scan
+        life_mod.ghost_scan = lambda model, data, **kw: dict(ghost_now)
+        try:
+            inject(v, 0.10)                       # 需求常态
+            thermo(ctl, v); kinds.append("hold")  # 周期 1
+            thermo(ctl, v); kinds.append("hold")  # 周期 2（持有）
+            P0 = params()
+            ctl.fresh_since_surgery = 10 ** 7     # 新切片带来的充足证据流（守卫④放行）
+            inject(v, 0.10, hot=1.5)              # 需求上升（新数据切片）
+            thermo(ctl, v)                        # 周期 3：过热第 1 窗（未确认，无扫描）
+            thermo(ctl, v)                        # 周期 4：过热确认 → 首次扫描=基线（低）
+            ghost_now[(0, "mlp_hidden")] = 2e-4   # 需求跳变（对自身基线 2×）
+            thermo(ctl, v)                        # 周期 5：扫描 #2（确认窗 1/2）
+            rep = thermo(ctl, v)                  # 周期 6：扫描 #3 → 确认窗满 → 排程
+            kinds += ["hold", "hold"]
+            kinds.append(rep["body"]["action"]["kind"])
+            check("M4-T 需求上升 → 恒温器排出生长计划",
+                  ctl.state == STATE_GROW_PLAN and ctl.plan["kind"] == "grow",
+                  f"plan={ctl.plan}")
+            pre = params()
+            ctl.pre_train(d, {}, b"")             # 执行手术（真实 widen）
+            P1 = params()
+            params_t += [P0, P0, P0, P0, pre, P1]
+            check("M4-T 需求上升落地：生长手术后参数总量上升（涨）", P1 > P0,
+                  f"P0={P0} → P1={P1}（+{P1 - P0}）")
+            resolve(ctl)
+            inject(v, 0.10)                       # 需求满足（回带内）
+            thermo(ctl, v); kinds.append("hold")  # 持有
+            thermo(ctl, v); kinds.append("hold")  # 持有
+            check("M4-T 带内持有：参数总量保持不变", params() == P1,
+                  f"params={params()} == P1={P1}")
+            params_t += [P1, P1]
+            inject(v, 0.35, dorm=True)            # 需求长期下降（过剩）
+            thermo(ctl, v)
+            rep = thermo(ctl, v)
+            kinds.append(rep["body"]["action"]["kind"])
+            check("M4-T 持续过剩 → 收缩计划（衰减）",
+                  ctl.state == STATE_WITHER_PLAN and ctl.plan["mode"] == "decay")
+            ctl.pre_train(d, {}, b"")             # 执行衰减战役
+            resolve(ctl)
+            inject(v, 0.60, dorm=True)            # 结构级错配
+            thermo(ctl, v)
+            thermo(ctl, v)
+            check("M4-T 深度过剩 → born-again 计划（缩）",
+                  ctl.plan and ctl.plan["mode"] == "born_again")
+            ctl.pre_train(d, {}, b"")             # 执行换装（学生从头出生）
+            P2 = params()
+            params_t.append(P2)
+            check("M4-T 需求下降落地：born-again 后参数总量低于基线（缩）", P2 < P0,
+                  f"P2={P2} < P0={P0}")
+            # 测试收尾：按出生快照还原睡脑（born-again 换装后与醒脑异构；后续
+            # T9 的纯 M0 回滚路径要求同构——真实部署中该还原由验收/放弃语义承担）
+            ctl._restore(d, d.sleeping(), snap_base)
+            resolve(ctl)
+            flips = sum(1 for a, b2 in zip(kinds, kinds[1:])
+                        if a != "hold" and b2 != "hold" and a != b2)
+            check("M4-T 需求波动跟随时间线：涨/持有/缩 全程有界（方向翻转 ≤4）",
+                  flips <= 4 and P2 < P0 < P1,
+                  f"kinds={kinds} 翻转 {flips} 次 params={params_t}")
+        finally:
+            life_mod.ghost_scan = orig_scan
+
+        # ================= T6 振荡熔断（阻尼⑤） =================
+        ctl, v = fresh_ctl()
+        rep = {}
+        ctl._record_action(["b0.mlp_hidden"], "shrink", 10, rep)
+        ctl._record_action(["b0.mlp_hidden"], "grow", 12, rep)   # 反向 <6 周期：振荡①
+        check("M4-T 反向操作间隔 <6 周期记振荡", len(ctl.osc_events) == 1)
+        ctl._record_action(["b0.mlp_hidden"], "shrink", 14, rep)  # 振荡② → 熔断
+        check("M4-T 振荡 ≥2 次/6 周期 → 该 site 熔断 + 死区放宽（阻尼⑤）",
+              ctl.site_fuse.get("b0.mlp_hidden") == 14 + OSC_FUSE_CYCLES
+              and ctl.deadband_scale > 1.0,
+              f"fuse={ctl.site_fuse} deadband={ctl.deadband_scale}")
+
+        # ================= T7 守卫：数据供给门 / 反刍期不动刀 =================
+        ctl, v = fresh_ctl()
+        inject(v, 0.35, dorm=True)
+        ctl.supply_hist = [[d.cycle - 2, 0], [d.cycle - 1, 0], [d.cycle, 0]]
+        rep = thermo(ctl, v)
+        check("M4-T 供给门关闭（反刍期零新鲜摄入）→ 结构冻结不动刀",
+              rep["body"]["action"].get("class") == "数据耗尽（供给门）"
+              and ctl.plan is None and rep["body"]["supply"] == "closed",
+              rep["body"]["action"])
+        thermo(ctl, v)  # 第 2 窗口（越带确认已满）——供给门仍冻结
+        check("M4-T 越带确认已满但供给门关闭 → 仍不动刀（守卫优先于信号）",
+              ctl.plan is None and ctl.state == STATE_NORMAL)
+        ctl.supply_account(d, [(1.0, Experience(999, "全新经验非反刍内容" .encode() * 20, 3.0))])
+        rep = thermo(ctl, v)
+        check("M4-T 新鲜经验入账 → 供给门开 → 越带信号放行为收缩计划",
+              ctl.state == STATE_WITHER_PLAN and ctl.plan["mode"] == "decay"
+              and rep["body"]["supply"] == "open", rep["body"]["action"])
+
+        # ================= T7b 守卫④预算/供给比 =================
+        ctl, v = fresh_ctl()
+        ghost_now = {(0, "mlp_hidden"): 1e-4, (0, "attn_v"): 1e-4,
+                     (1, "mlp_hidden"): 1e-4, (1, "attn_v"): 1e-4}
+        orig_scan = life_mod.ghost_scan
+        life_mod.ghost_scan = lambda model, data, **kw: dict(ghost_now)
+        try:
+            inject(v, 0.10, hot=1.5)
+            thermo(ctl, v)
+            thermo(ctl, v)                        # 过热确认 + 基线扫描
+            ghost_now[(0, "mlp_hidden")] = 2e-4
+            inject(v, 0.10, hot=1.5)
+            thermo(ctl, v)
+            inject(v, 0.10, hot=1.5)
+            rep = thermo(ctl, v)                  # ghost 需求确认，但证据流不足
+            check("M4-T 守卫④：新鲜证据不足最小步（8 通道当量）→ 拒绝生长",
+                  ctl.plan is None
+                  and "预算" in rep["body"]["action"].get("class", ""),
+                  rep["body"]["action"])
+        finally:
+            life_mod.ghost_scan = orig_scan
+
+        # ================= T7c 守卫⑤：选址禁用探测集（L8 红线） =================
+        ctl, v = fresh_ctl()
+        seen_streams = []
+        orig_scan = life_mod.ghost_scan
+        life_mod.ghost_scan = lambda model, data, **kw: (
+            seen_streams.append(bytes(data)) or {(0, "mlp_hidden"): 1e-4,
+                                                 (0, "attn_v"): 1e-4,
+                                                 (1, "mlp_hidden"): 1e-4,
+                                                 (1, "attn_v"): 1e-4})
+        try:
+            marker = "训练粮独有标记：恒温器选址只许看这条回放流。" .encode() * 10
+            inject(v, 0.10, hot=1.5)
+            ctl.fresh_since_surgery = 10 ** 7
+            thermo(ctl, v)
+            d.cycle += 1
+            rep = {}
+            ctl.thermo_cycle(d, rep, v, marker, sel=None)
+            check("M4-T 幽灵扫描真实发生（方向通道活性）", len(seen_streams) >= 1)
+            check("M4-T 选址禁用探测集：扫描输入=训练回放流（含训练标记），"
+                  "与合成探测卷零交集（守卫⑤，L8 红线）",
+                  seen_streams and marker[:60] in seen_streams[0]
+                  and _PROBE_SEG not in seen_streams[0],
+                  f"scan 输入 {len(seen_streams[0])}B")
+        finally:
+            life_mod.ghost_scan = orig_scan
+
+        # ================= T7d 守卫⑥成熟刹车：λ_g 永不归零 + 容量下限非零 =================
+        ctl, v = fresh_ctl()
+        # 体型当量占比 = (d_model/64)×(n_layers/2)：26/64×1/2 ≈ 0.203 < 0.25 下限
+        ctl.morph_for(d, d.sleeping().name)["shrink"] = {"d_model": 26, "n_layers": 1}
+        inject(v, 0.60, dorm=True)
+        thermo(ctl, v)
+        rep = thermo(ctl, v)
+        check("M4-T 容量下限：再缩将破 MIN_BODY_FRAC → 拒绝 born-again（防无限萎缩）",
+              ctl.plan is None and "容量下限" in rep["body"]["action"].get("reason", ""),
+              rep["body"]["action"])
+        # 40/64×1/2 = 0.3125：可缩但被托到下限允许的 0.8（=0.25/0.3125）
+        ctl.morph_for(d, d.sleeping().name)["shrink"] = {"d_model": 40, "n_layers": 1}
+        rep = thermo(ctl, v)
+        check("M4-T 容量下限刹车：T 被托到下限允许的 0.8（比误差要求的 0.64 缩得少）",
+              ctl.plan and ctl.plan["mode"] == "born_again"
+              and abs(ctl.plan["target"] - 0.8) < 1e-6,
+              f"target={ctl.plan and ctl.plan.get('target')}")
+        del ctl.morph_for(d, d.sleeping().name)["shrink"]  # 拆掉假记录（形态=真相，
+        # 回滚测试的快照/还原要求记录与真实模型一致——真实运行中由换装语义保证）
+        ctl.lambda_g = 0.015
+        ctl.state = STATE_GROWN
+        h = d.sleeping()
+        ctl.campaign = {"kind": "grow", "gen": 1, "snap": ctl._snapshot(d, h),
+                        "delta": 16}
+        ctl.grown_since_surgery = 16  # R3 验真（监督审计 2026-10-05）：先真实记账
+        # 再回滚——原断言在 grown=0 上空转（0−campaign→0 恒真，账目死代码不可见）
+        rep = {}
+        ctl.post_exam(d, rep, False)  # 生长验收失败
+        check("M4-T 增益自适应：生长回滚 → λ_g×0.5 且触底 LAMBDA_MIN（永不归零）",
+              ctl.lambda_g == LAMBDA_MIN and rep.get("m4_lambda_g") == LAMBDA_MIN,
+              f"λ_g={ctl.lambda_g}")
+        check("M4-T 供给账回冲：回滚后 grown_since_surgery 归零（守卫④账实相符）",
+              ctl.grown_since_surgery == 0)
+        # R3 补强：部分回冲（账面 20、本次 delta 16 → 剩 4）——钉死"按 delta 精确
+        # 回冲"而非清零/不动，防修复退化成两种更简单的错法
+        ctl.state = STATE_GROWN
+        ctl.campaign = {"kind": "grow", "gen": 1, "snap": ctl._snapshot(d, h),
+                        "delta": 16}
+        ctl.grown_since_surgery = 20
+        ctl.lambda_g = LAMBDA_MIN
+        ctl.post_exam(d, {}, False)
+        check("M4-R3 回滚账目按 campaign.delta 精确回冲（原实现先清 campaign 再读它"
+              "——扣账恒 0，死代码）",
+              ctl.grown_since_surgery == 4, f"grown={ctl.grown_since_surgery} 期望 4")
+        ctl.maturity = 1.0
+        check("M4-T 成熟刹车：m=1 时 λ_g_eff=0.5λ_g>0、死区放宽 1.5×（可塑性不归零）",
+              abs(ctl.lambda_g_eff() - 0.5 * ctl.lambda_g) < 1e-12
+              and abs(ctl.h_eff() - life_mod.H_SHRINK * 1.5) < 1e-12)
+
+        # ================= T7e R2 修复验收：成熟度信号可流动 + 死区收窄可达 =================
+        # 病灶（监督审计 2026-10-05）：m 的原料是"margin<EPS_PLATEAU=0.005 的平台期
+        # 计数"，而呼吸实验实测真实系统 margin 恒 +0.025~0.055 ≫ 0.005 → plateau
+        # 恒 0 → m≡0 → 成熟刹车与死区收窄两路结构性不可达（与被退役阶梯同型病在
+        # 守卫内复发）。修复后原料 = margin 滚动分布分位（_mature_input）。
+        ctl, v = fresh_ctl()
+        inject(v, 0.10)
+        for _ in range(16):  # 平稳改善期：margin 恒 0.04（≫ 旧 ε——旧口径视之为"永不平台"）
+            ctl.post_exam(d, {"probe_new": 5.0, "gate_margin": 0.04}, True)
+        check("M4-R2 平稳期（margin 恒 0.04）→ 成熟输入=0、m≈0、旧口径 plateau 仍恒 0（对照）",
+              ctl._mature_input() == 0.0 and ctl.maturity < 0.05 and ctl.plateau == 0,
+              f"input={ctl._mature_input()} m={ctl.maturity:.3f} plateau={ctl.plateau}")
+        for _ in range(4):   # 改善率下台阶：0.02 仍 ≫ 旧 ε=0.005（旧口径照样视而不见）
+            ctl.post_exam(d, {"probe_new": 5.0, "gate_margin": 0.02}, True)
+        check("M4-R2 改善率跌破自身滚动分布 q25 → 成熟输入=1（世界信号可流动，R2）",
+              ctl._mature_input() == 1.0,
+              f"近窗中位 0.02 < 自身 q25 0.04（且 0.02 ≫ 旧 ε——旧口径下此信号永不存在）")
+        for _ in range(8):
+            rep = thermo(ctl, v)
+        check("M4-R2 成熟刹车真实生效：m EMA 上行 → λ_g_eff < λ_g、死区放宽",
+              ctl.maturity >= MATURITY_NARROW and ctl.lambda_g_eff() < ctl.lambda_g
+              and ctl.h_eff() > life_mod.H_SHRINK,
+              f"m={ctl.maturity:.3f} λ_eff={ctl.lambda_g_eff():.4f} "
+              f"h_eff={ctl.h_eff():.4f}")
+        ctl.no_action_streak = life_mod.DEADBAND_CAL_EVERY - 1
+        rep = thermo(ctl, v)
+        check("M4-R2 死区收窄路径可达（R2：原 plateau≥1 门在真实 margin 分布下结构性死）",
+              rep["body"]["action"].get("deadband_narrowed", 1.0) < 1.0
+              and ctl.deadband_scale < 1.0,
+              f"scale={ctl.deadband_scale}")
+        check("M4-R2 冷启动不刹车：margin 历史不足 MARGIN_HIST_CAP → 输入恒 0",
+              LifeController()._mature_input() == 0.0)
+
+        # ================= T7f R1 修复验收：稳态 gap̄=0.40 不触发重锤、带自动上浮 =================
+        # 病灶（监督审计 2026-10-05）：XI_HI=0.20 低于 57M 真实身体实测稳态 gap̄≈0.45
+        # （docstring 自引数），带不可自校准 → born_sustained 12 周期重锤在健康系统
+        # 几乎必触发。修复后带 = max(XI_HI, gap̄ 滞后滚动 p90)，随系统自身稳态上浮。
+        ctl, v = fresh_ctl()
+        kinds = []
+        for i in range(30):  # 稳态 = docstring 引用的真实身体量级 gap̄≈0.40
+            inject(v, 0.40, dorm=True)
+            rep = thermo(ctl, v)
+            act = rep["body"]["action"]
+            kinds.append((act.get("kind"), act.get("class")))
+            if ctl.plan:  # 保险收场（稳态不应排出 born）
+                ctl.state = STATE_NORMAL
+                ctl.plan = None
+                ctl.campaign = None
+        check("M4-R1 稳态 gap̄=0.40 全程零 born-again（重锤不被稳态触发，R1 验收）",
+              not any(c and "结构级" in str(c) for _, c in kinds),
+              f"非 hold 动作 {[(k, c) for k, c in kinds if k != 'hold']}")
+        check("M4-R1 设定点带自动上浮到稳态：xi_hi_eff → 0.40（> 律定下限 0.20）",
+              abs(ctl._xi_hi_eff() - 0.40) < 0.02 and ctl._xi_hi_eff() > XI_HI + 0.1,
+              f"xi_hi_eff={ctl._xi_hi_eff():.3f} "
+              f"band_hi={ctl._xi_hi_eff() + ctl.h_eff():.3f}")
+        check("M4-R1 带浮起后 site 级越带收缩同样熄火（冷启动窗后零结构动作）",
+              all(k == "hold" for k, _ in kinds[10:]),
+              f"周期 11-30 动作 {[k for k, _ in kinds[10:]]}")
+        check("M4-R1 body setpoint 如实上报浮动带（可观测义务，L11 措辞防线）",
+              abs(rep["body"]["setpoint"]["xi_hi"] - 0.40) < 0.02
+              and rep["body"]["setpoint"]["xi_hi_floor"] == XI_HI,
+              f"setpoint={rep['body']['setpoint']}")
+        inject(v, 0.65)   # 稳态之上的真实跳变：带滞后窗不吸收
+        thermo(ctl, v)
+        inject(v, 0.65)
+        rep = thermo(ctl, v)
+        check("M4-R1 稳态之上的真实跳变仍触发 born-again（带滞后于信号——升级路不灭）",
+              ctl.plan and ctl.plan["mode"] == "born_again",
+              f"target={ctl.plan and ctl.plan.get('target')}")
+
+        # ================= T8 捕获对账（标签-捕获的固化侧） =================
+        for tag, act_val, expect in (("捕获成功", 0.9, round(LAMBDA_G * 1.1, 6)),
+                                     ("捕获失败", 0.1, round(LAMBDA_G * 0.9, 6))):
+            ctl, v = fresh_ctl()
+            key = "b0.mlp_hidden.new.0"
+            v.sites[key] = SiteLedger(key, 8, {"is_new": [True] * 8,
+                                               "probation": [3] * 8})
+            v.sites["b0.mlp_hidden"] = set_ledger("b0.mlp_hidden", 256, 0.10)
+            ctl.pending_capture = {"due_cycle": d.cycle + 1, "keys": [key],
+                                   "hname": d.sleeping().name}
+            v.sites[key].stable_act = [act_val] * 8  # 新单元实现利用率
+            rep = thermo(ctl, v)
+            cap = rep.get("m4_capture") or {}
+            check(f"M4-T 捕获对账（{tag}）：rate 如实入 report，λ_g 增益自适应",
+                  abs(cap.get("rate", -1) - (1.0 if act_val > 0.5 else 0.0)) < 1e-9
+                  and abs(ctl.lambda_g - expect) < 1e-9,
+                  f"rate={cap.get('rate')} λ_g={ctl.lambda_g}")
+
+        # ================= T9 L5/L8 不破 + L11 总开关 + body 可观测 =================
+        def feed_n(n, tag):
+            for i in range(n):
+                d.learn(f"恒温器集成验证{tag}记录第{i}条，内容足够长以稳定通过选拔训练。{i}" * 3,
+                        source="test")
+
+        feed_n(12, "甲")
+        d.life_enabled = False
+        r = run_cycle(d, steps=2, verbose=False)
+        check("M4-T 总开关关闭：M4 钩子与 body 全灭（纯 M0 语义，律 L11 安全阀）",
+              not any(k.startswith("m4_") for k in r) and "body" not in r,
+              f"keys={sorted(r)}")
+        d.life_enabled = True
+        feed_n(12, "乙")  # 上一周期已摘除缓冲：不补喂则早退、body/gate 键缺席
+        r = run_cycle(d, steps=2, verbose=False)
+        check("M4-T body 可观测字段在周期报告（d_model/参数总量/设定点/缺口/动作）",
+              "body" in r and all(k in r["body"] for k in
+                                  ("d_model", "params", "setpoint", "util_gap", "action")),
+              f"body={r.get('body')}")
+        check("M4-T 体检未绕过：gate 字段在场且换班判决与体检一致（L8）",
+              "probe_new" in r and "gate_margin" in r
+              and r.get("swapped") == r.get("passed"),
+              f"passed={r.get('passed')} swapped={r.get('swapped')}")
+        ctl = d.life_ctl
+        ctl.plan = {"kind": "wither", "mode": "born_again"}  # 手工计划（无 target）
+        ctl.state = STATE_WITHER_PLAN
+        feed_n(12, "丙")
+        r = run_cycle(d, steps=3, verbose=False)
+        check("M4-T 手工 born-again 计划无 target → 回落 WITHER_TARGET=0.7"
+              "（退役件身份），且体检门控判决照常在场",
+              r.get("m4_wither_start", {}).get("target") == 0.7
+              and "probe_new" in r and "gate_margin" in r
+              and ((r.get("m4_wither_keep") is not None)
+                   == (ctl.state == STATE_WITHERING)),
+              f"start={r.get('m4_wither_start')}")
+
+        # ================= T10 恒温器状态随档回环 =================
+        ctl, v = fresh_ctl()
+        ctl.lambda_g, ctl.deadband_scale, ctl.maturity = 0.033, 1.5, 0.4
+        ctl.thermo_hist = {"b0.mlp_hidden": [[1, 0.2, 1.3], [2, 0.3, 1.4]]}
+        ctl.ghost_hist = {"0.mlp_hidden": [[1, 1e-4], [2, 2e-4]]}
+        ctl.supply_hist = [[1, 500], [2, 700]]
+        ctl.seen_hashes = [11, 22, 33]
+        ctl.site_last_action = {"b0.mlp_hidden": [2, "grow"]}
+        st = ctl.to_state()
+        json.dumps(st)  # weights_only 载荷纪律：必须可 JSON 化
+        ctl2 = LifeController().from_state(st)
+        check("M4-T 恒温器状态随档回环（JSON 安全 + 字段逐一复原）",
+              ctl2.lambda_g == 0.033 and ctl2.deadband_scale == 1.5
+              and ctl2.maturity == 0.4 and ctl2.ghost_hist == ctl.ghost_hist
+              and ctl2.supply_hist == ctl.supply_hist
+              and ctl2._seen == {11, 22, 33}
+              and ctl2.site_last_action == ctl.site_last_action)
+
+        # ================= T11 触发可达性（现实信号链，受限场景真实开刀） =================
+        # 平台期阶梯的死因是"数学不可达"（margin 恒正，9 连击期望 ~1300 周期）。
+        # 反面证据：恒温器在同量级受限场景（十来个周期、真实训练/真实账本/真实
+        # 幽灵扫描/真实守卫，零信号桩）内必须至少真实排一次结构手术。
+        torch.manual_seed(2026)
+        d2 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=4, block_size=256),
+                          probe_path=probe, device="cpu")
+        d2.rng = _random.Random(11)
+        ctl = d2.life_ctl
+        v = ctl.vitals_for(d2, d2.sleeping().name)
+        seg_a = "逻辑推理恒温器实测片段：若甲高于乙则甲高于丙，铁是金属故铁导电。"
+        plans, decided, scans0 = [], 0, sum(len(x) for x in ctl.ghost_hist.values())
+        for c in range(3):  # 阶段 A：基线需求（结构化中文）
+            for i in range(25):
+                d2.learn(seg_a + f"基线编号{c * 25 + i}。", source="reach-A")
+            # maybe_sleep = 部署单线程路径（周期后睡眠债清零——与 SleepTrainer 的
+            # feeding 路径同语义；直调 run_cycle 不清债，会把 Bellesi 守卫误触发）
+            r = d2.maybe_sleep(force=True, steps=25, verbose=False)
+            act = (r.get("body") or {}).get("action") or {}
+            decided += 1 if act.get("kind") else 0
+            if r.get("m4_plan"):
+                plans.append(r["m4_plan"][0])
+        seg_b = "arithmetic drill {i}: {i}+{i}=2i {i}*3={t} {i}/2={h} results follow"
+        for c in range(6):  # 阶段 B：需求跳变（全新字节分布，~240KB/周期新鲜证据）
+            for i in range(30):
+                i2 = c * 30 + i
+                d2.learn((seg_b.format(i=i2, t=i2 * 3, h=i2 // 2) + " ") * 90,
+                         source="reach-B")
+            r = d2.maybe_sleep(force=True, steps=25, verbose=False)
+            act = (r.get("body") or {}).get("action") or {}
+            decided += 1 if act.get("kind") else 0
+            if r.get("m4_plan"):
+                plans.append(r["m4_plan"][0])
+        check("M4-T 触发可达性①：每个周期都有信号落地的判决（class+reason 在场）",
+              decided >= 8, f"{decided} 个周期出判决")
+        check("M4-T 触发可达性②：现实信号下真实排出结构手术（非阶梯数学不可达）",
+              len(plans) >= 1, f"plans={plans}")
+        check("M4-T 触发可达性③：方向通道真实开动（幽灵扫描基线已记账）",
+              sum(len(x) for x in ctl.ghost_hist.values()) > scans0
+              and len(ctl.ghost_hist) > 0, f"ghost 位点 {len(ctl.ghost_hist)} 个")
+        check("M4-T 触发可达性④：恒温器全程只由内部信号驱动（无人工干预痕迹）",
+              all(p in ("grow", "wither") for p in plans))
+
+
 # ============ 冷层隔离总闸自检（本身也是断言） ============
 
 
@@ -1931,6 +2466,7 @@ if __name__ == "__main__":
     t_m4_redo_recycle()
     t_m4_anchor_persistence()
     t_m4_state_machine()
+    t_m4_thermostat()
     t_cold_quarantine()   # 隔离机制自检（先跑：此时污染若已发生，下面那条会一并变红）
     t_cold_untouched()    # 收尾红线：必须最后跑
     n_ok = sum(PASS)

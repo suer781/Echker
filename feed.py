@@ -186,8 +186,25 @@ def ruminate(d, k=None):
     return len(batch)
 
 
+def serve_demo(d, fed_total):
+    """V2 证据通道【零点实验专用，非生产功能】：喂食进行中用固定演示问题调
+    serve() 一次。训练窗口（睡眠周期）与回答窗口的时间戳交错即"边训练边回答"
+    的证据。serve 与 learn 同样计 learn_busy + feed_lock（dolphin.py 读屏障），
+    主线程内串行调用，不新增线程、不改变既有并发语义。"""
+    q = "小明有3个苹果，又买了2个，一共有几个苹果？"
+    t0 = time.monotonic()
+    try:
+        resp, _ = d.serve(q)
+    except Exception as e:  # 演示失败不拦喂食（部署不停机原则）
+        log("服务演示", f"第 {fed_total} 条边界 serve 异常：{e!r}")
+        return
+    dt = time.monotonic() - t0
+    log("服务演示", f"（训练窗口进行中，耗时 {dt:.2f}s）问：{q}  "
+        f"答：{resp.replace(chr(10), ' ')[:60]!r}")
+
+
 def feed_from(d, names, cursor, seen, trainer=None, sleep_every=500, quota=None,
-              stats=None, fed_base=0, progress_every=PROGRESS_EVERY):
+              stats=None, fed_base=0, progress_every=PROGRESS_EVERY, serve_every=0):
     """正式喂食：从喂食游标（G3）起迭代数据源，喂入 + 自动第二信号接线。
 
     游标语义：record_idx 计数据源内已消费的记录数（含碎片跳过）。cursor 与
@@ -221,6 +238,8 @@ def feed_from(d, names, cursor, seen, trainer=None, sleep_every=500, quota=None,
             elif fed_total % progress_every == 0:
                 log("部署", f"已喂 {fed_total} 条（当前源 {name}）"
                     f"  缓冲 {d.buffer.bytes}B  压力 {d.buffer.pressure():.2f}")
+            if serve_every and fed_total % serve_every == 0:  # 零点实验专用（V2 证据）
+                serve_demo(d, fed_total)
         if not limit_hit:  # 本源耗尽：游标推进到下一源
             si += 1
             cursor["source_idx"], cursor["record_idx"] = si, 0
@@ -281,6 +300,9 @@ def parse_args():
                     help="关闭守护模式（数据尽即收工；默认开启：数据尽后转入反刍等待新经验）")
     ap.add_argument("--max-idle", type=int, default=MAX_IDLE_DEFAULT,
                     help=f"守护模式：连续 N 个空选拔周期后允许收工（值：自成，默认 {MAX_IDLE_DEFAULT}）")
+    ap.add_argument("--serve-every", type=int, default=0,
+                    help="【零点实验专用】每喂 N 条用固定演示问题调 serve() 一次"
+                         "（V2 边训练边回答的证据通道；默认 0=关闭）")
     return ap.parse_args()
 
 
@@ -355,7 +377,7 @@ def main():
             quota = None if args.limit is None else max(0, args.limit - total)
             fed, limit_hit, skip = feed_from(
                 d, names, cursor, seen, trainer=trainer, sleep_every=args.sleep_every,
-                quota=quota, stats=stats, fed_base=total)
+                quota=quota, stats=stats, fed_base=total, serve_every=args.serve_every)
             total += fed
             skipped += skip
             if limit_hit:

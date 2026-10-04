@@ -1,4 +1,4 @@
-"""生命节律控制器（M4）：睡眠周期的**唯一**实现 + 自生长/自凋零状态机。
+"""生命节律控制器（M4）：睡眠周期的**唯一**实现 + 连续结构恒温器（自生长/自凋零）。
 
 取代路线（交接 §6-C）：
   - life.run_cycle 是唯一睡眠周期实现：完整复刻 sleep.run_cycle 的 M0 全语义
@@ -10,43 +10,166 @@
   - M4 钩子（d.life_enabled 总开关一键全关，L11 人工安全阀）：
       周期开头 pre_train（GROW 执行 widen / WITHER 换装或继续战役）
       → NREM 样训练（与 M0 同一循环；born-again 验收周期用手术验收 kd_alpha）
-      → REM 样子相位（ReDo 回收 / 软衰减 / 手术排程）
-      → 体检（与 M0 同一 gate）→ post_exam（锚/平台期/战役验收）。
+      → REM 样子相位（ReDo 回收 / 软衰减 / **连续结构恒温器**）
+      → 体检（与 M0 同一 gate）→ post_exam（锚/平台期/战役验收/二阶阻尼反馈）。
 
-状态机（规格 C）：
-  NORMAL → GROW_PLAN → GROWN → 体检 → NORMAL / ROLLBACK
-  NORMAL → WITHER_PLAN → WITHERING（多周期分代；学生保留标志：体检失败不回滚
-  睡脑学生，逐周期续训直到验收或放弃——回滚会撤销凋零/学生进度，战役永不收敛）
+═══════════════════════════════════════════════════════════════════════════
+连续结构恒温器（2026-10-05 落地，取代平台期阶梯的活性路径）
+═══════════════════════════════════════════════════════════════════════════
+规格书：研究报告_自适应原理.md（Butz & van Ooyen 2013 突触元件框架的工程移植：
+设定点带负反馈，NEST growth curve + update interval 同型）。控制形态：
 
-触发信号（规格 C）：体检平台期（连续 N 周期改善<ε）、ghost_probe 增益（区分
-优化/容量平台期）、显存余量、记忆库压力、睡眠债守卫（睡眠债高禁结构手术——
-Bellesi 2017：慢性睡眠剥夺损害突触发生）。
+  每周期末（REM 相位）：双信号"钙" → 对设定点带求偏差 → 按 λ_g·W·e 乘性律
+  调整容量（长/缩/持有）→ 五重阻尼 → 受影响参数优化器状态重置（沿用
+  gate/换班机制）。每周期至多一次结构动作；执行点仍在睡眠周期（律 L11）。
 
-固定干预次序（规格 C，不许跳级）：ReDo 回收 → LR 退火 → 手术。以平台期深度
-为阶梯：plateau∈[N,2N) 第一阶梯（ReDo 代谢常开）、[2N,3N) 第二阶梯追加
-LR 退火、≥3N 第三阶梯排程手术。
+双信号"钙"（研究报告 §3.1 定案）：
+  1. 幅值（主）：每 site 的 utilization_gap = (med − bottom-5%均值)/med
+     （vitals.SiteLedger.utilization_indices，stable 口径）——过剩信号；
+     headroom_hot = top-10%均值/med——过热信号（生长的利用率前提）。
+  2. 方向（生长货币）：ghost_scan 逐位增益，对**自身滚动基线**求相对需求
+     （细胞自主；L4"带通中心=滚动中位数"同款手术——不设绝对设定点，
+     免疫量级漂移）。Q6/呼吸实验实测：基线稳定 ~1.0×，全新数据跳 1.6–1.8×。
+
+外环分类（审计用，不是判决门；2026-10-05 监督审计 P2 对齐）：数据耗尽
+（供给门关）/ 容量过剩（site 级·越浮动带 | 全局级·gap̄ 超带 | 持续过剩升级）/
+容量受限（ghost 需求 × headroom 双确认）。原"五分类"中的"学习推进中"与
+"瓶颈不在容量（记忆库压力）"两类**未实现、如实降级删除**——记忆库压力不是
+容量信号（研究报告 §3.1 定案），不冒充在册。
+
+**呼吸实验诊断（2026-10-05，触发链三断点实测）已吸收**：
+  - 平台期阶梯（≥3 记账/≥6 退火/≥9 排程）**数学不可达**：120 步/周期下
+    margin 恒在 +0.025~+0.055（AdamW 整步副作用 + 记忆复活/做梦每周期注入
+    半遗忘内容——系统被设计成永不停学），9 连击期望 ~1300 周期。故阶梯
+    **不再作为 fallback 挂在活性路径上**（留着是死代码+虚假安全感）；
+    `_schedule` 方法体仅为 tests 钉住的历史件保留（退役身份，生产零调用）。
+  - 凋零触发改"相对自身历史趋势"与连续带（休眠占比上限 ~5%，原绝对门槛
+    10%/25% 构造性不可达）。
+  - 恒温器判决**不设平台期前置门**——双信号钙每周期连续驱动（分工律的
+    "权重通道先尽力"由生长的多重 AND 门槛与限频承担）。
+
+**监督审计 R 级修复（2026-10-05，第四任修复工程师）**：
+  - R1 设定点带"稳态即越带"：XI_HI=0.20 低于 57M 真实身体实测稳态 gap̄
+    ≈0.45（16 个可动刀位全部 > 0.20）且带不可自校准 → born_sustained
+    12 周期重锤在健康系统几乎必触发。带改浮动：max(XI_HI, gap̄ 滞后滚动
+    p90)（_xi_hi_eff / _site_xi_eff）；滞后窗（XI_LAG=BORN_PERSIST）保证
+    带慢于信号——升级路不被带当场吸收；稳态分布定标工件归档
+    定标/gapbar_定标结果.json（兑现"实测"引用的可复核义务）。
+  - R2 成熟刹车/死区收窄挂在永不流动的信号上：m 的原料从"平台期计数"
+    （margin<绝对 ε）改为 margin 滚动分布分位（_mature_input）；死区收窄
+    门同步从 plateau≥1 改为 m≥MATURITY_NARROW。
+  - R3 生长回滚账目死代码：post_exam 回滚扣账先取 delta 再清 campaign。
+
+四条守卫（研究报告 §3.5 全集，本实现）：
+  ③ 数据供给门：近 SUPPLY_WINDOW 周期新鲜内容摄入不足 → 结构冻结
+     （反刍期只消化不动刀；新鲜度=经验内容指纹，复训旧记忆不算新供给）；
+  ④ 预算/供给比：累计生长通道 ≤ β×(新鲜字节/512B 通道当量)——结构投资须有
+     证据流支撑，防反刍循环吹脑；
+  ⑤ 选址禁用探测集：ghost_scan 只读真实回放流（训练侧），手术层选址永不
+     读 probe（L8 红线：选址用探测=偷看考卷）；
+  ⑥ 成熟刹车：可塑性永不归零（λ_g_eff = λ_g·(1−0.5m) ≥ λ_g·0.5 > 0，
+     m=改善率（gate margin）跌破自身滚动分布低分位的 EMA——世界信号非日历；
+     R2 修复：原"margin<绝对 ε 的平台期占比"口径在真实系统结构性不可达，
+     实测 margin 恒 +0.025~0.055 ≫ ε=0.005）+ 容量下限非零（累计收缩后
+     体型占比 < MIN_BODY_FRAC 禁再缩，防无限萎缩）。
+
+五重阻尼（研究报告 §3.4）：①测量阻尼（stable EMA，禁 tag）②Schmitt 确认窗
+（连续 CONFIRM_M 窗口越界才动作，1 窗口回带内即退出）③限频（每周期至多
+1 动作 + 同 site 间隔 ≥6 周期 + 手术 LR 重启窗内不排新刀）④不对称增益
+（长需双信号 AND + 供给守卫，缩单信号 OR 即可）⑤增益自适应（回滚 →
+λ_g×0.5+冷却；验收通过且捕获成功 → λ_g×1.1；振荡熔断 → 死区放宽）。
+
+战役语义（规格 C，不变）：NORMAL → GROW_PLAN → GROWN → 体检 → NORMAL /
+ROLLBACK；NORMAL → WITHER_PLAN → WITHERING（学生保留标志：体检失败不回滚，
+逐周期续训直到验收或分代耗尽放弃还原）。
 
 锚：历史最优 probe（anchor_best，持久化进 save/load；规格 C）。
 
-常量来源身份（律固定，值自成）：
-  PLATEAU_CYCLES=3       【值自成】平台期阶梯步长（周期数）
-  EPS_PLATEAU=0.005      【定标】Q6：ε=2×配对SE 上界 0.0056 NLL，低于此算无改善
-  GHOST_GAIN_MIN=1e-4    【值自成】容量平台判据初值（在线自校准通道，Q6 §6.3）
-  WITHER_DORMANT_FRAC=0.10   【值自成】凋零排程的休眠占比下限
-  WITHER_BORN_FRAC=0.25      【值自成】休眠占比高到直接 born-again 换装
-  WITHER_TARGET=0.7          【值自成】born-again 学生体型比例
-  WITHER_KD_ALPHA=0.75       【定标】规格带 0.7–0.8 取中（仅手术验收周期）
-  WITHER_MAX_GEN=3           【值自成】凋零战役分代上限（规格"多周期分代"）
-  REDO_MAX_FRAC=0.05         【值自成】单周期回收上限（审计：5% 上限改纯反馈量）
-  DECAY_GAMMA=0.7            【值自成】软衰减单代系数
-  SURGERY_LR_WINDOW=3        【值自成】规格带 2–3 周期取上，之后交还 Plasticity
-  SURGERY_LR_MULT=2.0        【律定承袭规格 B】base×2，≤ lr_max
-  SLEEP_DEBT_GUARD=4.0       【值自成】_since_sleep > target_interval×4 禁手术
-  ROLLBACK_GUARD=3           【值自成】连续回滚 ≥3 次禁手术（脑在挣扎，先养）
-  GROW_DELTA_FRAC=0.05       【值自成】变宽幅度 = site 宽度的 5%
-  GROW_COOLDOWN=6            【值自成】连续手术回滚后的冷却周期
-  MAX_GROW_ATTEMPTS=2        【值自成】冷却前允许的手术回滚次数
+常量来源身份（律固定，值自成；2026-10-05 实测定标项标注实测）：
+  —— 平台期阶梯（退役件身份：仅 tests 钉住的历史路径使用）——
+  PLATEAU_CYCLES=3       【值自成】阶梯步长（周期数；随 `_schedule` 退役）
+  EPS_PLATEAU=0.005      【退役件原料】仅平台期计数（退役阶梯的历史路径）使用；
+                         活性成熟度已改 margin 滚动分位（R2：实测真实系统
+                         margin 恒 +0.025~0.055 ≫ 0.005，绝对 ε 口径在真实
+                         系统结构性不可达——平台期计数恒 0）
+  GHOST_GAIN_MIN=1e-4    【值自成】退役件阈值（呼吸实验实测：全新数据
+                         1.06e-4 恰可越线——但相对自身基线的恒温器口径
+                         已取代它）
+  WITHER_DORMANT_FRAC=0.10 / WITHER_BORN_FRAC=0.25
+                         【值自成】退役件阈值（休眠占比实测上限 ~5%，
+                         构造性不可达——恒温器用趋势+连续带取代）
+  WITHER_TARGET=0.7      【退役件身份】born-again 学生体型比例——仅手工
+                         计划/退役阶梯使用；恒温器目标由 gap̄ 导出
+  WITHER_KD_ALPHA=0.75   【定标】规格带 0.7–0.8 取中（仅手术验收周期）
+  WITHER_MAX_GEN=3       【值自成】凋零战役分代上限（规格"多周期分代"）
+  DECAY_GAMMA=0.7        【值自成】软衰减单代系数（乘性、保相对——
+                         Turrigiano 结构化身）
+  REDO_MAX_FRAC=0.05     【值自成】单周期回收上限（审计：5% 上限改纯反馈量）
+  SURGERY_LR_WINDOW=3    【值自成】手术后 LR 重启窗，窗内不排新刀（限频③）
+  SURGERY_LR_MULT=2.0    【律定承袭规格 B】base×2，≤ lr_max
+  SLEEP_DEBT_GUARD=4.0   【值自成】_since_sleep > target_interval×4 禁手术
+  ROLLBACK_GUARD=3       【值自成】连续回滚 ≥3 次禁手术（脑在挣扎，先养）
+  GROW_COOLDOWN=6        【值自成】生长回滚后的冷却周期
+  MAX_GROW_ATTEMPTS=2    【值自成】冷却前允许的手术回滚次数
+  GROW_DELTA_FRAC=0.05   【退役件身份】固定步长 5%——恒温器的乘性律
+                         （λ_g·W·e）取代它；常量仅为退役 _grow_delta 保留
+  —— 连续结构恒温器（研究报告 §3；2026-10-05 实测定标）——
+  XI_HI=0.20             【值自成·带下限】过剩设定点带的冷启动下限（研究报告：
+                         健康周转余量 5–20% 类比）。实际带 = max(XI_HI,
+                         gap̄ 滞后滚动 p90)（_xi_hi_eff；R1 修复：57M 真实
+                         身体稳态 gap̄≈0.45 ≫ 0.20，带不可自校准则稳态即
+                         越带——带随系统自身稳态分布上浮，定标工件
+                         定标/gapbar_定标结果.json）
+  XI_LO_HOT=1.2          【值自成→Q7 定标】过热设定点（top-10%均值/中位）。
+                         实测：mlp_hidden 过热带 1.21–1.37——规格草案 1.5
+                         在真实账本上数学不可达（阶梯覆辙），按实测降到 1.2
+  HOT_TOP_P=0.10         【值自成】过热 top-p 分位
+  GHOST_K=2.0            【值自成→Q7 定标】ghost 需求门槛 = 1 + K×SE_REL
+  GHOST_SE_REL=0.25      【值自成→Q7 定标】ghost 相对自身基线的噪声当量。
+                         实测：基线期 0.99–1.12×，需求跳变期 1.6–1.8×，
+                         门槛 1.5× 落在两分布之间（分辨力实证）
+  GHOST_BASE_WINDOW=4    【值自成】ghost 自身基线滚动窗（扫描次数）
+  LAMBDA_G=0.04          【值自成】乘性生长率/周期（Butz ν 的移植）
+  LAMBDA_MIN=0.01        【律定承袭】可塑性永不归零（adapt.py 同款教训）
+  LAMBDA_MAX=0.08        【值自成】λ_g 自适应上限
+  GROW_DELTA_CAP_FRAC=0.10 【值自成】单次生长上限（当前宽度的 10%）
+  CONFIRM_M=2            【定标承袭】DORMANT_CONFIRM 同款：连续 2 窗口越界
+  H_SHRINK=0.06          【定标承袭 Q6】判决死区 ≈ 2×通道判决噪声（6% 相对）
+  GAP_BORN=0.45          【值自成】全局结构错配阈下限；实际阈 = max(GAP_BORN,
+                         浮动带 xi_hi_eff)（R1：随带上浮，稳态高于阈下限的
+                         系统不被重锤误读）
+  BORN_PERSIST=12        【值自成】持续过剩升级：gap̄ 连续 12 周期 > 带上缘
+                         → born-again（重锤需要耐心；衰减通道先行）。
+                         XI_LAG=带滞后视野与它等值（带慢过最慢判决——R1）
+  SHRINK_COEF=0.6        【值自成】born-again 目标收缩系数 T=1−coef·gap̄
+  MIN_BODY_FRAC=0.25     【值自成】成熟刹车容量下限（相对出生体型的
+                         d_model×n_layers 当量占比；防无限萎缩）
+  MIN_GAP_SAME_SITE=6    【值自成】同 site 两次动作最小间隔（周期，限频③）
+  OSC_WINDOW=6           【值自成】振荡判定窗（周期）
+  OSC_FUSE_CYCLES=12     【值自成】振荡熔断时长（周期）
+  MATURITY_TAU=10        【值自成】成熟度 EMA 时间常数（周期；输入是 margin
+                         滚动分位判据——世界信号，非日历；R2）
+  MARGIN_HIST_CAP=16     【值自成】margin 滚动窗（周期；成熟度分布原料，R2）
+  MATURITY_Q=0.25        【值自成】成熟判据分位（改善率近窗中位数对自身滚动
+                         分布 q25；R2）
+  MATURITY_RECENT=4      【值自成】成熟判据近窗（周期，滑动中位数；R2）
+  MATURITY_NARROW=0.3    【值自成】死区收窄的成熟度门（R2）
+  XI_P=0.90 / XI_HIST_MIN=4 / XI_LAG=12 / XI_HIST_CAP=64
+                         【值自成】设定点带上浮四参数：分位 / 最小滞后样本 /
+                         滞后视野（=BORN_PERSIST）/ 滚动窗深（R1）
+  SUPPLY_WINDOW=3        【值自成】数据供给观察窗（周期；守卫③）
+  SUPPLY_MIN_BYTES=512   【值自成】窗口内新鲜字节下限（守卫③）
+  BETA_SUPPLY=0.01       【值自成】预算/供给比 β（研究报告 §3.5；守卫④）
+  SUPPLY_BYTES_PER_UNIT=512 【值自成】通道当量字节数（守卫④）
+  SEEN_CAP=8192          【值自成】新鲜度指纹集容量（条）
+  CAPTURE_RATE_MIN=0.5   【值自成】战役级捕获成功占比（probation 期满，
+                         新单元 stable_act ≥ 老单元中位一半的占比）
+  DEADBAND_FLOOR=0.5     【律定承袭】死区自校准下限（可塑性不归零对偶）
+  DEADBAND_CAL_EVERY=20  【值自成】死区收窄的静默周期数（×0.9）；门=成熟度
+                         m ≥ MATURITY_NARROW（R2：原 plateau≥1 门在真实系统
+                         结构性不可达，收窄路径死）
 """
+import hashlib
 import time
 
 import torch
@@ -56,9 +179,10 @@ from .sleep import varied_replay  # 律 L6 唯一实现，复用不复制
 from .surgery import (born_again_student, break_symmetry_dmodel, delta_params_attn_v,
                       delta_params_dmodel, delta_params_mlp, ghost_scan,
                       mem_budget_ok, morphology_of, rebuild_optimizer, widen)
-from .vitals import Vitals
+from .vitals import PROBATION_CYCLES, SiteLedger, Vitals
 
 # —— 常量（来源身份见模块 docstring）——
+# 平台期阶梯（退役件身份）
 PLATEAU_CYCLES = 3
 EPS_PLATEAU = 0.005
 GHOST_GAIN_MIN = 1e-4
@@ -67,21 +191,94 @@ WITHER_BORN_FRAC = 0.25
 WITHER_TARGET = 0.7
 WITHER_KD_ALPHA = 0.75
 WITHER_MAX_GEN = 3
-REDO_MAX_FRAC = 0.05
 DECAY_GAMMA = 0.7
+REDO_MAX_FRAC = 0.05
 SURGERY_LR_WINDOW = 3
 SURGERY_LR_MULT = 2.0
 SLEEP_DEBT_GUARD = 4.0
 ROLLBACK_GUARD = 3
-GROW_DELTA_FRAC = 0.05
 GROW_COOLDOWN = 6
 MAX_GROW_ATTEMPTS = 2
+GROW_DELTA_FRAC = 0.05
+# 连续结构恒温器
+XI_HI = 0.20             # 带下限（实际带 = max(XI_HI, gap̄ 滞后滚动 p90)，见 _xi_hi_eff）
+XI_P = 0.90              # 【值自成】带上浮分位：带浮在自身 gap̄ 稳态分布的高分位（R1）
+XI_HIST_MIN = 4          # 【值自成】带上浮所需最小滞后样本（不足→用下限 XI_HI；R1）
+XI_LAG = 12              # 【值自成】带滞后视野= BORN_PERSIST：p90 只读确认视野之前的
+                         # 历史——带必须慢过最慢判决，否则持续越带若干周期后会被带
+                         # 当场吸收，born_sustained 升级路重蹈阶梯数学不可达（R1）
+XI_HIST_CAP = 64         # 【值自成】gap̄/逐位 gap 滚动窗深度（周期；R1）
+XI_LO_HOT = 1.2
+HOT_TOP_P = 0.10
+GHOST_K = 2.0
+GHOST_SE_REL = 0.25
+GHOST_BASE_WINDOW = 4
+LAMBDA_G = 0.04
+LAMBDA_MIN = 0.01
+LAMBDA_MAX = 0.08
+GROW_DELTA_CAP_FRAC = 0.10
+CONFIRM_M = 2
+H_SHRINK = 0.06
+GAP_BORN = 0.45
+BORN_PERSIST = 12
+SHRINK_COEF = 0.6
+MIN_BODY_FRAC = 0.25
+MIN_GAP_SAME_SITE = 6
+OSC_WINDOW = 6
+OSC_FUSE_CYCLES = 12
+MATURITY_TAU = 10
+MARGIN_HIST_CAP = 16     # 【值自成】margin 滚动窗（周期；成熟度分布原料，R2）
+MATURITY_Q = 0.25        # 【值自成】成熟判据分位：改善率近窗中位数跌破自身滚动
+                         # 分布 q25 → 成熟输入 1（世界信号；R2）
+MATURITY_RECENT = 4      # 【值自成】成熟判据近窗（周期，滑动中位数窗口；R2）
+MATURITY_NARROW = 0.3    # 【值自成】死区收窄的成熟度门（m≥0.3 才收窄；R2）
+SUPPLY_WINDOW = 3
+SUPPLY_MIN_BYTES = 512
+BETA_SUPPLY = 0.01
+SUPPLY_BYTES_PER_UNIT = 512
+SEEN_CAP = 8192
+CAPTURE_RATE_MIN = 0.5
+DEADBAND_FLOOR = 0.5
+DEADBAND_CAL_EVERY = 20
 
 STATE_NORMAL = "NORMAL"
 STATE_GROW_PLAN = "GROW_PLAN"
 STATE_GROWN = "GROWN"
 STATE_WITHER_PLAN = "WITHER_PLAN"
 STATE_WITHERING = "WITHERING"
+
+# 生长轴 → 选址账本位的映射：轴② attn_v 新 v 通道的利用率读数在 attn_out 位
+# （proj 输入 = v 路径输出；账本通道口径 = Linear 输入激活维，Q6 定标）。
+# 振荡检测/同 site 限频都用账本位 id（轴②生长与 attn_out 收缩共享 id，
+# 反向操作才会被识别为振荡）。
+_AXIS_LEDGER = {"mlp": "mlp_hidden", "attn_v": "attn_out"}
+_LEDGER_AXIS = {"mlp_hidden": "mlp", "attn_out": "attn_v"}
+# 可动刀的主账本位（ln1_out/ln2_out 是残差流插件引脚——对质红线同源，不回收）
+ACTIONABLE_SUFFIX = ("mlp_hidden", "attn_out")
+
+
+def _median(vals):
+    s = sorted(vals)
+    return s[len(s) // 2] if s else 0.0
+
+
+def _median_lo(vals):
+    """下中位数（len<2 时同 _median）。ghost 自身基线专用：基线代表"常规水平
+    下沿"——需求跳变持续期不因基线上浮而失明（每个 site 每隔限频间隔保持
+    可再生长性），噪声下仍稳定（8-ghost 均值的实测波动 ~5%，门槛 1.5× 远在
+    噪声之上）。偶数窗上中位数会把基线吸到跳变后水平（实测：预算守卫挡掉
+    一次机会后，下一周期比值即坍回 1.0——信号永久丢失）。"""
+    s = sorted(vals)
+    return s[(len(s) - 1) // 2] if s else 0.0
+
+
+def _quantile(vals, q):
+    """最近邻秩分位数（空集 → None）。设定点带上浮（R1）与成熟度判据（R2）
+    的公共原语：门槛随系统自身历史分布走——值自成，不写死绝对量。"""
+    if not vals:
+        return None
+    s = sorted(vals)
+    return s[max(0, min(len(s) - 1, int(round(q * (len(s) - 1)))))]
 
 
 def _threshold_feedback(d):
@@ -102,26 +299,51 @@ def _threshold_feedback(d):
 
 
 class LifeController:
-    """自生长/自凋零状态机 + 双半球营养账本 + 形态记录。
+    """连续结构恒温器 + 双半球营养账本 + 形态记录 + 状态机。
 
     由 Dolphin 持有（d.life_ctl）；save/load 经 to_state/from_state 持久化
-    （锚、状态机、形态、账本——规格 C：锚=历史最优 probe，持久化进 save/load）。
+    （锚、状态机、形态、账本、恒温器内部状态——规格 C：锚=历史最优 probe，
+    持久化进 save/load）。
     """
 
     def __init__(self):
         self.state = STATE_NORMAL
-        self.plateau = 0            # 连续平台期周期数（margin < EPS_PLATEAU）
+        self.plateau = 0            # 连续平台期周期数（margin < EPS_PLATEAU；
+        #                              恒温器不再以此判决——它是成熟度刹车原料）
         self.anchor_best = None     # 锚：历史最优 probe NLL（持久化）
         self.plan = None            # 待执行手术计划（下一周期 pre_train 执行）
         self.campaign = None        # 战役 dict（grow/wither 进行时）
         self.lr_window = 0          # 手术 LR 重启窗口剩余周期（之后交还 Plasticity）
-        self.anneal_pending = False  # 第二阶梯 LR 退火（一次性）
-        self.anneal_band = 0        # 已退火到的阶梯号（不重复退火）
+        self.anneal_pending = False  # 退役阶梯的 LR 退火（一次性；活性路径不置位）
+        self.anneal_band = 0        # 已退火到的阶梯号（退役件状态）
         self.consec_rollback = 0
         self.grow_attempts = 0
-        self.cooldown = 0           # 手术冷却剩余周期
+        self.cooldown = 0           # 手术冷却剩余周期（每周期在恒温器入口递减）
         self.morphology = {}        # 半球名 → morphology dict（持久化）
         self.vitals = {}            # 半球名 → Vitals（持久化）
+        # —— 恒温器内部状态（全部随档）——
+        self.lambda_g = LAMBDA_G            # 乘性生长率（增益自适应的被调量）
+        self.deadband_scale = 1.0           # 死区自校准旋钮（振荡放宽/静默收窄）
+        self.maturity = 0.0                 # 成熟度 m∈[0,1]：改善率跌破自身滚动
+                                            # 分布低分位的 EMA（R2：世界信号非日历）
+        self.margin_hist = []               # gate margin 滚动窗（list[float]，
+                                            # 成熟度分布原料；R2）
+        self.thermo_hist = {}               # 账本位 → [[cycle, gap, hot], …]
+        self.ghost_hist = {}                # "L{li}.{site}" → [[cycle, gain], …]
+        self.gapbar_hist = []               # [[cycle, gap̄], …]（全局过剩指数）
+        self.dorm_hist = []                 # [[cycle, 休眠占比], …]（趋势原料）
+        self.site_last_action = {}          # 账本位 → [cycle, "grow"|"shrink"]
+        self.site_fuse = {}                 # 账本位 → 熔断截止 cycle
+        self.osc_events = []                # [[cycle, 账本位], …]（振荡账）
+        self.supply_hist = []               # [[cycle, fresh_bytes], …]（守卫③）
+        self.seen_hashes = []               # 新鲜度指纹集（list 持久化，int）
+        self.fresh_since_surgery = 0.0      # 上次结构手术以来新鲜字节（守卫④）
+        self.grown_since_surgery = 0        # 上次结构手术以来生长通道数（守卫④）
+        self.last_shrink_cycle = None       # 上次收缩计划周期（限频③）
+        self.last_born_again = None         # 上次 born-again 计划周期（连环缩阻尼）
+        self.no_action_streak = 0           # 连续"持有"周期数（死区自校准）
+        self.pending_capture = None         # 捕获对账单 {due_cycle, keys, hname}
+        self._seen = set()                  # 运行时指纹集（自 seen_hashes 重建）
 
     # ---------- 持久化 ----------
 
@@ -133,7 +355,21 @@ class LifeController:
                 "consec_rollback": self.consec_rollback,
                 "grow_attempts": self.grow_attempts, "cooldown": self.cooldown,
                 "morphology": self.morphology,
-                "vitals": {k: v.to_state() for k, v in self.vitals.items()}}
+                "vitals": {k: v.to_state() for k, v in self.vitals.items()},
+                # 恒温器状态（全部 JSON 化安全：list/dict/标量）
+                "lambda_g": self.lambda_g, "deadband_scale": self.deadband_scale,
+                "maturity": self.maturity, "margin_hist": self.margin_hist,
+                "thermo_hist": self.thermo_hist, "ghost_hist": self.ghost_hist,
+                "gapbar_hist": self.gapbar_hist, "dorm_hist": self.dorm_hist,
+                "site_last_action": self.site_last_action, "site_fuse": self.site_fuse,
+                "osc_events": self.osc_events, "supply_hist": self.supply_hist,
+                "seen_hashes": self.seen_hashes,
+                "fresh_since_surgery": self.fresh_since_surgery,
+                "grown_since_surgery": self.grown_since_surgery,
+                "last_shrink_cycle": self.last_shrink_cycle,
+                "last_born_again": self.last_born_again,
+                "no_action_streak": self.no_action_streak,
+                "pending_capture": self.pending_capture}
 
     def from_state(self, st):
         self.state = st.get("state", STATE_NORMAL)
@@ -149,6 +385,27 @@ class LifeController:
         self.morphology = st.get("morphology") or {}
         self.vitals = {k: Vitals().from_state(v)
                        for k, v in (st.get("vitals") or {}).items()}
+        # 恒温器状态（旧档缺键 → 初值；from_state 容忍升级）
+        self.lambda_g = float(st.get("lambda_g", LAMBDA_G))
+        self.deadband_scale = float(st.get("deadband_scale", 1.0))
+        self.maturity = float(st.get("maturity", 0.0))
+        self.margin_hist = [float(x) for x in (st.get("margin_hist") or [])]
+        self.thermo_hist = st.get("thermo_hist") or {}
+        self.ghost_hist = st.get("ghost_hist") or {}
+        self.gapbar_hist = st.get("gapbar_hist") or []
+        self.dorm_hist = st.get("dorm_hist") or []
+        self.site_last_action = st.get("site_last_action") or {}
+        self.site_fuse = st.get("site_fuse") or {}
+        self.osc_events = st.get("osc_events") or []
+        self.supply_hist = st.get("supply_hist") or []
+        self.seen_hashes = st.get("seen_hashes") or []
+        self.fresh_since_surgery = float(st.get("fresh_since_surgery", 0.0))
+        self.grown_since_surgery = int(st.get("grown_since_surgery", 0))
+        self.last_shrink_cycle = st.get("last_shrink_cycle")
+        self.last_born_again = st.get("last_born_again")
+        self.no_action_streak = int(st.get("no_action_streak", 0))
+        self.pending_capture = st.get("pending_capture")
+        self._seen = set(self.seen_hashes)
         return self
 
     # ---------- 半球账本 / 形态 ----------
@@ -165,6 +422,489 @@ class LifeController:
             m = self.morphology[hname] = {"d_model_k": 1, "mlp": {}, "attn_v": {}}
         return m
 
+    # ---------- 恒温器：阻尼与守卫的原语 ----------
+
+    def lambda_g_eff(self):
+        """成熟刹车下的有效生长率：λ_g·(1−0.5m) ≥ λ_g·0.5 > 0（永不归零）。"""
+        return self.lambda_g * (1.0 - 0.5 * self.maturity)
+
+    def h_eff(self):
+        """有效死区宽度：噪声定标 × 自校准旋钮 × 成熟刹车放大。"""
+        return H_SHRINK * self.deadband_scale * (1.0 + 0.5 * self.maturity)
+
+    def _mature_input(self):
+        """成熟度原料（R2 修复：可流动的世界信号）：近期改善率中位数是否跌破
+        自身滚动分布的低分位（MATURITY_Q）。
+
+        平稳期：median(近窗) ≥ q25(滚动窗) → 0（刹车释放——平稳系统对自身
+        分布不构成下台阶）；改善率下台阶（世界停止投喂新需求/内容饱和）→ 1。
+        margin 历史不足 MARGIN_HIST_CAP → 0（冷启动不刹车——样本不足时
+        "分布"无从谈起）。
+
+        选它而非"距上次结构动作的周期数"的理由：研究报告 §1.6 明令"刹车信号
+        的来源必须是世界，不是日历（adapt.py 前世死因）……禁止用周期计数器"，
+        周期数恰是计数器；margin 分位是 probe 判决面的可测统计，且门槛（q25）
+        随系统自身历史走——值自成，无写死的绝对量。它对旧口径的解药性：呼吸
+        实验实测真实系统 margin 恒 +0.025~0.055 ≫ EPS_PLATEAU=0.005，绝对 ε
+        平台期计数恒 0 → 旧原料下 m≡0、刹车与死区收窄两路结构性死；新原料
+        读的是"改善率相对自身历史的下台阶"，真实变化即流动。
+        """
+        if len(self.margin_hist) < MARGIN_HIST_CAP:
+            return 0.0
+        rec = sorted(self.margin_hist[-MATURITY_RECENT:])
+        med = rec[len(rec) // 2]
+        q = _quantile(self.margin_hist, MATURITY_Q)
+        return 1.0 if med < q else 0.0
+
+    def _lagged_base(self, vals):
+        """带上浮的公共滞后窗：p90 只读确认视野（XI_LAG）之前的历史。
+
+        滞后必须 ≥ BORN_PERSIST（带慢过最慢判决——否则持续越带被带当场吸收，
+        born_sustained 变成新的数学不可达，重蹈阶梯覆辙）；冷启动历史不足时
+        滞后收短到 CONFIRM_M，让上浮尽早生效——真实部署早期是带最盲的窗口
+        （监督审计 R1："真实部署早期重锤几乎必触发"）。"""
+        lag = max(CONFIRM_M, min(XI_LAG, len(vals) - XI_HIST_MIN))
+        return vals[:-lag] if lag else vals
+
+    def _xi_hi_eff(self):
+        """过剩设定点带（值自成；监督审计 R1 修复）：max(XI_HI, gap̄ 滞后滚动 p90)。
+
+        为什么带要浮：XI_HI=0.20 下限取自"健康周转余量 5–20%"类比，而 57M
+        真实身体实测稳态 gap̄≈0.45（定标/gapbar_定标结果.json：两半球
+        0.448–0.468，16 个可动刀位全部 > 0.20）——带低于稳态且不可自校准
+        ⇒ 稳态即越带 ⇒ born_sustained 12 周期重锤在健康系统上必触发。带改
+        从系统自己的 gap̄ 历史取高分位（"值自成"的应有之义：设定点随系统
+        自身历史走，不写死），XI_HI 只兜冷启动。滞后窗见 _lagged_base。"""
+        base = self._lagged_base([g for _, g in self.gapbar_hist])
+        q = _quantile(base, XI_P) if len(base) >= XI_HIST_MIN else None
+        return XI_HI if q is None else max(XI_HI, q)
+
+    def _site_xi_eff(self, key):
+        """逐位过剩设定点带（R1 同款上浮，读该位 thermo_hist 的 gap 列）：
+        site 级越带收缩同样不得在稳态误触发。"""
+        base = self._lagged_base([e[1] for e in self.thermo_hist.get(key, [])])
+        q = _quantile(base, XI_P) if len(base) >= XI_HIST_MIN else None
+        return XI_HI if q is None else max(XI_HI, q)
+
+    def supply_open(self):
+        """守卫③数据供给门：近 SUPPLY_WINDOW 周期有新鲜内容摄入才允许动刀。
+
+        历史为空（冷启动/旧档升级）→ 默认放行（初始化期不因缺观测冻结）。
+        新鲜度=经验内容指纹（见 _supply_account）：反刍复训旧记忆不算新供给。
+        """
+        if not self.supply_hist:
+            return True
+        recent = self.supply_hist[-SUPPLY_WINDOW:]
+        return sum(f for _, f in recent) >= SUPPLY_MIN_BYTES
+
+    def supply_account(self, d, sel):
+        """守卫③④的记账步：本周期入选经验的指纹账。
+
+        新鲜度 = sha256 前 8 字节指纹首见。反刍（做梦注入/复活/重复喂同一批）
+        的内容指纹已在册 → 不计入 fresh——结构投资必须有新证据流支撑
+        （研究报告 §3.5；Draganski"停练回缩"的守卫面）。记忆库首次被消化的
+        滞留条目算新鲜：对训练而言它是真正的新经验。
+        """
+        if sel is None:
+            return None  # 无入选名单（直调场景）：账目保持原状
+        fresh = 0
+        for _, e in sel:
+            h = int.from_bytes(hashlib.sha256(e.data).digest()[:8], "big")
+            if h not in self._seen:
+                self._seen.add(h)
+                self.seen_hashes.append(h)
+                fresh += len(e.data)
+        if len(self.seen_hashes) > SEEN_CAP:  # 有界指纹集：裁掉最旧的
+            cut = len(self.seen_hashes) - SEEN_CAP
+            dropped = self.seen_hashes[:cut]
+            del self.seen_hashes[:cut]
+            self._seen.difference_update(dropped)
+        self.supply_hist.append([d.cycle, fresh])
+        del self.supply_hist[:-(SUPPLY_WINDOW + 1)]
+        self.fresh_since_surgery += fresh
+        return fresh
+
+    def _confirmed(self, hist, pred, m=CONFIRM_M):
+        """Schmitt 确认窗：最近 m 个观察全部满足 pred 才算越界（进入）；
+        任一窗口回带内即不满足（退出只需 1 窗——阻尼②）。"""
+        win = hist[-m:]
+        return len(win) >= m and all(pred(e) for e in win)
+
+    def _site_ready(self, key, cycle):
+        """限频③：同 site 间隔 ≥MIN_GAP_SAME_SITE 且未熔断。"""
+        if self.site_fuse.get(key, 0) > cycle:
+            return False
+        last = self.site_last_action.get(key)
+        return not (last and cycle - last[0] < MIN_GAP_SAME_SITE)
+
+    def _record_action(self, keys, kind, cycle, report):
+        """动作记账 + 振荡检测（阻尼⑤熔断）：同 site 反向操作间隔
+        <MIN_GAP_SAME_SITE 记一次振荡；OSC_WINDOW 内 ≥2 次 → 熔断该 site
+        OSC_FUSE_CYCLES 周期 + 全局死区放宽 ×1.5。"""
+        for k in keys:
+            last = self.site_last_action.get(k)
+            if last and last[1] != kind and cycle - last[0] < MIN_GAP_SAME_SITE:
+                self.osc_events.append([cycle, k])
+                recent = [e for e in self.osc_events if cycle - e[0] < OSC_WINDOW]
+                if len(recent) >= 2:
+                    self.site_fuse[k] = cycle + OSC_FUSE_CYCLES
+                    self.deadband_scale = min(3.0, self.deadband_scale * 1.5)
+                    report["m4_oscillation"] = {"site": k,
+                                                "fuse_until": self.site_fuse[k],
+                                                "deadband_scale": self.deadband_scale}
+            self.site_last_action[k] = [cycle, kind]
+        del self.osc_events[:-OSC_WINDOW * 4]
+
+    def _body_frac(self, d, hname):
+        """当前体型相对出生体型的当量占比（d_model 与 n_layers 的乘积口径；
+        shrink 记录是绝对值、已含平铺史——born-again 换装后 d.cfg 仍是出生基座）。"""
+        shrink = self.morph_for(d, hname).get("shrink") or {}
+        d0 = int(shrink.get("d_model") or d.cfg.d_model)
+        n0 = int(shrink.get("n_layers") or d.cfg.n_layers)
+        return (d0 / d.cfg.d_model) * (n0 / d.cfg.n_layers)
+
+    # ---------- 恒温器：每周期入口 ----------
+
+    def thermo_cycle(self, d, report, v, stream, sel=None):
+        """连续结构恒温器每周期入口（rem_phase 调用）：观察 → 判决 → body 报告。
+
+        战役中（非 NORMAL）只做观察与记账，不做新判决。每周期至多一次结构
+        动作（判决在 NORMAL 且无 pending 计划时发生）。
+        """
+        self.supply_account(d, sel)
+        # 成熟度（R2 修复）：原料从"平台期计数（margin<绝对 ε）"改为 margin
+        # 滚动分布分位（_mature_input）——绝对 ε 口径在真实系统结构性不可达
+        # （margin 恒 +0.025~0.055 ≫ 0.005），m 恒 0 → 成熟刹车与死区收窄
+        # 两路皆死（与被退役阶梯同型病在守卫内复发）。
+        self.maturity += (1.0 / MATURITY_TAU) * (self._mature_input() - self.maturity)
+        if self.cooldown > 0:  # 冷却递减唯一入口（退役阶梯不再代管）
+            self.cooldown -= 1
+        self._capture_check(d, report, v)
+        gaps = self._observe(d, v)
+        gap_bar = self._gap_bar(gaps)
+        self.gapbar_hist.append([d.cycle, round(gap_bar, 6)])
+        del self.gapbar_hist[:-XI_HIST_CAP]
+        _, frac = v.dormant_report()
+        self.dorm_hist.append([d.cycle, round(frac, 6)])
+        del self.dorm_hist[:-8]
+
+        action = {"kind": "hold", "reason": "战役进行中（非 NORMAL，不做新判决）"}
+        if self.state == STATE_NORMAL and self.plan is None:
+            action = self._decide(d, report, v, stream, gaps, gap_bar)
+        if action.get("kind") == "hold":
+            self.no_action_streak += 1
+            if (self.no_action_streak > 0
+                    and self.no_action_streak % DEADBAND_CAL_EVERY == 0
+                    and self.maturity >= MATURITY_NARROW):
+                # 死区自校准（慢环）：持续"改善率下台阶"（成熟度门，R2——
+                # 原 plateau≥1 门不可达）且零结构操作 → 死区收窄 ×0.9
+                self.deadband_scale = max(DEADBAND_FLOOR, self.deadband_scale * 0.9)
+                action["deadband_narrowed"] = self.deadband_scale
+        else:
+            self.no_action_streak = 0
+        self._report_body(d, report, gap_bar, action)
+
+    def _observe(self, d, v):
+        """测量阻尼①：每账本位记录 [cycle, gap, hot]（stable 口径；禁 tag）。"""
+        gaps = {}
+        for key, led in v.sites.items():
+            if ".new." in key:
+                continue  # 旁路新账本量纲不同（输出侧代理），不进恒温器读数
+            gap, hot = led.utilization_indices(p=HOT_TOP_P)
+            hist = self.thermo_hist.setdefault(key, [])
+            hist.append([int(d.cycle), round(gap, 6), round(hot, 6)])
+            del hist[:-XI_HIST_CAP]
+            gaps[key] = gap
+        return gaps
+
+    def _gap_bar(self, gaps):
+        """全局过剩指数 gap̄：可动刀主位（mlp_hidden/attn_out）的均值。
+        ln1_out/ln2_out 不进 gap̄——残差流位不可动刀（对质红线同源），
+        它们的失衡读数不代表可回收的单元容量。"""
+        vals = [g for k, g in gaps.items() if k.endswith(ACTIONABLE_SUFFIX)]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    def _capture_check(self, d, report, v):
+        """捕获对账（研究报告 §3.7：标签-捕获的固化侧）。probation 期满时，
+        新单元 stable_act ≥ 老单元中位一半才算"捕获"；未捕获计入生长尝试的
+        失败账 → λ_g 下调。移植体属于执行时睡脑——换班后归醒脑名下，故按
+        hname 取账本；该半球尚未再训练（账本全零）时顺延，**至多 1 次**
+        （deferred 置位后不再顺延——2026-10-05 P3 对齐：原注释"最多 3 次"
+        与代码不符，实况是至多 1 次）。"""
+        pc = self.pending_capture
+        if not pc or d.cycle < pc.get("due_cycle", 0):
+            return
+        hv = self.vitals.get(pc.get("hname") or "")
+        if hv is None:
+            self.pending_capture = None
+            return
+        if not pc.get("deferred"):
+            led0 = hv.sites.get((pc.get("keys") or [""])[0])
+            if led0 is not None and all(a == 0.0 for a in led0.stable_act):
+                pc["deferred"] = 1  # 移植体还没再睡过：账本无观测，顺延
+                pc["due_cycle"] = d.cycle + 1
+                return
+        per, earned_n, total = {}, 0, 0
+        for key in pc.get("keys") or []:
+            led = hv.sites.get(key)
+            parent = hv.sites.get(key.rsplit(".new.", 1)[0])
+            if led is None or parent is None:
+                continue  # 回滚/形态变化：无从对账，如实跳过
+            med_old = _median(parent.stable_act)
+            thr = 0.5 * max(med_old, 1e-12)
+            e = sum(1 for a in led.stable_act if a >= thr)
+            per[key] = [e, led.C]
+            earned_n += e
+            total += led.C
+        if total == 0:
+            self.pending_capture = None  # 无可对账对象：清除，不动增益
+            return
+        rate = earned_n / total
+        report["m4_capture"] = {"rate": round(rate, 3), "per": per}
+        if rate >= CAPTURE_RATE_MIN:
+            self.lambda_g = min(self.lambda_g * 1.1, LAMBDA_MAX)  # 增益自适应⑤
+        else:
+            self.lambda_g = max(self.lambda_g * 0.9, LAMBDA_MIN)
+        report["m4_lambda_g"] = round(self.lambda_g, 5)
+        self.pending_capture = None
+
+    def _report_body(self, d, report, gap_bar, action):
+        """可观测义务（L11 措辞防线）：每周期 body 字段——体型/参数总量/
+        设定点/当前利用率缺口/本次调整方向与幅度。所有"自适应"措辞都能指认到
+        这里的具体误差量/设定点/增益。"""
+        m = d.sleeping().model
+        xi_eff = self._xi_hi_eff()
+        report["body"] = {
+            "d_model": m.cfg.d_model, "n_layers": m.cfg.n_layers,
+            "params": sum(p.numel() for p in m.parameters()),
+            "setpoint": {"xi_hi": round(xi_eff, 4), "xi_hi_floor": XI_HI,
+                         "xi_lo_hot": XI_LO_HOT,
+                         "band_hi": round(xi_eff + self.h_eff(), 4)},
+            "util_gap": round(gap_bar, 4),
+            "action": action,
+            "lambda_g": round(self.lambda_g_eff(), 5),
+            "lambda_g_base": round(self.lambda_g, 5),
+            "deadband_scale": round(self.deadband_scale, 3),
+            "maturity": round(self.maturity, 3),
+            "supply": "open" if self.supply_open() else "closed",
+        }
+
+    # ---------- 恒温器：判决 ----------
+
+    def _hold(self, cls, reason, **extra):
+        return {"kind": "hold", "class": cls, "reason": reason, **extra}
+
+    def _decide(self, d, report, v, stream, gaps, gap_bar):
+        """每周期判决：外环五分类（审计）+ 双信号驱动（研究报告 §3.0/§3.3）。
+
+        收缩两路：绝对带（gap 越 XI_HI+h_eff）与自身趋势（休眠占比上斜）；
+        生长一路：ghost 相对自身基线 × headroom 过热（双信号 AND，不对称④）。
+        重锤 born-again 由持续过剩升级触发（BORN_PERSIST）。
+        """
+        h = self.h_eff()
+        # 浮动设定点带（R1 修复）：xi_eff 随系统自身 gap̄ 稳态分布上浮，
+        # born 阈随带抬升（max(GAP_BORN, xi_eff)）——稳态即越带的病根消除。
+        xi_eff = self._xi_hi_eff()
+        # —— 外环分类（判决不以此为门——平台期门数学不可达，2026-10-05 诊断）——
+        if not self.supply_open():
+            return self._hold("数据耗尽（供给门）",
+                              f"近 {SUPPLY_WINDOW} 周期新鲜摄入 "
+                              f"{sum(f for _, f in self.supply_hist[-SUPPLY_WINDOW:])}B "
+                              f"< {SUPPLY_MIN_BYTES}B——反刍期只消化不动刀（守卫③）")
+        if self.lr_window > 0:
+            return self._hold("限频", f"手术 LR 重启窗还剩 {self.lr_window} 周期（阻尼③）")
+        if self.consec_rollback >= ROLLBACK_GUARD:
+            return self._hold("限频", f"连续回滚 {self.consec_rollback} 次，先养脑不动刀")
+        ok, why = self.surgery_allowed(d)
+        if not ok:
+            return self._hold("限频/守卫", why)
+
+        # —— 收缩判决（先于生长；site 冷却中的收缩让位给生长——细胞自主）——
+        born_now = self._confirmed(self.gapbar_hist,
+                                   lambda e: e[1] > max(GAP_BORN, xi_eff) + h)
+        born_sustained = (len(self.gapbar_hist) >= BORN_PERSIST
+                          and all(e[1] > xi_eff + h
+                                  for e in self.gapbar_hist[-BORN_PERSIST:]))
+        shrink_sites = []
+        for k in gaps:
+            if not k.endswith(ACTIONABLE_SUFFIX):
+                continue
+            xi_s = self._site_xi_eff(k)
+            if self._confirmed(self.thermo_hist.get(k, []),
+                               lambda e, x=xi_s: e[1] > x + h):
+                shrink_sites.append(k)
+        dorm, frac = v.dormant_report()
+        trend = self._dorm_trend()
+        if born_now or born_sustained:
+            out = self._plan_born_again(d, report, gap_bar,
+                                        born_sustained and not born_now)
+            if out is not None:
+                return out  # 容量下限封顶时返回 hold（不落到生长——重锤被刹车）
+        if dorm and self.last_shrink_ok(d.cycle) and (
+                any(self._site_ready(k, d.cycle) for k in shrink_sites) or trend):
+            return self._plan_decay(d, report, dorm, shrink_sites, trend)
+        # —— 生长判决（双信号 AND：ghost 需求 × headroom 过热——不对称④）——
+        return self._plan_grow(d, report, v, stream)
+
+    def last_shrink_ok(self, cycle):
+        return self.last_shrink_cycle is None \
+            or cycle - self.last_shrink_cycle >= MIN_GAP_SAME_SITE
+
+    def _dorm_trend(self):
+        """收缩趋势路：休眠占比相对自身滚动基线上斜（呼吸实验教训：
+        bottom-5%×2 确认的占比上限 ~5%，绝对门槛 10%/25% 构造性不可达）。"""
+        if len(self.dorm_hist) < 5:
+            return False
+        base = _median([f for _, f in self.dorm_hist[-5:-1]])
+        cur = self.dorm_hist[-1][1]
+        return cur > base * 1.5 and (cur - base) > 0.01
+
+    def _plan_born_again(self, d, report, gap_bar, escalated):
+        """born-again 计划：目标 T 从 gap̄ 导出（T=1−SHRINK_COEF·gap̄，废除写死
+        0.7）；连环缩阻尼（3 周期内再缩 → 系数减半）；成熟刹车容量下限非零
+        （累计收缩占比 < MIN_BODY_FRAC → 刹车或拒绝——防无限萎缩，守卫⑥）。"""
+        coef = SHRINK_COEF * (0.5 if self.last_born_again is not None
+                              and d.cycle - self.last_born_again < 3 else 1.0)
+        T = max(0.5, min(0.85, 1.0 - coef * gap_bar))
+        body_frac = self._body_frac(d, d.sleeping().name)
+        if body_frac * T < MIN_BODY_FRAC:
+            T_need = MIN_BODY_FRAC / body_frac
+            if T_need > 0.85:
+                return self._hold("容量过剩（结构级）",
+                                  f"成熟刹车容量下限已到：当前体型占比 "
+                                  f"{body_frac:.3f}，再缩将破 {MIN_BODY_FRAC} 下限"
+                                  f"（守卫⑥：防无限萎缩）", escalated=escalated)
+            T = T_need  # 刹车：只缩到下限允许的幅度
+        self.plan = {"kind": "wither", "mode": "born_again",
+                     "target": round(T, 4), "source": "thermostat",
+                     "escalated": escalated}
+        self.state = STATE_WITHER_PLAN
+        self.last_shrink_cycle = d.cycle
+        self.last_born_again = d.cycle
+        report["m4_plan"] = ["wither", "born_again", round(T, 3)]
+        return {"kind": "born_again", "target": round(T, 4), "class": "容量过剩（结构级）",
+                "reason": f"gap̄={gap_bar:.3f}"
+                          f"{'（持续过剩升级）' if escalated else ' 超结构错配阈'}",
+                "escalated": escalated}
+
+    def _plan_decay(self, d, report, dorm, shrink_sites, trend):
+        """软衰减分代计划（轻中度过剩）：目标=确认休眠名单（2 周期确认，
+        ReDo 之后仍在册者）。"""
+        self.plan = {"kind": "wither", "mode": "decay", "targets": dorm,
+                     "source": "thermostat"}
+        self.state = STATE_WITHER_PLAN
+        self.last_shrink_cycle = d.cycle
+        report["m4_plan"] = ["wither", "decay", len(dorm)]
+        self._record_action(sorted(dorm), "shrink", d.cycle, report)
+        why = f"越带位 {len(shrink_sites)} 个" if shrink_sites else "休眠占比上斜"
+        return {"kind": "decay", "targets": len(dorm), "class": "容量过剩（site 级）",
+                "reason": why + ("（趋势路）" if trend else "（绝对带）"),
+                "trend": trend}
+
+    def _plan_grow(self, d, report, v, stream):
+        """生长判决（研究报告 §3.3 生长行）：headroom 过热前置门（省扫描）→
+        ghost_scan（只读真实回放流——L8 红线：选址禁用探测集）→ 逐位相对
+        自身基线的需求确认 → argmax 选址 → 乘性生长律 delta=λ_g·W·e →
+        预算/供给比（守卫④）与显存预算 → 计划。"""
+        h = d.sleeping()
+        if not stream or len(stream) < d.cfg.block_size + 2:
+            return self._hold("观测不足", "回放流过短，无法幽灵扫描")
+        # 前置门：轴位的利用率账本过热（轴②读 attn_out 位——v 通道即 proj 输入）
+        cands, blocked = [], []
+        for li in range(len(h.model.blocks)):
+            for gsite, axis in (("mlp_hidden", "mlp"), ("attn_v", "attn_v")):
+                led_key = f"b{li}.{_AXIS_LEDGER[axis]}"
+                if not self._confirmed(self.thermo_hist.get(led_key, []),
+                                       lambda e: e[2] > XI_LO_HOT):
+                    continue
+                site_id = f"b{li}.{_AXIS_LEDGER[axis]}"
+                if not self._site_ready(site_id, d.cycle):
+                    blocked.append(site_id)
+                    continue
+                cands.append((li, gsite, axis, site_id))
+        if not cands:
+            if blocked:  # 有过热轴位但在冷却/熔断（限频③/振荡熔断⑤）
+                return self._hold("限频", f"轴位冷却/熔断中：{sorted(set(blocked))}")
+            return self._hold("容量受限候选未确认",
+                              f"无过热轴位（headroom ≤ {XI_LO_HOT}，确认窗未满）")
+        # 幽灵扫描：方向货币（GradMax/cascade-correlation 同款；L5 合规——
+        # 数据是选拔出的真实回放流，与探测集零接触）
+        try:
+            gains = ghost_scan(h.model, stream[:4096], seed=d.cycle)
+        except (ValueError, RuntimeError):
+            gains = {}
+        if not gains:
+            return self._hold("观测不足", "幽灵扫描无结果")
+        # 逐位记账（细胞自主）：判决用**滞后基线**——确认窗（最近 CONFIRM_M 次
+        # 扫描）对基线窗（其前 GHOST_BASE_WINDOW 次扫描的中位数）求比。基线不含
+        # 确认窗自身，需求跳变才不会被基线当场吸收（自参照带的小窗教训）。
+        for (li, gsite), g in sorted(gains.items()):
+            gkey = f"{li}.{gsite}"
+            gh = self.ghost_hist.setdefault(gkey, [])
+            gh.append([d.cycle, g])
+            del gh[:-(GHOST_BASE_WINDOW + CONFIRM_M)]
+        thr = 1.0 + GHOST_K * GHOST_SE_REL
+        confirmed = []
+        for gk, gh in self.ghost_hist.items():
+            if len(gh) < CONFIRM_M + 1:
+                continue
+            prior = [g for _, g in gh[:-CONFIRM_M][-GHOST_BASE_WINDOW:]]
+            base = _median_lo(prior)
+            if base <= 1e-15:
+                continue
+            win = [g for _, g in gh[-CONFIRM_M:]]
+            if all(g > base * thr for g in win):
+                confirmed.append((win[-1] / base, gk))
+        if not confirmed:
+            best_obs = max((g for gh in self.ghost_hist.values() for _, g in gh[-1:]),
+                           default=0.0)
+            return self._hold("容量受限候选未确认",
+                              f"ghost 需求未过自身基线门槛 {thr:.2f}"
+                              f"（确认窗未满或未越线）")
+        ratio, gk = max(confirmed)
+        li, gsite = gk.split(".")
+        li, gsite = int(li), gsite
+        axis = {"mlp_hidden": "mlp", "attn_v": "attn_v"}[gsite]
+        site_id = f"b{li}.{_AXIS_LEDGER[axis]}"
+        if not self._site_ready(site_id, d.cycle):
+            return self._hold("限频", f"{site_id} 动作间隔未满 {MIN_GAP_SAME_SITE} 周期")
+        # 乘性生长律（Butz ν 移植）：delta = λ_g·W·e，e=clip(需求比−1, 0, 2)
+        W = self._true_width(h, li, axis)
+        e = max(0.0, min(2.0, ratio - 1.0))
+        delta = max(8, round(self.lambda_g_eff() * W * e))
+        delta = min(delta, max(8, round(GROW_DELTA_CAP_FRAC * W)))  # 单次上限
+        # 守卫④预算/供给比：生长通道 ≤ β×(新鲜字节/通道当量)
+        budget_units = int(BETA_SUPPLY * self.fresh_since_surgery
+                           / SUPPLY_BYTES_PER_UNIT) - self.grown_since_surgery
+        if budget_units < 8:
+            return self._hold("守卫④预算/供给比",
+                              f"新鲜证据 {self.fresh_since_surgery:.0f}B 只够 "
+                              f"{budget_units} 通道（< 最小有意义步 8）——投资等供给")
+        delta = min(delta, budget_units)
+        if axis == "attn_v":  # 轴②整除保持：不足一个头的取整到头宽
+            nh = h.model.blocks[li].attn.n_heads
+            delta = max(nh, (delta // nh) * nh)
+        okm, why = self._mem_ok(d, axis, delta)
+        if not okm:
+            return self._hold("显存预算", f"显存预算不过：{why}")
+        self.plan = {"kind": "grow", "axis": axis, "layer": li, "delta": delta,
+                     "seed": d.cycle, "source": "thermostat", "site": gk}
+        self.state = STATE_GROW_PLAN
+        report["m4_plan"] = ["grow", axis, li, delta]
+        self._record_action([site_id], "grow", d.cycle, report)
+        return {"kind": "grow", "axis": axis, "site": site_id, "delta": delta,
+                "delta_ratio": round(ratio, 3), "class": "容量受限",
+                "reason": f"ghost 需求 {ratio:.2f}× 自身基线（门槛 {thr:.2f}）"
+                          f" × headroom 过热"}
+
+    def _true_width(self, h, li, axis):
+        """P0-2 承袭：宽度按睡脑**真实**脑形计（含移植体），不用基座 cfg。"""
+        blk = h.model.blocks[li]
+        if axis == "mlp":
+            return blk.mlp.fc.out_features + getattr(blk.mlp, "bypass_width", lambda: 0)()
+        return (blk.attn.qkv.out_features - 2 * blk.attn.qkv.in_features
+                + getattr(blk.attn, "bypass_width", lambda: 0)())
+
     # ---------- 守卫 ----------
 
     def sleep_debt(self, d):
@@ -172,7 +912,9 @@ class LifeController:
         return d._since_sleep / max(1, d.target_interval)
 
     def surgery_allowed(self, d):
-        """结构手术守卫：冷却 / 睡眠债高 / 连续回滚 → 禁手术（规格 C 触发信号）。"""
+        """结构手术守卫：冷却 / 睡眠债高 / 连续回滚 / 数据供给门（守卫③）。
+
+        供给门在此复查使"排程后供给枯竭"的执行自动走推迟语义（计划保留）。"""
         if self.cooldown > 0:
             return False, f"手术冷却中（还剩 {self.cooldown} 周期）"
         if self.sleep_debt(d) > SLEEP_DEBT_GUARD:
@@ -180,6 +922,9 @@ class LifeController:
                            f"（Bellesi 2017 守卫：剥夺期禁突触发生）")
         if self.consec_rollback >= ROLLBACK_GUARD:
             return False, f"连续回滚 {self.consec_rollback} 次，先养脑不动刀"
+        if not self.supply_open():
+            return False, (f"数据供给门：近 {SUPPLY_WINDOW} 周期新鲜摄入不足"
+                           f"（反刍期只消化不动刀——守卫③）")
         return True, "ok"
 
     # ---------- 快照 / 还原（战役与手术的回退点） ----------
@@ -241,6 +986,22 @@ class LifeController:
             v.remap_split(rec["delta"])  # 复制分裂：子通道继承父账本值/k
             break_symmetry_dmodel(h.model, rec["delta"], seed=plan.get("seed", 0) + 1)
             report["m4_break_symmetry"] = True
+        else:
+            # 旁路新单元账本预置（规格 A"初始化即 probation"——下一周期 attach
+            # 因 C 匹配而复用本账本，新生通道豁免休眠判决）。捕获对账单同步建立
+            # （研究报告 §3.7：标签-捕获的固化侧——ghost 预测 → 利用率实现）。
+            blk = h.model.blocks[plan["layer"]]
+            if rec["axis"] == "mlp":
+                led_key = f"b{plan['layer']}.mlp_hidden.new.{len(blk.mlp.bypass_fcs) - 1}"
+                C = blk.mlp.bypass_fcs[-1].out_features
+            else:
+                led_key = f"b{plan['layer']}.attn_v.new.{len(blk.attn.bypass_qkvs) - 1}"
+                C = blk.attn.bypass_qkvs[-1].out_features
+            v.sites[led_key] = SiteLedger(
+                led_key, C, {"is_new": [True] * C,
+                             "probation": [PROBATION_CYCLES] * C})
+            self.pending_capture = {"due_cycle": d.cycle + PROBATION_CYCLES,
+                                    "keys": [led_key], "hname": h.name}
         # 手术后：受影响参数优化器状态重置（同名同形状迁移动量）+ LR 重启（规格 B）
         h.opt, optstat = rebuild_optimizer(old_model, old_opt, h.model, lr)
         self.lr_window = SURGERY_LR_WINDOW
@@ -253,7 +1014,12 @@ class LifeController:
         if prev.get("shrink"):  # 在学生脑上动刀：学生体型记录延续（load 重建依赖）
             morph["shrink"] = prev["shrink"]
         self.morphology[h.name] = morph
-        self.campaign = {"kind": "grow", "gen": 1, "snap": snap}
+        self.campaign = {"kind": "grow", "gen": 1, "snap": snap,
+                         "delta": int(plan["delta"]),
+                         "source": plan.get("source", "manual")}
+        # 守卫④账目：本次投资记账 + 供给账重新累计（新结构须由其后证据流供养）
+        self.grown_since_surgery += int(plan["delta"])
+        self.fresh_since_surgery = 0.0
         self.state = STATE_GROWN
         self.plan = None
         report["m4_surgery"] = {k2: rec[k2] for k2 in rec if k2 != "new_model"}
@@ -273,8 +1039,11 @@ class LifeController:
         if mode == "born_again":
             # 教师=现脑（规格 B）：学生体型从睡脑**当前**形态收缩——若现脑已平铺
             # （d_model≠基座），d.cfg 的基座不是教师真身。账本按当前形态供逐层重要性。
+            # 目标体型：恒温器计划由 gap̄ 导出（plan["target"]）；手工/退役路径
+            # 无 target → 落到 WITHER_TARGET（退役件身份常量）。
+            target = float(plan.get("target", WITHER_TARGET))
             student, opt, info = born_again_student(
-                h.model.cfg, v, WITHER_TARGET, d.device, seed=d.cycle)
+                h.model.cfg, v, target, d.device, seed=d.cycle)
             h.model = student
             h.opt = opt
             morph = morphology_of(student)
@@ -285,28 +1054,37 @@ class LifeController:
             self.morphology[h.name] = morph
             self.vitals[h.name] = Vitals()  # 新脑新账本（账本随脑重置）
             rec["born_again"] = info
+            rec["target"] = target
+            self.last_born_again = d.cycle
+            # 守卫④账目：整体重置（新体型从零记账）
+            self.grown_since_surgery = 0
+            self.fresh_since_surgery = 0.0
         else:
             rec["targets"] = {k: len(c) for k, c in (plan.get("targets") or {}).items()}
         self.campaign = {"kind": "wither", "mode": mode, "gen": 1,
                          "max_gen": WITHER_MAX_GEN, "snap": snap,
-                         "targets": plan.get("targets") or {}}
+                         "targets": plan.get("targets") or {},
+                         "source": plan.get("source", "manual")}
         self.state = STATE_WITHERING
         self.plan = None
         report["m4_wither_start"] = rec
 
     # ---------- M4 钩子②：REM 样子相位（训练后、体检前） ----------
 
-    def rem_phase(self, d, report, stream):
+    def rem_phase(self, d, report, stream, sel=None):
         h = d.sleeping()
         v = self.vitals_for(d, h.name)
-        # ① ReDo 回收（常规代谢，每周期；固定干预次序的第一级）
+        # ① ReDo 回收（常规代谢，每周期；不占恒温器的"每周期至多一次结构动作"——
+        #    回收是代谢不是手术）
         report["m4_redo"] = self._redo(d, h, v)
         # ② 凋零战役的软衰减分代（decay 模式的固定动作；born-again 模式无需衰减）
         if self.state == STATE_WITHERING and self.campaign.get("mode") == "decay":
             report["m4_decay"] = self._decay_generation(d, h, v)
-        # ③ 手术排程（第三阶梯；仅 NORMAL 评估）
-        if self.state == STATE_NORMAL:
-            self._schedule(d, report, v, stream)
+        # ③ 连续结构恒温器（活性路径唯一判决者；2026-10-05 取代平台期阶梯——
+        #    阶梯触发链数学不可达，见模块 docstring 诊断节）
+        self.thermo_cycle(d, report, v, stream, sel)
+        # （平台期阶梯 `_schedule` 已退役：方法体仅为 tests 钉住的历史件保留，
+        #   活性路径零调用——退役身份，不许再挂回。）
 
     def _bypass_handles(self, h, li, key):
         """旁路 (旁路Linear, 输出权重) 句柄。key 形如 b3.mlp_hidden.new.0。"""
@@ -333,7 +1111,13 @@ class LifeController:
             led = v.sites[key]
             cap = max(1, int(round(REDO_MAX_FRAC * len(chans))))
             picked = sorted(chans, key=lambda c: led.stable_tay[c])[:cap]  # 最沉睡优先
-            g = torch.Generator().manual_seed(hash((key, d.cycle)) & 0x7FFFFFFF)
+            # 2026-10-04 零点实验发现并修复：ReDo 首次在 GPU 上真实触发（有休眠
+            # 单元可回收）即抛 RuntimeError("Expected a 'cuda' device type for
+            # generator but found 'cpu'")——torch.Generator() 默认 CPU，而权重在
+            # CUDA。generator 必须与被重置权重同设备。CPU 路径语义不变（tests 全绿）。
+            # （交接 §6.6b 已挂账 ReDo 种子的进程间非确定问题；本修复只动设备侧，
+            # 种子口径 hash((key, cycle)) 原样保留，待 M4 遗留账统一处理。）
+            g = torch.Generator(device=d.device).manual_seed(hash((key, d.cycle)) & 0x7FFFFFFF)
             with torch.no_grad():
                 if ".new." in key:  # 旁路新单元
                     lin, pw = self._bypass_handles(h, li, key)
@@ -403,10 +1187,16 @@ class LifeController:
         # 双重递增——名义 WITHER_MAX_GEN=3 实际只走 2 代，分代上限字面失真。
         return {"decayed": did, "gen": self.campaign.get("gen", 1)}
 
+    # —— 退役件（2026-10-05 触发链诊断：平台期阶梯数学不可达，活性路径已由
+    #    连续结构恒温器取代。以下两个方法体仅为 tests/test_conformance.py 钉住的
+    #    历史行为保留（铁律：既有断言只增不降），生产路径零调用——退役身份，
+    #    不许再挂回活性路径。） ——
+
     def _schedule(self, d, report, v, stream):
-        """手术排程（固定干预次序的阶梯；只有平台期够深才动刀）。"""
-        if self.cooldown > 0:
-            self.cooldown -= 1
+        """【退役件】平台期阶梯：band=plateau//3 → ≥2 阶 LR 退火、≥3 阶排程手术。
+        退役原因：呼吸实验实测 margin 恒 +0.025~0.055（系统被设计成永不停学），
+        9 连击期望 ~1300 周期——数学不可达。保留仅为既有测试钉住。"""
+        if self.cooldown > 0:  # 递减已移至 thermo_cycle（每周期唯一入口）
             return
         band = self.plateau // PLATEAU_CYCLES
         if band < 1:
@@ -463,9 +1253,10 @@ class LifeController:
             report["m4_note"] = "记忆库压力大但幽灵无增益：瓶颈不在容量"
 
     def _grow_delta(self, d, site):
-        # 监督审计 P0-2：幅度必须按睡脑**真实**脑形计（d.sleeping().model.cfg），
-        # 不能用基座 d.cfg——born-again 学生脑上名义 5% 会实际排成 7%+，轴③
-        # 平铺脑上会排成 2.5%（morphology 含 shrink / d_model_k 记录的脑）。
+        """【退役件】固定步长幅度（GROW_DELTA_FRAC=5%）。恒温器的乘性律
+        （λ_g·W·e，见 _plan_grow）已取代它；本方法仅为 P0-2 断言钉住：
+        幅度必须按睡脑**真实**脑形（d.sleeping().model.cfg）计，不能用基座
+        d.cfg——born-again 学生脑上名义 5% 会实际排成 7%+。"""
         cfg = d.sleeping().model.cfg
         base = cfg.d_model if site != "mlp" else 4 * cfg.d_model
         return max(8, int(round(GROW_DELTA_FRAC * base)))
@@ -482,18 +1273,24 @@ class LifeController:
             dp = delta_params_dmodel(cfg, max(2, delta))
         return mem_budget_ok(d.device, dp)
 
-    # ---------- M4 钩子③：体检后（锚 / 平台期 / 战役验收） ----------
+    # ---------- M4 钩子③：体检后（锚 / 平台期 / 战役验收 / 二阶阻尼） ----------
 
     def post_exam(self, d, report, passed):
         """返回换班指令："swap" | "rollback" | "keep"。
 
         NORMAL：与 M0 逐字等价（passed→swap / fail→rollback）。
-        GROWN：fail → ROLLBACK（还原形态+装回醒脑权重，规格 C 状态机）。
+        GROWN：fail → ROLLBACK（还原形态+装回醒脑权重，规格 C 状态机）+
+        增益自适应⑤（λ_g×0.5，可塑性不归零）。
         WITHERING：fail → keep（学生保留标志，规格 C）；分代耗尽 → 放弃还原。
         """
         probe_new = report.get("probe_new")
         margin = report.get("gate_margin")
-        # 平台期计数（规格 C：连续 N 周期改善<ε）
+        # margin 滚动账（R2）：成熟度原料 _mature_input 的分布窗
+        if margin is not None:
+            self.margin_hist.append(round(margin, 6))
+            del self.margin_hist[:-MARGIN_HIST_CAP]
+        # 平台期计数（退役阶梯的原料：margin<绝对 ε；活性路径的成熟度已改用
+        # margin 滚动分位——绝对 ε=0.005 在真实系统结构性不可达，见 _mature_input）
         if margin is not None and margin < EPS_PLATEAU:
             self.plateau += 1
         else:
@@ -515,7 +1312,12 @@ class LifeController:
             # ROLLBACK：还原手术前形态 + 装回醒脑权重（M0 回滚语义"与醒脑同源"；
             # 醒脑形状不同时——如born-again学生上岗而睡脑曾生长——保持快照权重，
             # 克隆只对同构半球成立）
+            # R3（监督审计 2026-10-05）：delta 必须在清 campaign **之前**取——
+            # 原实现先 self.campaign = None 再读它扣账，回滚扣的恒是 0，
+            # grown_since_surgery 永不回冲（守卫④的预算账目成死账，动态验证
+            # 16→16）。
             snap = (self.campaign or {}).get("snap")
+            delta = int((self.campaign or {}).get("delta") or 0)
             if snap:
                 self._restore(d, h, snap)
                 sd_s, sd_a = h.model.state_dict(), d.awake().model.state_dict()
@@ -527,6 +1329,13 @@ class LifeController:
             self.plan = None
             self.consec_rollback += 1
             self.grow_attempts += 1
+            # 增益自适应⑤（研究报告 §3.4.5）：生长验收失败 → λ_g×0.5（下限
+            # LAMBDA_MIN>0——可塑性永不归零）+ 供给账回冲 + 捕获对账作废
+            self.lambda_g = max(self.lambda_g * 0.5, LAMBDA_MIN)
+            self.grown_since_surgery = max(0, self.grown_since_surgery - delta)
+            self.fresh_since_surgery = 0.0
+            self.pending_capture = None
+            report["m4_lambda_g"] = round(self.lambda_g, 5)
             if self.grow_attempts >= MAX_GROW_ATTEMPTS:
                 self.cooldown = GROW_COOLDOWN
                 self.grow_attempts = 0
@@ -705,9 +1514,9 @@ def run_cycle(dolphin, steps=40, kd_alpha=0.5, kd_T=2.0, verbose=True, feeding=F
             vit.disable()
             vit.detach()
 
-    # —— M4 钩子②：REM 样子相位（ReDo 回收 / 软衰减 / 手术排程）——
+    # —— M4 钩子②：REM 样子相位（ReDo 回收 / 软衰减 / 连续结构恒温器）——
     if m4:
-        ctl.rem_phase(dolphin, report, stream)
+        ctl.rem_phase(dolphin, report, stream, sel)
 
     # 体检（律 L8）：全卷逐块评分 + margin 判决带，判决唯一实现 Dolphin.gate
     passed, gate = dolphin.gate(awake, sleeping)
@@ -759,7 +1568,7 @@ def run_cycle(dolphin, steps=40, kd_alpha=0.5, kd_T=2.0, verbose=True, feeding=F
         report["swapped"] = False
         dolphin.budget = max(0.25, dolphin.budget * 0.90)
 
-    # 值自成：学习率反馈（Plasticity 唯一控制器）+ 手术 LR 窗口 / 第二阶梯退火
+    # 值自成：学习率反馈（Plasticity 唯一控制器）+ 手术 LR 窗口 / 退役阶梯退火（不再触发）
     mean_surp = sum(e.surprise for _, e in sel) / len(sel)
     if feeding:
         _threshold_feedback(dolphin)
@@ -774,7 +1583,7 @@ def run_cycle(dolphin, steps=40, kd_alpha=0.5, kd_T=2.0, verbose=True, feeding=F
                          dolphin.plasticity.lr_max)
             ctl.lr_window -= 1
             report["m4_lr_restart"] = new_lr
-        elif ctl.anneal_pending:  # 第二阶梯：LR 退火（一次性）
+        elif ctl.anneal_pending:  # 退役阶梯遗留：活性路径不再置位，兼容旧档
             new_lr = max(new_lr * 0.5, dolphin.plasticity.lr_min)
             ctl.anneal_pending = False
             report["m4_lr_annealed"] = new_lr
@@ -788,8 +1597,12 @@ def run_cycle(dolphin, steps=40, kd_alpha=0.5, kd_T=2.0, verbose=True, feeding=F
         buf.clear()
     dolphin.cycle += 1
     if verbose:
+        body = report.get("body") or {}
+        act = body.get("action", {})
         print(f"[睡眠 {report['cycle']}] 选拔 {report['selected']} / 滞留 {report['residue']}"
               f"  体检 {report.get('probe_old')} → {report.get('probe_new')}"
               f"  lr={new_lr:.2e}"
-              f"  {'✓ 换班' if report.get('swapped') else '✗ 作废回滚'}")
+              f"  体 {body.get('d_model', '?')}/{'%.2f' % body.get('util_gap', 0)}"
+              f"  {'✓ 换班' if report.get('swapped') else '✗ 作废回滚'}"
+              f"{'  刀:' + str(act.get('kind')) if act.get('kind', 'hold') != 'hold' else ''}")
     return report
