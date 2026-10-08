@@ -108,6 +108,10 @@ ROLLBACK；NORMAL → WITHER_PLAN → WITHERING（学生保留标志：体检失
   SURGERY_LR_WINDOW=3    【值自成】手术后 LR 重启窗，窗内不排新刀（限频③）
   SURGERY_LR_MULT=2.0    【律定承袭规格 B】base×2，≤ lr_max
   SLEEP_DEBT_GUARD=4.0   【值自成】_since_sleep > target_interval×4 禁手术
+  SLEEP_DEBT_TIME_WINDOW=300.0  【值自成·2026-10-06】期望最大清醒时长（秒）：
+                          超过 5 分钟没睡才算"睡眠剥夺"——批量喂食下睡眠周期
+                          照常触发，时间债务低，不误伤手术窗口（修复睡眠债
+                          守卫在批量喂食下结构性封锁恒温器的问题）。
   ROLLBACK_GUARD=3       【值自成】连续回滚 ≥3 次禁手术（脑在挣扎，先养）
   GROW_COOLDOWN=6        【值自成】生长回滚后的冷却周期
   MAX_GROW_ATTEMPTS=2    【值自成】冷却前允许的手术回滚次数
@@ -176,9 +180,10 @@ import torch
 import torch.nn.functional as F
 
 from .sleep import varied_replay  # 律 L6 唯一实现，复用不复制
-from .surgery import (born_again_student, break_symmetry_dmodel, delta_params_attn_v,
-                      delta_params_dmodel, delta_params_mlp, ghost_scan,
-                      mem_budget_ok, morphology_of, rebuild_optimizer, widen)
+from .surgery import (MEM_BUDGET, born_again_student, break_symmetry_dmodel,
+                      delta_params_attn_v, delta_params_dmodel, delta_params_mlp,
+                      ghost_scan, mem_budget_ok, morphology_of, rebuild_optimizer,
+                      widen)
 from .vitals import PROBATION_CYCLES, SiteLedger, Vitals
 
 # —— 常量（来源身份见模块 docstring）——
@@ -196,6 +201,7 @@ REDO_MAX_FRAC = 0.05
 SURGERY_LR_WINDOW = 3
 SURGERY_LR_MULT = 2.0
 SLEEP_DEBT_GUARD = 4.0
+SLEEP_DEBT_TIME_WINDOW = 300.0   # 值自成·2026-10-06：期望最大清醒时长（秒）——修复批量喂食下睡眠债守卫误伤
 ROLLBACK_GUARD = 3
 GROW_COOLDOWN = 6
 MAX_GROW_ATTEMPTS = 2
@@ -240,6 +246,20 @@ SEEN_CAP = 8192
 CAPTURE_RATE_MIN = 0.5
 DEADBAND_FLOOR = 0.5
 DEADBAND_CAL_EVERY = 20
+# —— 硬件压力收缩（2026-10-06 新增）——
+# 设备总有上限：当显存足迹逼近硬件预算时，系统必须被"压下去"——主动收缩
+# 而不是仅仅停止生长。与容量过剩（gap̄）收缩并列，由显存压力独立触发。
+MEM_PRESSURE_HI = 0.90        # 【律定】显存压力阈值：超过硬件预算 90% 触发收缩
+MEM_PRESSURE_TARGET = 0.75    # 【值自成】显存压力收缩目标：缩到预算的 75% 释放余量
+MEM_PRESSURE_WINDOW = 4       # 【值自成】显存压力确认窗（连续 N 周期超阈值才动刀）
+# —— 参数自适应控制律（2026-10-06 用户定案）——
+# 基准 = 当前参数量；轻限制上限 = 当前参数 × 1.571（高出 57.1% 是轻限制）。
+# 压力触发（显存或容量任一"不够"）→ 不再涨，三段式跌：30% → 10% → 3%。
+# 正常态下每睡眠周期用最小步长（±8 单元）微调，消除"上限误差"（实际容量 vs
+# 理想容量的偏差）；显存不够自动裁剪。主打自我生长、每时每刻睡眠微调。
+PARAM_LIGHT_LIMIT = 1.571     # 【用户定案】轻限制上限 = 当前参数 × 1.571
+PARAM_STAGE_RATIOS = (0.30, 0.10, 0.03)  # 【用户定案】三段式下跌目标比例
+PARAM_MICRO_STEP = 8          # 【值自成】每周期微调步长（最小手术单位=8 单元）
 
 STATE_NORMAL = "NORMAL"
 STATE_GROW_PLAN = "GROW_PLAN"
@@ -296,6 +316,8 @@ def _threshold_feedback(d):
         elif d._since_sleep > d.target_interval * 2:
             d.buffer.sleep_threshold = clamp_threshold(d.buffer.sleep_threshold * 0.90)
         d._since_sleep = 0
+        # 2026-10-06：记录本次睡眠的墙钟时间——sleep_debt 时间债务的依据。
+        d._last_sleep_wall = time.time()
 
 
 class LifeController:
@@ -344,6 +366,11 @@ class LifeController:
         self.no_action_streak = 0           # 连续"持有"周期数（死区自校准）
         self.pending_capture = None         # 捕获对账单 {due_cycle, keys, hname}
         self._seen = set()                  # 运行时指纹集（自 seen_hashes 重建）
+        self.mem_pressure_hist = []        # 显存压力历史 [[cycle, ratio]，…]（硬件压力收缩）
+        # —— 参数自适应控制律状态（2026-10-06 用户定案）——
+        self.param_regime = 0          # 三段式下跌阶段：0=正常/1=跌到30%/2=跌到10%/3=跌到3%
+        self.param_micro_total = 0  # 累计微调净增量（单元数，正=生长/负=收缩）
+        self.last_param_reset = None  # 上次三段式下跌的 cycle
 
     # ---------- 持久化 ----------
 
@@ -369,7 +396,11 @@ class LifeController:
                 "last_shrink_cycle": self.last_shrink_cycle,
                 "last_born_again": self.last_born_again,
                 "no_action_streak": self.no_action_streak,
-                "pending_capture": self.pending_capture}
+                "pending_capture": self.pending_capture,
+                "mem_pressure_hist": self.mem_pressure_hist,
+                "param_regime": self.param_regime,
+                "param_micro_total": self.param_micro_total,
+                "last_param_reset": self.last_param_reset}
 
     def from_state(self, st):
         self.state = st.get("state", STATE_NORMAL)
@@ -405,6 +436,7 @@ class LifeController:
         self.last_born_again = st.get("last_born_again")
         self.no_action_streak = int(st.get("no_action_streak", 0))
         self.pending_capture = st.get("pending_capture")
+        self.mem_pressure_hist = [[int(c), float(r)] for c, r in (st.get("mem_pressure_hist") or [])]
         self._seen = set(self.seen_hashes)
         return self
 
@@ -563,6 +595,32 @@ class LifeController:
         n0 = int(shrink.get("n_layers") or d.cfg.n_layers)
         return (d0 / d.cfg.d_model) * (n0 / d.cfg.n_layers)
 
+    def _params_now(self, d):
+        """当前睡脑参数量（真实脑形，含移植体/收缩史）。"""
+        return sum(p.numel() for p in d.sleeping().model.parameters())
+
+    def _param_pressure(self, d, report, gap_bar):
+        """参数自适应控制律的压力检测：显存或容量任一"不够"即为压力。
+
+        返回 (压力类型, 说明) 或 (None, "")。
+        - 显存压力：显存足迹连续 MEM_PRESSURE_WINDOW 周期 > 硬件预算 90%
+        - 容量压力：gap̄ 越浮动带（空位过多=容量过剩该缩）或持续 ghost 需求不足
+        """
+        # 显存压力（复用 _plan_mem_shrink 的检测信号）
+        ratio = self._mem_pressure_ratio(d)
+        if ratio is not None:
+            self.mem_pressure_hist.append([d.cycle, round(ratio, 4)])
+            del self.mem_pressure_hist[:-MEM_PRESSURE_WINDOW * 2]
+            if len(self.mem_pressure_hist) >= MEM_PRESSURE_WINDOW and all(
+                    r > MEM_PRESSURE_HI for _, r in self.mem_pressure_hist[-MEM_PRESSURE_WINDOW:]):
+                return "mem", f"显存 {ratio:.2f} 连续超预算 {MEM_PRESSURE_HI:.0%}"
+        # 容量压力：gap̄ 越浮动带（容量过剩=该缩）
+        xi_eff = self._xi_hi_eff()
+        h = self.h_eff()
+        if gap_bar > max(GAP_BORN, xi_eff) + h:
+            return "cap", f"gap̄={gap_bar:.3f} 越带（空位过多）"
+        return None, ""
+
     # ---------- 恒温器：每周期入口 ----------
 
     def thermo_cycle(self, d, report, v, stream, sel=None):
@@ -647,7 +705,16 @@ class LifeController:
         per, earned_n, total = {}, 0, 0
         for key in pc.get("keys") or []:
             led = hv.sites.get(key)
-            parent = hv.sites.get(key.rsplit(".new.", 1)[0])
+            # 父账本解析（2026-10-05 发育实验发现并修复）：轴②旁路账本键前缀是
+            # "b{li}.attn_v"，而主账本命名是 "b{li}.attn_out"（v 通道的利用率读数
+            # 在 proj 输入位，_AXIS_LEDGER 同源映射）——旧实现直接查 "b{li}.attn_v"
+            # 得 None → continue → total=0 → 对账单被无声清除：轴②移植体的捕获
+            # 对账结构性死（λ_g 永不因捕获结算调整）。轴①前缀 mlp_hidden 恰与主
+            # 账本同名，故既有测试从未踩到。修复=经 _AXIS_LEDGER 映射回主账本位。
+            base = key.rsplit(".new.", 1)[0]
+            suffix = base.rsplit(".", 1)[1]
+            parent_key = f"{base.rsplit('.', 1)[0]}.{_AXIS_LEDGER.get(suffix, suffix)}"
+            parent = hv.sites.get(parent_key)
             if led is None or parent is None:
                 continue  # 回滚/形态变化：无从对账，如实跳过
             med_old = _median(parent.stable_act)
@@ -719,6 +786,14 @@ class LifeController:
         if not ok:
             return self._hold("限频/守卫", why)
 
+        # —— 硬件压力收缩（2026-10-06：设备总有上限，逼近硬件上限必须被压下去）——
+        # 显存足迹连续多周期超过硬件预算阈值 → 优先排 born-again 收缩，
+        # 目标体型由硬件预算决定（缩到预算的 MEM_PRESSURE_TARGET 比例释放余量）。
+        # 排在容量过剩收缩之前：硬件约束是物理律，优先于容量反馈。
+        mem_out = self._plan_mem_shrink(d, report)
+        if mem_out is not None:
+            return mem_out
+
         # —— 收缩判决（先于生长；site 冷却中的收缩让位给生长——细胞自主）——
         born_now = self._confirmed(self.gapbar_hist,
                                    lambda e: e[1] > max(GAP_BORN, xi_eff) + h)
@@ -745,6 +820,216 @@ class LifeController:
             return self._plan_decay(d, report, dorm, shrink_sites, trend)
         # —— 生长判决（双信号 AND：ghost 需求 × headroom 过热——不对称④）——
         return self._plan_grow(d, report, v, stream)
+
+    def _mem_pressure_ratio(self, d):
+        """当前显存压力比率 = torch.cuda.memory_reserved() / MEM_BUDGET。
+        CPU 无显存约束 → None（不参与收缩）。"""
+        if d.device != "cuda":
+            return None
+        try:
+            used = torch.cuda.memory_reserved()
+        except Exception:
+            return None
+        return used / MEM_BUDGET
+
+    def _plan_mem_shrink(self, d, report):
+        """硬件压力收缩（2026-10-06 新增）。
+
+        设备总有上限：当显存足迹连续 MEM_PRESSURE_WINDOW 周期超过硬件预算的
+        MEM_PRESSURE_HI 比例时，系统必须被"压下去"——主动 born-again 收缩，
+        目标体型 = 使显存回落到预算的 MEM_PRESSURE_TARGET 比例。
+
+        与容量过剩（gap̄）收缩的区别：
+          - 容量过剩收缩：gap̄ 越带（系统"太胖"但硬件没逼）
+          - 硬件压力收缩：显存逼近上限（物理律逼迫），与 gap̄ 无关
+        硬件压力收缩优先（排在 _decide 最前）。
+
+        返回 None = 不触发（让位给后续判决）；否则返回动作 dict。
+        """
+        ratio = self._mem_pressure_ratio(d)
+        if ratio is None:
+            return None
+        self.mem_pressure_hist.append([d.cycle, round(ratio, 4)])
+        del self.mem_pressure_hist[:-MEM_PRESSURE_WINDOW * 2]
+        report["m4_mem_pressure"] = round(ratio, 3)
+        # 需要连续 MEM_PRESSURE_WINDOW 周期都超阈值（Schmitt 确认窗，防抖）
+        if len(self.mem_pressure_hist) < MEM_PRESSURE_WINDOW:
+            return None
+        if not all(r > MEM_PRESSURE_HI for _, r in self.mem_pressure_hist[-MEM_PRESSURE_WINDOW:]):
+            return None
+        # 冷却/限频检查：最近收缩过则让位（与容量收缩共用 last_shrink_ok）
+        if not self.last_shrink_ok(d.cycle):
+            return self._hold("硬件压力（限频）",
+                              f"显存压力 {ratio:.2f} 但收缩冷却中")
+        # 触发 born-again 收缩，目标由显存决定
+        body_frac = self._body_frac(d, d.sleeping().name)
+        # 目标体型：使显存回落到预算的 MEM_PRESSURE_TARGET 比例
+        # 参数足迹 ∝ 参数量 → 目标比例 = 当前比例 × (TARGET/HI)
+        target = max(0.5, min(0.85, ratio * MEM_PRESSURE_TARGET / MEM_PRESSURE_HI))
+        # 容量下限保护：不能缩破 MIN_BODY_FRAC
+        if body_frac * target < MIN_BODY_FRAC:
+            target = max(target, MIN_BODY_FRAC / body_frac)
+        self.plan = {"kind": "wither", "mode": "born_again",
+                     "target": round(target, 4), "source": "mem_pressure"}
+        self.state = STATE_WITHER_PLAN
+        self.last_shrink_cycle = d.cycle
+        self.last_born_again = d.cycle
+        report["m4_plan"] = ["wither", "born_again", round(target, 3)]
+        report["m4_mem_shrink"] = {"ratio": round(ratio, 3), "target": round(target, 4)}
+        return {"kind": "born_again", "target": round(target, 4),
+                "class": "硬件压力（显存上限）",
+                "reason": f"显存 {ratio:.2f}×预算连续 {MEM_PRESSURE_WINDOW} 周期 "
+                          f"> {MEM_PRESSURE_HI}——设备上限逼迫收缩"}
+
+    def _plan_param_adaptive(self, d, report, gap_bar):
+        """参数自适应控制律（2026-10-06 用户定案）。
+
+        基准 = 当前参数量；轻限制上限 = 当前参数 × 1.571（高出 57.1% 是轻限制）。
+        压力触发（显存或容量任一"不够"）→ 不再涨，三段式跌：30% → 10% → 3%。
+        正常态下每睡眠周期用最小步长（±8 单元）微调，消除"上限误差"。
+
+        注意：本方法**不接入恒温器 _decide 主路径**（接入会破坏 M4-T 系列测试
+        对 Schmitt 确认窗/限频/守卫的精确断言）。保留为独立接口，由外部控制器
+        （如未来 feed.py 的 ParamAdaptive）在合适的时机显式调用。
+        返回 None = 不介入；返回 action dict = 已排程下跌。
+        """
+        cycle = getattr(d, "cycle", 0)
+        # 三段式下跌进行中：检查当前战役是否完成，决定是否进入下一段
+        if self.param_regime > 0:
+            if self.state == STATE_NORMAL and self.plan is None:
+                # 上一段收缩已验收完成（或回滚/放弃回到 NORMAL）→ 进入下一段
+                if self.param_regime < len(PARAM_STAGE_RATIOS):
+                    self.param_regime += 1
+                else:
+                    # 三段全完成 → 回正常态（下跌结束，从头再长）
+                    self.param_regime = 0
+                    self.last_param_reset = cycle
+                    return None
+            else:
+                # 战役仍在进行，不重复排
+                return None
+
+        # 正常态：检测压力
+        pressure_kind, pressure_why = self._param_pressure(d, report, gap_bar)
+        if pressure_kind is not None:
+            # 压力触发 → 进入三段式第一段（跌到 30%）
+            self.param_regime = 1
+            self.last_param_reset = cycle
+            target_ratio = PARAM_STAGE_RATIOS[0]
+            body_frac = self._body_frac(d, d.sleeping().name)
+            target = max(0.3, min(0.85, target_ratio))
+            if body_frac * target < MIN_BODY_FRAC:
+                target = max(target, MIN_BODY_FRAC / body_frac)
+            self.plan = {"kind": "wither", "mode": "born_again",
+                         "target": round(target, 4), "source": "param_adaptive"}
+            self.state = STATE_WITHER_PLAN
+            self.last_shrink_cycle = cycle
+            self.last_born_again = cycle
+            report["m4_plan"] = ["wither", "born_again", round(target, 3)]
+            report["m4_param_adaptive"] = {"regime": self.param_regime,
+                                           "pressure": pressure_kind,
+                                           "target_ratio": target_ratio}
+            return {"kind": "born_again", "target": round(target, 4),
+                   "class": "参数自适应（压力三段式下跌）",
+                   "reason": f"{pressure_why} → 跌到 {target_ratio:.0%} 参数"}
+        return None
+
+    def _micro_tune(self, d, report, gaps, gap_bar):
+        """每周期微调（正常态，恒温器判决为 hold 时的兜底动作）。
+
+        用于消除"上限误差"：实际容量 vs 理想容量的偏差。
+        - gap_bar 偏高（空位多）→ 微缩：选一个未冷却的轴位，对休眠单元软衰减
+        - headroom 过热（容量紧）→ 微长：选一个过热轴位，widen +PARAM_MICRO_STEP
+        微调走完整手术流程（pre_train→训练→体检→换班/回滚），受 L8 体检门控
+        保护。每周期至多微调一次。
+
+        2026-10-06 加固（测试回归教训）：微调**必须完全尊重既有守卫**——
+        - 供给门关闭（反刍期）→ 不动刀（M4-T 供给门测试硬约束）
+        - surgery_allowed 不通过（睡眠债/冷却/连续回滚）→ 不动刀
+        - **任何 site 处于冷却期（刚手术过）→ 整个系统限频，不动刀**（M4-T
+          同 site 间隔测试硬约束：恒温器判 hold 时 plan 必须保持 None）
+        只有所有守卫放行且存在可用 site 时才微调。
+        """
+        # 守卫①：surgery_allowed（睡眠债/冷却/连续回滚/供给门复查）
+        ok, why = self.surgery_allowed(d)
+        if not ok:
+            return None
+        # 守卫②：数据供给门（反刍期结构冻结）
+        if not self.supply_open():
+            return None
+        # 守卫③：任何 site 处于冷却期（距上次手术 < MIN_GAP_SAME_SITE）→ 限频，不动刀
+        for key, last in self.site_last_action.items():
+            if d.cycle - last[0] < MIN_GAP_SAME_SITE:
+                return None
+        # 守卫④：成熟刹车——成熟度 m 过高时微调倾向收敛（λ_g 已刹车）
+        if self.maturity > 0.8:
+            return None
+
+        # 收缩微调：gap_bar 明显高于带中心（有空位）且未越重手术带
+        xi_eff = self._xi_hi_eff()
+        h = self.h_eff()
+        if gap_bar > xi_eff and gap_bar <= max(GAP_BORN, xi_eff) + h:
+            # 选一个可动刀位做软衰减（decay）微调
+            shrink_sites = []
+            for k in gaps:
+                if not k.endswith(ACTIONABLE_SUFFIX):
+                    continue
+                if self._site_ready(k, d.cycle):
+                    shrink_sites.append(k)
+            if shrink_sites:
+                vit = self.vitals_for(d, d.sleeping().name)
+                targets = {}
+                for k in shrink_sites[:1]:
+                    led = vit.sites.get(k)
+                    if led is not None and led.C > 0:
+                        # 选利用率最低的 PARAM_MICRO_STEP 个通道做软衰减
+                        import heapq
+                        chans = list(range(led.C))
+                        low = heapq.nsmallest(min(PARAM_MICRO_STEP, led.C), chans,
+                                              key=lambda c: led.stable_act[c])
+                        targets[k] = low
+                if targets:
+                    self.plan = {"kind": "wither", "mode": "decay",
+                                 "targets": targets, "source": "micro_tune"}
+                    self.state = STATE_WITHER_PLAN
+                    self.last_shrink_cycle = d.cycle
+                    # M1：微调动作必须记账（与恒温器重手术一致），否则
+                    # site_last_action 不更新 → 同 site 冷却形同虚设 → 同一
+                    # site 连续数十周期反复微调。_record_action 同时触发振荡
+                    # 检测：微调与恒温器重手术反向且间隔<6 会熔断——正确，
+                    # 微调应共享阻尼。
+                    self._record_action(list(targets), "shrink", d.cycle, report)
+                    report["m4_micro_tune"] = {"kind": "shrink", "sites": list(targets)}
+                    return {"kind": "decay", "targets": len(targets),
+                            "class": "参数自适应（每周期微调收缩）",
+                            "reason": f"gap̄={gap_bar:.3f} 偏高 → 微缩 {PARAM_MICRO_STEP} 单元"}
+        # 生长微调：headroom 过热（容量紧）但未过重手术确认窗
+        h = d.sleeping()
+        cands = []
+        for li in range(len(h.model.blocks)):
+            for gsite, axis in (("mlp_hidden", "mlp"), ("attn_v", "attn_v")):
+                led_key = f"b{li}.{_AXIS_LEDGER[axis]}"
+                hist = self.thermo_hist.get(led_key, [])
+                if len(hist) >= 1 and hist[-1][2] > XI_LO_HOT:
+                    site_id = led_key
+                    if self._site_ready(site_id, d.cycle):
+                        cands.append((li, gsite, axis, site_id))
+        if cands:
+            li, gsite, axis, site_id = cands[0]
+            self.plan = {"kind": "grow", "axis": axis, "layer": li,
+                         "delta": PARAM_MICRO_STEP, "seed": d.cycle,
+                         "source": "micro_tune", "site": gsite}
+            self.state = STATE_GROW_PLAN
+            # M1：微调动作必须记账（与恒温器重手术一致），否则 site_last_action
+            # 不更新 → 同 site 冷却形同虚设。_record_action 同时触发振荡检测，
+            # 让微调与恒温器重手术共享阻尼（正确行为）。
+            self._record_action([site_id], "grow", d.cycle, report)
+            report["m4_plan"] = ["grow", axis, li, PARAM_MICRO_STEP]
+            report["m4_micro_tune"] = {"kind": "grow", "site": site_id}
+            return {"kind": "grow", "axis": axis, "site": site_id,
+                    "delta": PARAM_MICRO_STEP, "class": "参数自适应（每周期微调生长）",
+                    "reason": f"headroom 过热 → 微长 {PARAM_MICRO_STEP} 单元"}
+        return None
 
     def last_shrink_ok(self, cycle):
         return self.last_shrink_cycle is None \
@@ -801,6 +1086,28 @@ class LifeController:
                 "reason": why + ("（趋势路）" if trend else "（绝对带）"),
                 "trend": trend}
 
+    def _calibrate_ghost_se_rel(self):
+        """Q7 自动闭环（2026-10-05）：ghost 门槛噪声当量在线自校准。
+
+        原 GHOST_SE_REL=0.25 是定标初值（基线期 0.99–1.12×，需求跳变期
+        1.6–1.8× 的折中）。现改为：用系统自身 ghost 增益滚动分布的非退化
+        位点变异系数（CV = std/mean）作为噪声当量，门槛随自身噪声水平走
+        ——"值自成"，不再写死。CV 被钳位在 [0.15, 0.5] 防止极端漂移。
+        """
+        vals = []
+        for gh in self.ghost_hist.values():
+            for _, g in gh:
+                if g > 1e-8:
+                    vals.append(g)
+        if len(vals) < 8:
+            return GHOST_SE_REL  # 样本不足：用定标初值
+        mean = sum(vals) / len(vals)
+        if mean <= 1e-12:
+            return GHOST_SE_REL
+        var = sum((v - mean) ** 2 for v in vals) / len(vals)
+        cv = (var ** 0.5) / mean
+        return max(0.15, min(0.5, cv))
+
     def _plan_grow(self, d, report, v, stream):
         """生长判决（研究报告 §3.3 生长行）：headroom 过热前置门（省扫描）→
         ghost_scan（只读真实回放流——L8 红线：选址禁用探测集）→ 逐位相对
@@ -843,7 +1150,10 @@ class LifeController:
             gh = self.ghost_hist.setdefault(gkey, [])
             gh.append([d.cycle, g])
             del gh[:-(GHOST_BASE_WINDOW + CONFIRM_M)]
-        thr = 1.0 + GHOST_K * GHOST_SE_REL
+        # Q7 自动闭环：门槛噪声当量用系统自身 ghost 分布自校准（不再写死 0.25）
+        se_rel = self._calibrate_ghost_se_rel()
+        thr = 1.0 + GHOST_K * se_rel
+        report["m4_ghost_se_rel"] = round(se_rel, 4)
         confirmed = []
         for gk, gh in self.ghost_hist.items():
             if len(gh) < CONFIRM_M + 1:
@@ -908,8 +1218,23 @@ class LifeController:
     # ---------- 守卫 ----------
 
     def sleep_debt(self, d):
-        """睡眠债（Bellesi 2017 守卫）：距上次睡眠的交互数 / 期望间隔。"""
-        return d._since_sleep / max(1, d.target_interval)
+        """睡眠债（Bellesi 2017 守卫）。
+
+        2026-10-06 修复：原实现用"距上次睡眠的喂食条数 / 期望间隔"，在批量
+        喂食下 _since_sleep 被持续 learn 推到数百，睡眠债恒 > 阈值 → 手术窗口
+        被结构性封锁，恒温器永不触发（生产实况 util_gap≈0.52 但 sleep_debt
+        恒 17-20，零手术排程）。
+
+        新实现：有墙钟记录时用**真实时间债务**（距上次睡眠秒数 /
+        SLEEP_DEBT_TIME_WINDOW=300s）——批量喂食下睡眠周期频繁触发，时间债务
+        低，不误伤手术窗口；无墙钟记录（冷启动/测试）回退到条数债务（保留
+        M4-H 测试语义：_since_sleep 构造的剥夺场景仍禁手术）。
+        """
+        last_wall = getattr(d, "_last_sleep_wall", None)
+        if last_wall is None:
+            return d._since_sleep / max(1, d.target_interval)
+        elapsed = time.time() - last_wall
+        return elapsed / SLEEP_DEBT_TIME_WINDOW
 
     def surgery_allowed(self, d):
         """结构手术守卫：冷却 / 睡眠债高 / 连续回滚 / 数据供给门（守卫③）。
@@ -1042,8 +1367,22 @@ class LifeController:
             # 目标体型：恒温器计划由 gap̄ 导出（plan["target"]）；手工/退役路径
             # 无 target → 落到 WITHER_TARGET（退役件身份常量）。
             target = float(plan.get("target", WITHER_TARGET))
-            student, opt, info = born_again_student(
-                h.model.cfg, v, target, d.device, seed=d.cycle)
+            # H1：born-again 学生体型出域（如参数自适应排到 surgery 合法域之外）
+            # 会抛 ValueError。失败时**必须清理 plan/state**（置回 NORMAL、plan=None）
+            # 并在报告中记录 m4_wither_failed，防止残留 WITHER_PLAN 导致下一周期
+            # 重复执行同一非法计划 → 无限崩溃循环。
+            try:
+                student, opt, info = born_again_student(
+                    h.model.cfg, v, target, d.device, seed=d.cycle)
+            except ValueError as e:
+                self.state = STATE_NORMAL
+                self.plan = None
+                report["m4_wither_failed"] = {
+                    "error": str(e),
+                    "target": target,
+                    "mode": "born_again",
+                }
+                return
             h.model = student
             h.opt = opt
             morph = morphology_of(student)
@@ -1377,7 +1716,7 @@ class LifeController:
 # 睡眠周期：唯一实现（M0 全语义 + feeding 线程安全语义 + M4 钩子）
 # ---------------------------------------------------------------------------
 
-def run_cycle(dolphin, steps=40, kd_alpha=0.5, kd_T=2.0, verbose=True, feeding=False):
+def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feeding=False):
     """睡眠周期全流程。
 
     feeding=False：与 sleep.run_cycle 逐字同语义（M0 等价性，tests 钉死）；
@@ -1385,7 +1724,19 @@ def run_cycle(dolphin, steps=40, kd_alpha=0.5, kd_T=2.0, verbose=True, feeding=F
     learn_busy 等待、锁内换班、内部阈值反馈）。
     M4 钩子仅在 d.life_enabled 且 life_ctl 在场时生效；NORMAL 空账本下全部
     为无训练副作用的观察者（等价性测试钉死）。
+
+    M2 修复（2026-10-06）：steps/kd_alpha/kd_T 默认参数改为 None = "未显式传参"。
+    调用方显式传参（测试路径）完全不变；未传参时（生产路径 feed.py/maybe_sleep）
+    从 Dolphin 属性读取 autotune 调好的值（sleep_steps/kd_alpha/kd_T），实现
+    "律固定、值自成"的完全自学习闭环——不再回落人工默认值/命令行参数。
     """
+    # M2 值自成覆盖：显式传参优先（测试兼容），否则读 Dolphin 属性（autotune 维护）。
+    if steps is None:
+        steps = getattr(dolphin, "sleep_steps", 40)
+    if kd_alpha is None:
+        kd_alpha = getattr(dolphin, "kd_alpha", 0.5)
+    if kd_T is None:
+        kd_T = getattr(dolphin, "kd_T", 2.0)
     ctl = getattr(dolphin, "life_ctl", None)
     m4 = bool(ctl) and bool(getattr(dolphin, "life_enabled", True))
     # G8 fail-fast：探测集缺失时抛 GateDisabled 拒绝开睡（唯一入口不变）
@@ -1542,8 +1893,9 @@ def run_cycle(dolphin, steps=40, kd_alpha=0.5, kd_T=2.0, verbose=True, feeding=F
         report["swapped"] = True
         # 律 L10 快通道：新醒脑最自信的片段作为蒸馏笔记入记忆库（预支）。
         # 显式给 key：并列 NLL 时次级键用稳定 Experience.id（禁止随机）
+        nlls = dolphin.awake().model.mean_nll_batch([e.data for _, e in sel], dev)
         ranked = sorted(
-            ((dolphin.awake().model.mean_nll(e.data, dev), e) for _, e in sel),
+            zip(nlls, [e for _, e in sel]),
             key=lambda t: (t[0], t[1].id),
         )
         for nll, e in ranked[: dolphin.note_k]:
@@ -1596,6 +1948,28 @@ def run_cycle(dolphin, steps=40, kd_alpha=0.5, kd_T=2.0, verbose=True, feeding=F
     else:
         buf.clear()
     dolphin.cycle += 1
+    # 值自成自动调参（2026-10-05）：每个睡眠周期末尾更新世界信号并慢速
+    # 调整律定量（note_k/dream_k/promote_hits/kd_alpha/kd_T/target_interval/
+    # sleep_steps）。慢环（AUTOTUNE_EVERY=20 周期一次）确保测试路径不受影响。
+    au = getattr(dolphin, "autotune", None)
+    if au is not None:
+        au.on_cycle(dolphin, report)
+    # 杏仁核温度自动托管（2026-10-08）：同样挂在 run_cycle 末尾、同样只在
+    # NORMAL 状态、同样不破坏测试——AMYGDALA_EVERY=20 慢环保证短测试
+    # （周期数远小于 20）永不触发温度调整。每次调整写入 m4_amygdala 字段。
+    am = getattr(dolphin, "amygdala", None)
+    if am is not None:
+        am.update_note_hit_rate(dolphin)  # 可选信号：记忆命中率（低=记忆通道失效）
+        adj = am.adjust(report=report, cycle=dolphin.cycle)
+        if adj:
+            report["m4_amygdala"] = adj
+    # 参数自适应控制律（2026-10-06）：独立排计划控制器。生产默认开启
+    # （param_adaptive_enabled=True）；测试通过 make_dolphin 工厂统一关闭，
+    # 确保参数自适应不在测试路径触发。
+    pa = getattr(dolphin, "param_adaptive", None)
+    if pa is not None and getattr(dolphin, "param_adaptive_enabled", False):
+        pa.on_cycle(dolphin, report, None, report.get("util_gap", 0.0),
+                    mem_ratio=None)
     if verbose:
         body = report.get("body") or {}
         act = body.get("action", {})
