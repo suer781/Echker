@@ -4,9 +4,10 @@
 逐窗口串行 → 完整窗口堆叠一次 forward），dolphin/life.py 换班排序调用点
 改走批量接口。本测试验证：
 
-1. 等价性：mean_nll(data) 与 mean_nll_batch([data])[0] 绝对差 < 1e-4。
-2. 批量顺序：mean_nll_batch([d1,d2,d3]) 与逐个 mean_nll 一一对应。
-3. 排序一致性：多条数据 batch 算出的 nll 排序与逐个算出的排序一致。
+1. 等价性：旧版逐窗口串行逻辑复刻 _mean_nll_serial 与新版 mean_nll /
+   mean_nll_batch 绝对差 < 1e-4（捕获 batch 化相对旧实现的回归）。
+2. 批量顺序：mean_nll_batch([d1,d2,d3]) 与旧版串行逐个结果一一对应。
+3. 排序一致性：多条数据 batch 算出的 nll 排序与旧版串行排序一致。
 4. 空列表：mean_nll_batch([], device) 返回 []。
 
 纯 CPU 运行，不依赖 CUDA；不触碰生产资产。
@@ -41,11 +42,34 @@ def _make_model():
     return m
 
 
+def _mean_nll_serial(model, data, max_chunks=8):
+    """逐字复刻优化前 mean_nll 的逐窗口串行逻辑（回归基准）。
+
+    优化前实现：每次只算一个窗口（batch=1），串行循环，loss.item() 同步。
+    新版 mean_nll / mean_nll_batch 必须在数学上与它等价（浮点容差内）。
+    """
+    b = torch.tensor(list(data), dtype=torch.long)
+    if b.numel() < 2:
+        return 0.0
+    losses = []
+    bs = model.cfg.block_size
+    step = max(1, (b.numel() - 1) // max_chunks)
+    for s in range(0, b.numel() - 1, step):
+        e = min(s + bs, b.numel())
+        if e - s < 2:
+            break
+        _, loss = model(b[s:e - 1].unsqueeze(0), b[s + 1:e].unsqueeze(0))
+        losses.append(loss.item())
+        if len(losses) >= max_chunks:
+            break
+    return sum(losses) / len(losses) if losses else 0.0
+
+
 def t_mean_nll_batch():
     print("== mean_nll batch 化改造测试 ==")
     m = _make_model()
 
-    # —— 1. 等价性：各种长度/内容的数据，单条 batch 与逐窗口串行一致 ——
+    # —— 1. 等价性：各种长度/内容的数据，旧版串行复刻 vs 新版 mean_nll ——
     datas = [
         b"",                                    # 空字节串
         b"a",                                   # 1 字节
@@ -58,38 +82,38 @@ def t_mean_nll_batch():
     ]
     max_diff = 0.0
     for i, d in enumerate(datas):
-        single = m.mean_nll(d, "cpu")
+        serial = _mean_nll_serial(m, d)
         batch = m.mean_nll_batch([d], "cpu")[0]
-        diff = abs(single - batch)
+        diff = abs(serial - batch)
         max_diff = max(max_diff, diff)
         check(f"等价性 data[{i}] len={len(d)} diff={diff:.2e} < 1e-4",
-              diff < 1e-4, f"single={single:.6f} batch={batch:.6f}")
+              diff < 1e-4, f"serial={serial:.6f} batch={batch:.6f}")
     check("等价性最大绝对差 < 1e-4", max_diff < 1e-4,
            f"max_diff={max_diff:.2e}")
 
-    # —— 2. 批量顺序：batch 结果与逐个 mean_nll 一一对应 ——
+    # —— 2. 批量顺序：batch 结果与旧版串行逐个一一对应 ——
     d1, d2, d3 = _pat(2000), "测试批量顺序".encode(), _pat(1800)
-    singles = [m.mean_nll(d, "cpu") for d in [d1, d2, d3]]
+    singles = [_mean_nll_serial(m, d) for d in [d1, d2, d3]]
     batched = m.mean_nll_batch([d1, d2, d3], "cpu")
     check("批量返回长度与输入等长", len(batched) == 3, f"len={len(batched)}")
     order_ok = True
     for j, (s, b) in enumerate(zip(singles, batched)):
         if abs(s - b) >= 1e-4:
             order_ok = False
-        print(f"    order[{j}] single={s:.6f} batch={b:.6f} diff={abs(s-b):.2e}")
-    check("批量顺序与逐个 mean_nll 一一对应（差 < 1e-4）", order_ok)
+        print(f"    order[{j}] serial={s:.6f} batch={b:.6f} diff={abs(s-b):.2e}")
+    check("批量顺序与旧版串行一一对应（差 < 1e-4）", order_ok)
 
-    # —— 3. 排序一致性：30 条随机长度数据的 batch 排序 == 逐个排序 ——
+    # —— 3. 排序一致性：30 条随机长度数据的 batch 排序 == 旧版串行排序 ——
     random.seed(42)
     many = [bytes(random.randbytes(random.randint(100, 3000))) for _ in range(30)]
-    srt_single = sorted((m.mean_nll(d, "cpu"), i) for i, d in enumerate(many))
+    srt_single = sorted((_mean_nll_serial(m, d), i) for i, d in enumerate(many))
     srt_batch = sorted((v, i) for i, v in enumerate(m.mean_nll_batch(many, "cpu")))
     sort_ok = True
     for a, b in zip(srt_single, srt_batch):
         if abs(a[0] - b[0]) >= 1e-4 or a[1] != b[1]:
             sort_ok = False
             break
-    check("排序一致性：30 条数据 batch 排序与逐个排序一致", sort_ok)
+    check("排序一致性：30 条数据 batch 排序与旧版串行排序一致", sort_ok)
 
     # —— 4. 空列表：mean_nll_batch([], device) 返回 [] ——
     empty = m.mean_nll_batch([], "cpu")
@@ -101,9 +125,9 @@ def t_mean_nll_batch():
 
     n_ok = sum(PASS)
     print(f"\n== 结论：{n_ok}/{len(PASS)} 绿 ==")
-    return n_ok == len(PASS)
 
 
 if __name__ == "__main__":
-    ok = t_mean_nll_batch()
+    t_mean_nll_batch()
+    ok = all(PASS) if PASS else False
     sys.exit(0 if ok else 1)
