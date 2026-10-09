@@ -77,4 +77,4 @@ pytest tests/ -q
 
 ## 许可证
 
-本项目以 [MIT License](LICENSE) 发布。
+本项目以 [Apache License 2.0](LICENSE) 发布。
