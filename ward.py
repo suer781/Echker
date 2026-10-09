@@ -1,4 +1,4 @@
-"""查房（ward round）：查看海豚的当前状态、身体结构与生成能力。
+"""查房（ward round）：查看蓝蓟智能的当前状态、身体结构与生成能力。
 
 2026-10-04 升级（查房读真实状态）：
 - 优先加载 B 路线部署存档 dolphin/fed_state.pt（双半球 + 记忆库 + 喂食游标，
@@ -42,7 +42,7 @@ def _fmt_time(ts):
 
 def load_dolphin(dev=None, fed_state_path=None, birth_path=None,
                  old_state_path=None, cold_path=None, probe_path=None):
-    """加载海豚：优先 B 路线部署存档 fed_state.pt，回退旧逻辑并明示未部署状态。
+    """加载蓝蓟智能：优先 B 路线部署存档 fed_state.pt，回退旧逻辑并明示未部署状态。
 
     返回 (d, info)。info.deployed=True 表示读到的是部署存档（B 路线真实状态）；
     False 时 info.note 必须给出回退原因，报告据此显式标注"未部署状态"。
@@ -142,6 +142,6 @@ def samples(d, prompts, n=60):
 if __name__ == "__main__":
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     d, info = load_dolphin(dev)
-    report(d, "查房 · 海豚当前状态", info)
-    print("\n----- 现在嘴里能说出什么（字节级玩具模型，看结构不求通顺）-----")
+    report(d, "查房 · 蓝蓟智能当前状态", info)
+    print("\n----- 生成输出示例（字节级模型，观察结构）-----")
     samples(d, ["心脏的功能", "感冒了怎么办", "烫伤后第一步", "人体最大的器官是"])

@@ -2,14 +2,14 @@
 
 开发代号：haolie（昊冽）
 
-一个从零实现的自学习 AI 系统：不依赖任何现成 LLM 工程（无 nanoGPT / minGPT / HuggingFace / 现成 tokenizer），仅使用 PyTorch 与 Python 标准库。模型直接学习原始字节流（律 L1），通过"无模式统一自循环"持续从任何输入中学习。
+一个基于 PyTorch 与 Python 标准库自研实现的自学习 AI 系统，无第三方 LLM 框架依赖（无 nanoGPT / minGPT / HuggingFace / 现成 tokenizer）。模型直接学习原始字节流（律 L1），通过"无模式统一自循环"持续从输入中学习。
 
 完整设计与生物学依据见 [架构设计.md](架构设计.md)。
 
 ## 核心机制
 
 - **无模式统一自循环**：任何输入（用户对话、批量文件、数据流）统一成为学习信号，走同一条"经验 → 缓冲 → 选拔 → 睡眠训练 → 体检门控 → 换班"链路。
-- **无限循环喂食**：数据源喂尽自动轮转回第一个源，永不停歇；间隔重复本身即是巩固机制。
+- **无限循环喂食**：数据源喂尽后自动轮转回第一个源；间隔重复作为巩固机制。
 - **杏仁核托管**：生成温度 / top_k / top_p 由 Amygdala 根据系统健康度自动调节，无需人工设置。
 - **体检门控**：固定探测集（任何 hemisphere 永不在此训练）作为换班金丝雀，通过才上岗。
 
@@ -24,8 +24,8 @@ pip install -r requirements.txt
 ## 快速开始
 
 ```bash
-python chat.py                    # 聊天入口（输入即学习，后台睡眠训练保持自循环）
-python feed.py --resume           # 从 dolphin/fed_state.pt 按喂食游标续喂（一键启动自循环）
+python chat.py                    # 聊天入口（输入自动成为学习信号，后台睡眠训练保持自循环）
+python feed.py --resume           # 从 dolphin/fed_state.pt 按喂食游标续喂（启动自循环）
 python pretrain.py --steps 300   # 从 corpus/ 干净语料预训练基座
 python smoke_test.py              # M0 端到端冒烟测试
 ```
