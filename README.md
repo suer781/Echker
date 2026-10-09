@@ -36,6 +36,7 @@ python smoke_test.py              # M0 端到端冒烟测试
 
 - 系统运行中每 5 个睡眠周期自动存档到 `dolphin/fed_state.pt`（原子写 + `dolphin/archive/` 滚动备份 3 份），退出（Ctrl+C/收工）时也会存档。
 - 下次启动 `python feed.py --resume` 或 `python chat.py` 会自动读档续跑（恢复权重、优化器动量、记忆、喂食游标等全部状态）；无存档则随机初始化，从零积累。
+- 存档文件（`dolphin/*.pt` 与 `dolphin/archive/`）被 `.gitignore` 忽略、不入库，由本地运行自动生成；克隆仓库后首次启动会从零初始化。
 
 ## 运行测试
 
@@ -66,7 +67,6 @@ pytest tests/ -q
 | `probes/` | 固定探测集与体检门控 |
 | `tests/` | 一致性、成长支持、均值 NLL 批次测试 |
 | `corpus/` | 胎教语料（只放干净来源） |
-| `实验记录/` | 实验报告与归档 |
 
 ## 贡献指南
 
