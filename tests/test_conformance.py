@@ -189,24 +189,151 @@ _BEFORE_COLD = _fingerprint(_PROD_COLD)
 _BEFORE_PROBE = _fingerprint(_PROD_PROBE)
 
 
-def verify_cold_quarantine():
-    """防线③：比对测试前后生产资产的指纹。返回 (是否完好, 明细)。
+# 测试特征串（2026-10-08 audit4/audit5 防御纵深）：三道防线已让测试不可能写
+# 生产文件，这条哨兵防的是「外部进程恰好把测试数据写进生产冷层」的极端串扰。
+# 出现任一标记 → 即使方向是追加/重写也判红（堵住「尾部追加测试数据」假阴性盲区）。
+_TEST_MARKERS = (
+    "预热记录：让经验编号从 1 开始",
+    "游标验证题目",
+    "循环喂食验证题目",
+    "隔离自检条目",
+    "恒温器测试回放流",
+    "回滚验证记录",
+    "门控验证记录",
+    "双通道验证记录",
+    "持久化回环测试记录",
+    "并发喂食记录",
+    "原子写验证记录",
+    "滚动备份验证记录",
+    "哈希校验验证记录",
+    "门控失效验证记录",
+    "阈值钳位验证记录",
+    "复活回归",
+    "重启失聪回归",
+    "凋零战役验证记录",
+    "等价性验证记录",
+    "回收验证记录",
+    "锚持久化验证记录",
+    "状态机验证记录",
+    "恒温器集成验证",
+    "反刍旧事",
+    "自杀回归旧条目",
+    "部署侧新经验流入",
+)
 
-    在全部测试跑完之后调用。任何一个生产资产被改动都判红——宁可误报，
-    不可漏报：这条断言的价值恰恰在于它平时必定为真，一旦为红就说明
-    隔离被绕过或生产代码存在未预期的冷层写入。
+
+def _contains_test_marker(path):
+    """文件内容里是否出现测试特征串（出现则视为测试污染，判红）。"""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return False
+    return any(m.encode("utf-8") in data for m in _TEST_MARKERS)
+
+
+def _is_append_only(path, before, after):
+    """判断 after 是否可解释为 before 的「纯追加/仅重写」。
+
+    2026-10-07 修复（审计B）：生产进程 feed.py 会在测试期间并发写入
+    memory_cold.jsonl——_demote 是追加新行，flush_cold 是同内容全量重写。
+    这两类都是「外部进程的正常写入」，不是测试污染，应降级为警告。
+
+    2026-10-08 修复（audit4/audit5）：flush_cold 按影子索引全量重写文件，
+    条目元数据（hits/score/created）会更新 → 文件头 b_size 字节 sha 必变，
+    原「头部 sha 不匹配 → 判红」在生产进程正常写冷层时恒假红。采用方案A：
+    对 memory_cold.jsonl 放宽为「非删减方向即视为外部正常写入」——行数/字节数
+    增长或不变（不是删减）→ 降级警告；只有删减（行数/字节数变少）才判红。
+    probe.txt 仍严格（任何变化判红，由调用方 allow_append=False 保证）。
+
+    同时补上审计指出的假阴性盲区：若 after 中出现测试特征串（测试独有文本），
+    即使方向是追加/重写也判红——防止「尾部追加测试数据」被误降级为警告。
+
+    判定基于「内容变化方向」而非 mtime（外部写入时 mtime_ns 必然变化）：
+    - before 为 None（测试前文件不存在）→ 测试后出现文件 = 外部首次创建，算追加
+      （但含测试特征串则判红）；
+    - after 为 None（文件被删除）→ 删减，判红；
+    - 行数/字节数变少 → 删减/重写，判红；
+    - 行数/字节数不变或增长 → 非删减方向：外部进程正常写入（flush_cold 会重写
+      头部元数据，无法用「头部一致性」判断），降级为警告——但含测试特征串则判红。
+    """
+    if before is None:
+        return after is not None and not _contains_test_marker(path)
+    if after is None:
+        return False  # 文件被删除 → 判红
+    b_lines, _, _, b_size = before
+    a_lines, _, _, a_size = after
+    if a_lines < b_lines or a_size < b_size:
+        return False  # 变少：删减/重写 → 判红
+    if _contains_test_marker(path):
+        return False  # 测试特征串出现 → 测试污染，判红（堵假阴性盲区）
+    return True  # 非删减方向 → 外部进程正常写入（flush_cold 重写/追加），降级警告
+
+
+def _judge_asset_change(name, path, before, after, allow_append):
+    """判断单个生产资产的变化。返回 (是否完好, 明细, 警告文本或 None)。
+
+    allow_append=True：memory_cold.jsonl 允许「外部进程纯追加/仅重写」→ 降级警告。
+    allow_append=False：probe.txt 是评测基准，任何变化都判红。
+    """
+    if before == after:
+        return True, f"{name} 零改动（{after[0]} 行 sha256={after[1][:12]}…）", None
+    # 有差异：先构造可读的指纹描述
+    def _desc(fp):
+        if fp is None:
+            return "不存在"
+        return f"{fp[0]} 行/{fp[3]}B sha256={fp[1][:12]}…"
+    diff = f"{name} 已被改动！测试前={_desc(before)} 测试后={_desc(after)}"
+    if allow_append and _is_append_only(path, before, after):
+        warning = (f"{name} 在测试期间被外部进程写入（追加方向，测试前 "
+                    f"{_desc(before)} → 测试后 {_desc(after)}）。"
+                    f"红线降级为警告：测试自身未污染生产资产。")
+        return True, diff + "（判定：外部进程正常写入，非测试污染）", warning
+    return False, diff + "（判定：非追加方向的改动，判红）", None
+
+
+def verify_cold_quarantine():
+    """防线③：比对测试前后生产资产的指纹。返回 (是否完好, 警告列表, 明细)。
+
+    在全部测试跑完之后调用。2026-10-07 修复（审计B）：原先「任何差异都判红」，
+    但生产进程 feed.py 会在测试期间并发写入 memory_cold.jsonl（正常冷层日志
+    追加/重写），导致红线误报。现区分两类变化：
+
+    - 外部进程正常写入：memory_cold.jsonl 呈「非删减方向」——行数/字节数不变
+      或增长（flush_cold 全量重写/追加，头部元数据会变，无法用头部一致性判断；
+      2026-10-08 audit4 方案A）。这类变化不是测试造成的，降级为黄色警告，
+      ok 仍为 True。
+    - 测试自身污染/异常改动：行数/字节数变少（删减/重写）、内容含测试特征串
+      （防御纵深，堵「尾部追加测试数据」假阴性盲区）、或 probe.txt 变化
+      （评测基准被污染）——一律判红。
+
+    判定基于「内容变化方向」而非 mtime（外部写入时 mtime_ns 必然变化）。
     """
     after_cold = _fingerprint(_PROD_COLD)
     after_probe = _fingerprint(_PROD_PROBE)
-    ok = (after_cold == _BEFORE_COLD) and (after_probe == _BEFORE_PROBE)
+    warnings = []
+    ok = True
     detail = []
-    for name, before, after in (("memory_cold.jsonl", _BEFORE_COLD, after_cold),
-                                ("probe.txt", _BEFORE_PROBE, after_probe)):
-        if before != after:
-            detail.append(f"{name} 已被改动！测试前={before} 测试后={after}")
-        else:
-            detail.append(f"{name} 零改动（{after[0]} 行 sha256={after[1][:12]}…）")
-    return ok, "  ".join(detail)
+
+    cold_ok, cold_detail, cold_warning = _judge_asset_change(
+        "memory_cold.jsonl", _PROD_COLD, _BEFORE_COLD, after_cold,
+        allow_append=True)
+    if cold_warning:
+        warnings.append(cold_warning)
+    if not cold_ok:
+        ok = False
+    detail.append(cold_detail)
+
+    probe_ok, probe_detail, probe_warning = _judge_asset_change(
+        "probe.txt", _PROD_PROBE, _BEFORE_PROBE, after_probe,
+        allow_append=False)
+    if probe_warning:
+        warnings.append(probe_warning)
+    if not probe_ok:
+        ok = False
+    detail.append(probe_detail)
+
+    return ok, warnings, "  ".join(detail)
 
 
 # ---- 显式工厂：让「本测试的 Dolphin 一律用临时冷层」在代码里看得见 ----
@@ -225,6 +352,10 @@ def make_dolphin(cfg=None, device="cpu", probe_path=None):
     故在此注明。
     """
     d = Dolphin(cfg=cfg, device=device, probe_path=probe_path)
+    # H3：生产默认 param_adaptive_enabled=True；测试统一在此关闭，确保参数
+    # 自适应控制律（压力三段式下跌/微调）不在测试中触发，保持 M4 判决主路径
+    # 精确可控（test_growth_support 的 ward 场景不跑 run_cycle，无需额外隔离）。
+    d.param_adaptive_enabled = False
     d.memory = MemoryStore(cold_path=_sandbox_cold_path())
     return d
 
@@ -912,6 +1043,76 @@ def t_g3_feed_cursor():
         feed_mod.iter_source = orig_iter
 
 
+def t_loop_feed():
+    """无限循环喂食（--loop-feed，2026-10-07）：数据源喂尽自动轮转回第一个源。
+
+    loop=True 时游标 round 递增、数据永远滋长（quota 人工限次生效，不无限空转）；
+    空源/全碎片零产出不崩溃、round 不无限递增、游标不越界；非 loop 模式保持旧
+    有限批次语义（不写 round 字段）。全部落在隔离沙箱，不碰生产资产。
+    """
+    import feed as feed_mod
+    from feed import feed_from
+    orig_iter = feed_mod.iter_source
+    try:
+        def mk(i):
+            return {"prompt": f"循环喂食验证题目第{i}号：甲乙丙丁戊己庚辛壬癸顺序编号。",
+                    "answer": f"标准答案正文第{i}号，长度足以通过碎片过滤线。", "source": "fake"}
+        src_a = [mk(i) for i in range(3)]
+        src_b = [mk(10 + i) for i in range(2)]
+        feed_mod.iter_source = lambda name: iter(src_a if name == "fakeA" else src_b)
+        with _probe_fixture("dolphin_loopfeed_") as probe:
+            # a) 两源轮转：quota=6 > 两源总长 5 → 进入第二轮，round 递增
+            names = ["fakeA", "fakeB"]
+            d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                             probe_path=probe, device="cpu")
+            cursor = {"sources": list(names), "source_idx": 0, "record_idx": 0}
+            d.feed_cursor = cursor
+            fed, hit, _ = feed_from(d, names, cursor, {}, loop=True, quota=6)
+            check("loop-feed 两源轮转后 fed=6 且限次命中",
+                  fed == 6 and hit is True, f"fed={fed} hit={hit}")
+            check("loop-feed 轮转后 round 递增为 1",
+                  cursor.get("round", 0) == 1, f"cursor={cursor}")
+            check("loop-feed 游标位置指向第二轮中（source_idx/record_idx 正确）",
+                  cursor["source_idx"] == 0 and cursor["record_idx"] == 1,
+                  f"cursor={cursor}")
+
+            # b) 空源 names=[]：返回 (0, False, 0) 不崩溃
+            d2 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                              probe_path=probe, device="cpu")
+            cursor2 = {"sources": [], "source_idx": 0, "record_idx": 0}
+            fed2, hit2, skip2 = feed_from(d2, [], cursor2, {}, loop=True, quota=10)
+            check("loop-feed 空源列表返回 (0, False, 0) 不崩溃",
+                  (fed2, hit2, skip2) == (0, False, 0), f"{(fed2, hit2, skip2)}")
+
+            # c) 空源（有源名但源为空）：零产出返回，round 不无限递增、游标不越界
+            feed_mod.iter_source = lambda name: iter([])  # 全部源为空
+            d3 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                              probe_path=probe, device="cpu")
+            cursor3 = {"sources": ["fakeA", "fakeB"], "source_idx": 0, "record_idx": 0}
+            fed3, hit3, skip3 = feed_from(d3, ["fakeA", "fakeB"], cursor3, {},
+                                          loop=True, quota=10)
+            check("loop-feed 空源零产出返回 (0, False, 0) 不崩溃",
+                  (fed3, hit3, skip3) == (0, False, 0), f"{(fed3, hit3, skip3)}")
+            check("loop-feed 空源 round 不无限递增（≤1，轮转尝试标记）",
+                  cursor3.get("round", 0) <= 1, f"cursor3={cursor3}")
+            check("loop-feed 空源游标不越界",
+                  cursor3["source_idx"] <= len(cursor3["sources"])
+                  and cursor3["record_idx"] == 0, f"cursor3={cursor3}")
+
+            # d) 非 loop 模式不写 round 字段（旧有限批次语义不变）
+            feed_mod.iter_source = orig_iter
+            feed_mod.iter_source = lambda name: iter(src_a if name == "fakeA" else src_b)
+            d4 = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                              probe_path=probe, device="cpu")
+            cursor4 = {"sources": list(names), "source_idx": 0, "record_idx": 0}
+            fed4, _, _ = feed_from(d4, names, cursor4, {}, loop=False)
+            check("loop-feed 非 loop 模式不写 round 字段",
+                  "round" not in cursor4 and fed4 == 5,
+                  f"fed4={fed4} cursor4={cursor4}")
+    finally:
+        feed_mod.iter_source = orig_iter
+
+
 def t_g3_structural_reward():
     """G3-c：数据集内重复条目的自动负奖励真实写进 reward 并压分（端到端）。"""
     import feed as feed_mod
@@ -1301,6 +1502,59 @@ def t_m4_vitals():
     check("M4-A 账本随档回环一致",
           v2.sites["a.mlp_hidden"].stable_act == led2.stable_act
           and v2.sites["a.ln1_out"].C == led3.C)
+
+
+def t_m4_dev_birth():
+    """发育模式出生检查钉子（2026-10-05）：① Vitals.remap_split 全账本委托——
+    life._execute_grow 轴③路径调用 v.remap_split(...)，而委托方法此前只存在于
+    SiteLedger，轴③生长真实执行即 AttributeError（恒温器排程从不停靠轴③，该路径
+    仅手工计划可达，故既有断言从未踩到；发育出生检查首次真实演练轴③时暴露）；
+    ② 钉住发育种子身体规格：d32×2 层×2 头 = 41,856 参数（发育实验的出生体重）。"""
+    from dolphin.vitals import Vitals, SiteLedger
+    v = Vitals()
+    led_a = SiteLedger("a.ln1_out", 4)
+    led_a.stable_act = [8.0, 4.0, 2.0, 1.0]
+    led_a.dorm_cycles = [1, 0, 2, 0]
+    led_b = SiteLedger("a.mlp_hidden", 2)
+    led_b.stable_act = [3.0, 5.0]
+    v.sites = {"a.ln1_out": led_a, "a.mlp_hidden": led_b}
+    v.remap_split(2)
+    check("M4-发育 Vitals.remap_split 全账本委托（轴③执行路径可达）",
+          led_a.C == 8 and led_a.stable_act == [4.0, 4.0, 2.0, 2.0, 1.0, 1.0, 0.5, 0.5]
+          and led_a.dorm_cycles == [1, 1, 0, 0, 2, 2, 0, 0]
+          and led_b.C == 4 and led_b.stable_act == [1.5, 1.5, 2.5, 2.5],
+          f"ln1_out C={led_a.C} {led_a.stable_act}；mlp_hidden C={led_b.C} {led_b.stable_act}")
+    from dolphin.model import Config, ByteTransformer
+    cfg = Config(d_model=32, n_layers=2, n_heads=2, block_size=256)
+    m = ByteTransformer(cfg)
+    n = sum(p.numel() for p in m.parameters())
+    check("M4-发育 种子身体规格 d32/L2/H2 随机初始化 41,856 参数", n == 41856,
+          f"{n:,}（57M 身体的 0.07%；发育模式的出生体重）")
+    # ③ 轴②移植体的捕获对账（2026-10-05 发育实验发现并修复：父账本须经
+    #    _AXIS_LEDGER 映射到 attn_out 位——旧实现直接查 "b0.attn_v" 得 None →
+    #    对账单被无声清除 → 轴②移植体的 λ_g 捕获结算结构性死。轴①前缀
+    #    mlp_hidden 恰与主账本同名，故既有 T8 测试从未踩到。）
+    from dolphin.life import LifeController, LAMBDA_G
+    ctl = LifeController()
+    ctl.vitals["B"] = Vitals()
+    led_new = SiteLedger("b0.attn_v.new.0", 8, {"is_new": [True] * 8, "probation": [3] * 8})
+    led_new.stable_act = [0.9] * 8
+    led_old = SiteLedger("b0.attn_out", 32)
+    led_old.stable_act = [0.1] * 32
+    ctl.vitals["B"].sites["b0.attn_v.new.0"] = led_new
+    ctl.vitals["B"].sites["b0.attn_out"] = led_old
+    ctl.pending_capture = {"due_cycle": 0, "keys": ["b0.attn_v.new.0"], "hname": "B"}
+
+    class _D:
+        cycle = 5
+    rep = {}
+    ctl._capture_check(_D(), rep, ctl.vitals["B"])
+    check("M4-发育 轴②捕获对账父账本经 _AXIS_LEDGER 解析（attn_v→attn_out）",
+          abs((rep.get("m4_capture") or {}).get("rate", -1) - 1.0) < 1e-9
+          and abs(ctl.lambda_g - LAMBDA_G * 1.1) < 1e-9
+          and ctl.pending_capture is None,
+          f"rate={(rep.get('m4_capture') or {}).get('rate')} "
+          f"λ_g={ctl.lambda_g}（修复前 rate 缺失、对账单无声清除）")
 
 
 def t_m4_widen_exact():
@@ -2423,9 +2677,251 @@ def t_cold_quarantine():
 
 
 def t_cold_untouched():
-    """红线断言（收尾）：全部测试跑完后，生产资产指纹必须与开工时逐字节一致。"""
-    ok, detail = verify_cold_quarantine()
+    """红线断言（收尾）：全部测试跑完后，生产资产指纹必须与开工时逐字节一致。
+
+    2026-10-07 修复（审计B）：生产进程 feed.py 会在测试期间并发写入
+    memory_cold.jsonl（正常冷层日志追加/重写）。把「外部进程正常写入」与
+    「测试自身污染」区分开：追加方向 → 黄色警告（测试自身未污染，check 仍
+    通过）；删减/重写或 probe.txt 变化 → 判红失败。
+    """
+    ok, warnings, detail = verify_cold_quarantine()
+    for w in warnings:
+        print(f"  ⚠ {w}")
     check("红线 全套测试零改动生产资产（memory_cold.jsonl / probe.txt）", ok, detail)
+
+
+def t_stdin_chat():
+    """无模式 stdin 对话通道（2026-10-07）：serve 即学习信号 + 打分反馈 + 异常不炸。
+
+    用户输入经 serve() 自动 add 进 buffer（learn_total+1），与批量喂食同一条链路；
+    打印回复后从 stdin 读一行打分并写 reward。任何异常都不应炸部署（返回 None）。
+    本测试全部落在隔离沙箱：临时 probe + make_dolphin 隔离冷层，不碰生产资产。
+    """
+    import io
+    from feed import chat_once
+
+    tmp = tempfile.mkdtemp(prefix="dolphin_stdinchat_")
+    try:
+        probe = os.path.join(tmp, "probe.txt")
+        _write_synthetic_probe(probe, 12)
+        cfg = Config(d_model=64, n_layers=2, n_heads=2, block_size=256)
+        d = make_dolphin(cfg=cfg, probe_path=probe, device="cpu")
+
+        # 预热一次，让经验编号从 1 开始（满足 eid > 0 的断言）
+        warm_eid = d.learn("预热记录：让经验编号从 1 开始。")
+        check("stdin-chat 预热 eid 从 0 开始", warm_eid == 0, f"预热 eid={warm_eid}")
+        before_total = d.learn_total
+
+        # 用 StringIO 替换 sys.stdin：预写打分行 "+1\n"
+        orig_stdin = sys.stdin
+        try:
+            sys.stdin = io.StringIO("+1\n")
+            result = chat_once(d, "你好，海豚")
+        finally:
+            sys.stdin = orig_stdin
+
+        eid_ok = isinstance(result, tuple) and len(result) == 2
+        eid = result[0] if eid_ok else None
+        resp = result[1] if eid_ok else None
+        check("stdin-chat 返回 (eid, resp) 且 eid 为 int > 0",
+              eid_ok and isinstance(eid, int) and eid > 0,
+              f"eid={eid!r} resp={resp!r}")
+        check("stdin-chat serve 使 learn_total 增长",
+              d.learn_total == before_total + 1,
+              f"before={before_total} after={d.learn_total}")
+        in_buffer = any(e.data == "你好，海豚".encode("utf-8") for e in d.buffer.items)
+        check("stdin-chat 用户输入已进入 buffer", in_buffer,
+              f"buffer 条目数={len(d.buffer.items)}")
+        target = [e for e in d.buffer.items if e.id == eid]
+        reward_ok = bool(target) and target[0].reward == 1.0
+        check("stdin-chat 打分 +1 写入经验 reward",
+              reward_ok, f"reward={target[0].reward if target else None}")
+
+        # 异常路径 1：serve 抛异常 → chat_once 返回 None（部署不停机）
+        orig_serve = d.serve
+        try:
+            d.serve = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("模拟 serve 故障"))
+            r_none = chat_once(d, "这条会触发 serve 异常")
+        finally:
+            d.serve = orig_serve
+        check("stdin-chat serve 异常返回 None（部署不停机）", r_none is None,
+              f"result={r_none!r}")
+
+        # 异常路径 2：空输入不应崩溃（serve 对空串正常处理或返回 None）
+        orig_stdin2 = sys.stdin
+        try:
+            sys.stdin = io.StringIO("\n")  # 空打分=跳过
+            r_empty = chat_once(d, "")
+        finally:
+            sys.stdin = orig_stdin2
+        check("stdin-chat 空输入不崩溃", r_empty is None or (
+            isinstance(r_empty, tuple) and len(r_empty) == 2),
+              f"result={r_empty!r}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t_stdin_chat_loop():
+    """stdin 对话通道线程循环（2026-10-07）：有输入调用 chat_once、EOF 继续等待、
+    stop_flag 置位后退出。
+
+    用 os.pipe 模拟 stdin（写入后关闭写端 → 读端 EOF），monkeypatch chat_once
+    记录调用次数；线程 join 超时防卡死测试。全部落在隔离沙箱，不碰生产资产。
+    """
+    import threading
+    import time
+
+    import feed as feed_mod
+
+    tmp = tempfile.mkdtemp(prefix="dolphin_stdinloop_")
+    try:
+        probe = os.path.join(tmp, "probe.txt")
+        _write_synthetic_probe(probe, 12)
+        cfg = Config(d_model=64, n_layers=2, n_heads=2, block_size=256)
+        d = make_dolphin(cfg=cfg, probe_path=probe, device="cpu")
+
+        calls = []
+        orig_chat_once = feed_mod.chat_once
+        orig_stdin = sys.stdin
+        t = None
+        stop = threading.Event()
+        try:
+            # a) 有输入时调用 chat_once（monkeypatch 记录调用次数）
+            feed_mod.chat_once = lambda d_, text: calls.append(text) or None
+            r, w = os.pipe()
+            os.write(w, "你好，海豚\n".encode("utf-8"))
+            os.close(w)  # 关闭写端 → 读端最终 EOF
+            sys.stdin = os.fdopen(r, "r", encoding="utf-8")
+            t = threading.Thread(target=feed_mod.stdin_chat_loop, args=(d, stop),
+                                 daemon=True, name="stdin-chat-loop-test")
+            t.start()
+            deadline = time.time() + 3.0
+            while time.time() < deadline and not calls:
+                time.sleep(0.02)
+            check("stdin-chat-loop 有输入时调用 chat_once",
+                  len(calls) == 1 and calls[0] == "你好，海豚", f"calls={calls}")
+
+            # b) EOF（读端 line==""）且 stop_flag 未置位 → 继续等待（不退出）
+            time.sleep(0.5)
+            check("stdin-chat-loop EOF 且 stop 未置位时线程仍存活",
+                  t.is_alive(), f"alive={t.is_alive()}")
+
+            # c) stop_flag 置位后线程退出
+            stop.set()
+            t.join(timeout=3.0)
+            check("stdin-chat-loop stop_flag 置位后线程退出",
+                  not t.is_alive(), f"alive={t.is_alive()}")
+        finally:
+            stop.set()  # 确保即使中间断言失败，线程也会退出（daemon + join 防泄漏）
+            if t is not None:
+                t.join(timeout=3.0)
+            sys.stdin = orig_stdin
+            feed_mod.chat_once = orig_chat_once
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t_amygdala():
+    """杏仁核（Amygdala，2026-10-08）：威胁等级计算、慢环调整、钳位、持久化。
+
+    直接构造 Amygdala 验证：冷启动 threat≈0.4；高威胁多次 adjust 后温度下降并
+    自动启用 top_k/top_p 收紧；低威胁温度上升且不意外启用采样钳制；反复调整
+    温度不越 [0.4, 1.4]；慢环首次/间隔不足返回 None、达到 AMYGDALA_EVERY 才调整；
+    top_k/top_p 初值 0/1.0，手动设置后高威胁会继续收紧；to_state/from_state 往返一致。
+    """
+    from dolphin.amygdala import AMYGDALA_EVERY, Amygdala
+
+    # a) 冷启动 threat_level 合理（margin_ema=0 → margin_threat=1，rollback=0，
+    #    kd_ratio=0.5 → kd_threat=0 → threat=0.4）
+    a0 = Amygdala()
+    tl0 = a0.threat_level()
+    check("amygdala 冷启动 threat_level 合理（≈0.4）",
+          abs(tl0 - 0.4) < 1e-6, f"threat={tl0:.4f}")
+
+    # b) 高威胁 report → 多次 adjust 后温度下降（direction=down）
+    hi_report = {"gate_margin": 0.001, "passed": False, "ce_last": 1, "kd_last": 1}
+    a_hi = Amygdala()
+    r0 = a_hi.adjust(hi_report, cycle=0)
+    check("amygdala 首次 adjust 返回 None（只记录基准）", r0 is None, f"r0={r0!r}")
+    r1 = a_hi.adjust(hi_report, cycle=5)
+    check("amygdala 间隔不足返回 None", r1 is None, f"r1={r1!r}")
+    r2 = a_hi.adjust(hi_report, cycle=AMYGDALA_EVERY)
+    check("amygdala 高威胁达到间隔后调整（温度下降）",
+          r2 is not None and r2["direction"] == "down"
+          and r2["temperature"] < 0.8,
+          f"r2={r2}")
+    check("amygdala 高威胁自动启用 top_k/top_p 收紧",
+          r2 is not None and r2["top_k"] == 50 and abs(r2["top_p"] - 0.95) < 1e-6,
+          f"top_k={r2 and r2['top_k']} top_p={r2 and r2['top_p']}")
+
+    # c) 低威胁 report → 温度上升（direction=up），且不意外启用采样钳制
+    lo_report = {"gate_margin": 0.5, "passed": True, "ce_last": 1, "kd_last": 0}
+    a_lo = Amygdala()
+    a_lo.adjust(lo_report, cycle=0)  # 基准
+    r_lo = a_lo.adjust(lo_report, cycle=AMYGDALA_EVERY)
+    check("amygdala 低威胁达到间隔后调整（温度上升）",
+          r_lo is not None and r_lo["direction"] == "up"
+          and r_lo["temperature"] > 0.8,
+          f"r_lo={r_lo}")
+    check("amygdala 低威胁不意外启用 top_k/top_p",
+          r_lo is not None and r_lo["top_k"] == 0 and abs(r_lo["top_p"] - 1.0) < 1e-6,
+          f"top_k={r_lo and r_lo['top_k']} top_p={r_lo and r_lo['top_p']}")
+
+    # d) 钳位：反复 adjust 温度不越 [0.4, 1.4]
+    a_clamp = Amygdala()
+    a_clamp.adjust(hi_report, cycle=0)
+    for c in range(AMYGDALA_EVERY, AMYGDALA_EVERY * 30, AMYGDALA_EVERY):
+        a_clamp.adjust(hi_report, cycle=c)
+    check("amygdala 高威胁反复收紧温度钳位 ≥0.4",
+          a_clamp.temperature >= 0.4 - 1e-9, f"temp={a_clamp.temperature:.4f}")
+    a_clamp2 = Amygdala()
+    a_clamp2.adjust(lo_report, cycle=0)
+    for c in range(AMYGDALA_EVERY, AMYGDALA_EVERY * 30, AMYGDALA_EVERY):
+        a_clamp2.adjust(lo_report, cycle=c)
+    check("amygdala 低威胁反复放松温度钳位 ≤1.4",
+          a_clamp2.temperature <= 1.4 + 1e-9, f"temp={a_clamp2.temperature:.4f}")
+
+    # e) 慢环：首次返回 None（只记录基准），间隔 <20 返回 None，达到 20 才调整
+    a_slow = Amygdala()
+    check("amygdala 慢环 首次返回 None",
+          a_slow.adjust(hi_report, cycle=0) is None)
+    check("amygdala 慢环 间隔<20 返回 None",
+          a_slow.adjust(hi_report, cycle=19) is None)
+    r_slow = a_slow.adjust(hi_report, cycle=20)
+    check("amygdala 慢环 达到 20 才调整", r_slow is not None, f"r_slow={r_slow!r}")
+
+    # f) top_k/top_p 初值 0/1.0，威胁高不意外启用；手动设置后高威胁会收紧
+    a_f = Amygdala()
+    check("amygdala top_k 初值 0（不启用）", a_f.top_k == 0)
+    check("amygdala top_p 初值 1.0（不启用）", abs(a_f.top_p - 1.0) < 1e-9)
+    a_f.adjust(hi_report, cycle=0)
+    a_f.adjust(hi_report, cycle=5)  # 间隔不足，不应意外启用
+    check("amygdala 间隔不足时 top_k 仍 0", a_f.top_k == 0)
+    check("amygdala 间隔不足时 top_p 仍 1.0", abs(a_f.top_p - 1.0) < 1e-9)
+    a_f.top_k = 50
+    a_f.top_p = 0.9
+    r_f = a_f.adjust(hi_report, cycle=AMYGDALA_EVERY)
+    check("amygdala 手动设置 top_k=50 后高威胁继续收紧",
+          r_f is not None and r_f["top_k"] < 50, f"top_k={r_f and r_f['top_k']}")
+    check("amygdala 手动设置 top_p=0.9 后高威胁继续收紧",
+          r_f is not None and r_f["top_p"] < 0.9,
+          f"top_p={r_f and r_f['top_p']}")
+
+    # g) save/load：to_state/from_state 往返一致
+    a_save = Amygdala()
+    a_save.adjust(hi_report, cycle=0)
+    a_save.adjust(hi_report, cycle=AMYGDALA_EVERY)
+    st = a_save.to_state()
+    a_load = Amygdala()
+    a_load.from_state(st)
+    check("amygdala to_state/from_state 往返一致",
+          a_load.temperature == a_save.temperature
+          and a_load.top_k == a_save.top_k
+          and a_load.top_p == a_save.top_p
+          and a_load.signals == a_save.signals
+          and a_load.last_adjust_cycle == a_save.last_adjust_cycle
+          and a_load.last_adjust == a_save.last_adjust,
+          f"orig={a_save.to_state()} load={a_load.to_state()}")
 
 
 if __name__ == "__main__":
@@ -2449,6 +2945,7 @@ if __name__ == "__main__":
     t_g2_probe_rotation()
     t_g3_guard_ruminate()
     t_g3_feed_cursor()
+    t_loop_feed()         # 无限循环喂食（--loop-feed，2026-10-07）
     t_g3_structural_reward()
     t_g7_atomic_save()
     t_g7_rolling_backup()
@@ -2459,6 +2956,7 @@ if __name__ == "__main__":
     t_g10_resurrect_all()
     t_g10_resurrect_cold_load()
     t_m4_vitals()
+    t_m4_dev_birth()
     t_m4_widen_exact()
     t_m4_ghost_probe()
     t_m4_shrink_born_again()
@@ -2467,6 +2965,9 @@ if __name__ == "__main__":
     t_m4_anchor_persistence()
     t_m4_state_machine()
     t_m4_thermostat()
+    t_stdin_chat()        # 无模式 stdin 对话通道（2026-10-07）
+    t_stdin_chat_loop()   # stdin 对话通道线程循环（EOF/stop_flag 退出）
+    t_amygdala()          # 杏仁核自动温度调节（2026-10-08）
     t_cold_quarantine()   # 隔离机制自检（先跑：此时污染若已发生，下面那条会一并变红）
     t_cold_untouched()    # 收尾红线：必须最后跑
     n_ok = sum(PASS)

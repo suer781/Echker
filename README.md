@@ -4,6 +4,8 @@
 
 一个基于 PyTorch 与 Python 标准库自研实现的自学习 AI 系统，无第三方 LLM 框架依赖（无 nanoGPT / minGPT / HuggingFace / 现成 tokenizer）。模型直接学习原始字节流（律 L1），通过"无模式统一自循环"持续从输入中学习。
 
+本项目为实验性研究系统，主要用于自学习机制的原理验证与长期行为观测，不构成对生产环境可用性的承诺。
+
 完整设计与生物学依据见 [架构设计.md](架构设计.md)。
 
 ## 核心机制
@@ -57,12 +59,25 @@ pytest tests/ -q
 | `dolphin/life.py` | 睡眠周期全流程与结构恒温器（律 L5–L11） |
 | `dolphin/dolphin.py` | 双半球管理、服务接口、持久化 |
 | `dolphin/amygdala.py` | 杏仁核：生成参数自动托管 |
+| `dolphin/autotune.py` | 值自成自动调参控制器 |
+| `dolphin/param_adaptive.py` | 参数自适应控制律 |
 | `feed.py` | 部署期喂食驱动器（守护模式、无限循环） |
 | `chat.py` | 聊天入口 |
 | `probes/` | 固定探测集与体检门控 |
 | `tests/` | 一致性、成长支持、均值 NLL 批次测试 |
 | `corpus/` | 胎教语料（只放干净来源） |
 | `实验记录/` | 实验报告与归档 |
+
+## 贡献指南
+
+欢迎通过 GitHub Issue 提交 bug 报告或改进建议，通过 Pull Request 提交代码。提交前请确认：
+
+- 新增或修改逻辑需附带相应测试，并保证 `python tests/test_conformance.py`、`python tests/test_growth_support.py`、`python tests/test_mean_nll_batch.py` 全部通过。
+- 不引入第三方 LLM 框架依赖；核心机制改动请在 PR 描述中说明设计依据。
+
+## 许可证
+
+本项目以 [MIT License](LICENSE) 发布（详见仓库根目录 LICENSE 文件）。
 
 ## 律与值
 

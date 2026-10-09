@@ -1,6 +1,6 @@
 """双半球管理与对外接口（律 L2 / L3）。
 
-两个 hemisphere 出生时同源（同卵双生）；一次只有一个在训练（睡脑），
+两个 hemisphere 初始化时权重同源；一次只有一个在训练（睡脑），
 另一个权重冻结负责服务（醒脑）。交换只发生在体检通过后的换班瞬间。
 """
 import glob
@@ -17,9 +17,12 @@ from datetime import datetime
 import torch
 
 from .adapt import Plasticity
+from .amygdala import Amygdala
+from .autotune import Autotune
 from .experience import Experience, ExperienceBuffer
 from .life import LifeController
 from .memory import MemoryEntry, MemoryStore
+from .param_adaptive import ParamAdaptive
 from .model import ByteTransformer, Config
 from .probe import evaluate as probe_eval
 from .probe import gate_decision, load_chunks
@@ -43,8 +46,8 @@ class GateDisabled(RuntimeError):
 
     旧版静默失效链：probe 缺失 → dolphin 容忍空集 → probe.evaluate 空集返回 inf
     → passed = (inf < inf) = False 恒假 → 每个周期正常训练后被无条件作废回滚，
-    无任何报警的静默永久回滚。新行为：开睡前检查，缺失即抛——宁可不睡，不可白睡。
-    probe 文件恢复后由 ensure_gate_ready 自动重新加载并解禁（自愈）。"""
+    无任何报警的静默永久回滚。新行为：开睡前检查，缺失即抛——拒绝无效睡眠周期。
+    probe 文件恢复后由 ensure_gate_ready 自动重新加载并解禁（自动恢复）。"""
 
 
 class Hemisphere:
@@ -56,13 +59,13 @@ class Hemisphere:
 
 class Dolphin:
     def __init__(self, cfg=None, device=None, lr=5e-5, probe_path=None):
-        # lr：睡眠学习率。睡眠是温和巩固，不是重训——过猛会把胎教基础扰动坏，
+        # lr：睡眠学习率。睡眠是温和巩固，不是重训——过猛会扰动基础权重，
         # 体检门控会连续否决（已在实验中证实）。此值自成，体检失败时自动退火。
         self.cfg = cfg or Config()
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         m1 = ByteTransformer(self.cfg).to(self.device)
         m2 = ByteTransformer(self.cfg).to(self.device)
-        m2.load_state_dict(m1.state_dict())  # 出生同源
+        m2.load_state_dict(m1.state_dict())  # 初始化同源
         self.h = [Hemisphere("A", m1, lr), Hemisphere("B", m2, lr)]
         self.awake_idx = 0
         self.buffer = ExperienceBuffer()
@@ -85,14 +88,40 @@ class Dolphin:
         self.note_k = 5
         self.dream_k = 5          # 值：律定（暂）——每周期做梦注入上限，防旧知识挤占新经验选拔预算（审计 G11）；M4 接入反馈回路
         self.target_interval = 15  # 值：自成（期望睡眠间隔，交互数）
+        # M2 修复（2026-10-06）：kd_alpha/kd_T/sleep_steps 三个量此前只写进
+        # autotune.tunables、训练路径从不读取（死控制）。现初始化为与
+        # Autotune.tunables 一致的初值，并在 Autotune.adjust() 同步回这些属性，
+        # 训练路径（life.run_cycle 值自成覆盖）从此读取 autotune 调好的值。
+        self.kd_alpha = 0.5
+        self.kd_T = 2.0
+        self.sleep_steps = 120
+        # 值自成自动调参（2026-10-05）：note_k/dream_k/promote_hits/kd_alpha/kd_T/
+        # target_interval/sleep_steps 的世界信号反馈控制器——这些量不再写死，
+        # 由 Autotune 慢速积分自调（律固定，值自成）。随档持久化。
+        self.autotune = Autotune()
+        # 杏仁核温度自动托管（2026-10-08）：用系统自身的世界信号（体检 margin/
+        # 回滚率/KD 蒸馏比/记忆命中率）自动调节 serve 的生成温度。威胁高→低温
+        # （保守稳定），威胁低→高温（创造丰富）。慢环（AMYGDALA_EVERY=20 周期
+        # 一次）确保短测试永不触发。随档持久化。
+        self.amygdala = Amygdala()
+        # 参数自适应控制器（2026-10-06 用户定案）：独立于恒温器判决主路径的
+        # 排计划控制器。默认开启（param_adaptive_enabled=True，生产默认启用"完全
+        # 自学习"）；测试用 make_dolphin 工厂显式设 False 做隔离。
+        self.param_adaptive = ParamAdaptive()   # 参数自适应控制器
+        self.param_adaptive_enabled = True       # 默认开启（生产默认启用）
         # 非加密用途（重放变异抽样），仍统一使用密码学安全随机源
         self.rng = secrets.SystemRandom()
         self.plasticity = Plasticity()  # 成年灵敏度：睡眠学习率的唯一控制器
         self.cycle = 0
         self._since_sleep = 0
+        # 2026-10-06 修复：上次睡眠的墙钟时间戳（None=冷启动/测试）。
+        # 用于 sleep_debt 的真实时间债务度量——批量喂食下睡眠周期频繁触发，
+        # 时间债务低，不阻塞恒温器手术窗口（修复结构性封锁）。
+        self._last_sleep_wall = None
         # 部署期双线程（feed.py）：锁只护共享状态交换，不护计算。
         self.feed_lock = threading.Lock()  # learn 的缓冲交换 与 训练线程快照/换班 互斥
-        self.learn_busy = 0                # 在途读取（learn/serve）计数：训练线程动睡脑前等清零，保证读到的永远是静态权重（L3）
+        self._busy_lock = threading.Lock()  # learn_busy 的专用锁（审计②-3：原子计数）
+        self.learn_busy = 0                # 在途读取（learn/serve）计数：训练线程动睡脑前等待清零，保证读到的永远是静态权重（L3）
         # G3 自续骨：部署侧经验流入总量（learn/serve 都计）。feed.py 守护模式
         # 用它判断"是否有新经验流入"以自动恢复正式喂食；喂食游标的语义与推进
         # 由 feed.py 全权维护，本类只做透传存取（职责分离）。
@@ -112,6 +141,23 @@ class Dolphin:
 
     def swap(self):
         self.awake_idx = 1 - self.awake_idx
+
+    def _busy_inc(self):
+        """learn_busy 原子自增（审计②-3）：serve 与 learn 并发时防止丢失更新。
+
+        专用 _busy_lock 只护计数器本身，不包裹部署计算——部署侧读权重
+        依旧永不排队等锁（与 feed_lock 的并发语义完全无关）。
+        """
+        with self._busy_lock:
+            self.learn_busy += 1
+
+    def _busy_dec(self):
+        """learn_busy 原子自减（审计②-3）：serve 与 learn 并发时防止丢失更新。
+
+        与 _busy_inc 对称，用同一把专用锁保证计数严格配对。
+        """
+        with self._busy_lock:
+            self.learn_busy -= 1
 
     def probe_loss(self, hem):
         return probe_eval(hem.model, self.probe_chunks, self.device)[0]
@@ -134,8 +180,8 @@ class Dolphin:
         """G8 fail-fast：开睡前必须通过的门控就绪检查（life.run_cycle 的唯一
         共用入口，无从漂移）。
 
-        - 探测集就绪 → 放行（若此前曾缺失则自动重新加载并解除警报，自愈）；
-        - 缺失/为空 → 醒目报警（stderr）、gate_disabled=True、抛 GateDisabled。
+        - 探测集就绪 → 放行（若此前曾缺失则自动重新加载并解除警报，自恢复）；
+        - 缺失/为空 → 显式告警（stderr）、gate_disabled=True、抛 GateDisabled。
           门控语义完整性优先于可用性（设计决定）：体检无法判决的周期宁可不开跑，
           也不许"训练完 → inf<inf 恒假 → 无条件作废回滚"地静默空转。
         """
@@ -147,7 +193,7 @@ class Dolphin:
         if self.probe_chunks:
             if self.gate_disabled:
                 self.gate_disabled = False
-                print("[Dolphin] 体检探测集已恢复，门控重新启用（G8 自愈）。",
+                print("[Dolphin] 体检探测集已恢复，门控重新启用（G8 自动恢复）。",
                       file=sys.stderr)
             return
         self.gate_disabled = True
@@ -168,16 +214,30 @@ class Dolphin:
     # ---------- 服务（律 L3：醒脑权重冻结） ----------
 
     @torch.no_grad()
-    def serve(self, user_text: str, max_new=48, temperature=0.8):
-        """部署服务。与 feed 并发时纳入读屏障（审计②-5：serve 原先不在保护体系内）。"""
-        self.learn_busy += 1  # 读屏障：换班栅栏把 serve 与 learn 同等对待（律 L3）
+    def serve(self, user_text: str, max_new=48, temperature=None, top_k=None, top_p=None):
+        """部署服务。与 feed 并发时纳入读屏障（审计②-5：serve 原先不在保护体系内）。
+
+        temperature=None（默认）：由杏仁核（Amygdala）自动托管——用系统自身的
+        世界信号（威胁等级）决定生成温度，无需人工设温度。
+        top_k=None / top_p=None（默认）：同样由杏仁核自动托管（威胁高收紧、
+        威胁低放松）。显式传入 temperature/top_k/top_p 会覆盖杏仁核
+        （ward/演示等固定参数场景不变）。
+        """
+        self._busy_inc()  # 读屏障：换班栅栏把 serve 与 learn 同等对待（律 L3）
         try:
+            if temperature is None:
+                temperature = self.amygdala.temperature  # 杏仁核自动托管
+            if top_k is None:
+                top_k = self.amygdala.top_k
+            if top_p is None:
+                top_p = self.amygdala.top_p
             ub = user_text.encode("utf-8")
             notes = self.memory.retrieve(ub, k=1)  # 律 L10 预支快通道：引用记忆，不碰权重
             prefix = ("【记忆】" + notes[0].text[-120:] + "\n") if notes else ""
             prompt = (prefix + user_text).encode("utf-8")[-self.cfg.block_size:]
             idx = torch.tensor(list(prompt), dtype=torch.long, device=self.device).unsqueeze(0)
-            out = self.awake().model.generate(idx, max_new, temperature)
+            out = self.awake().model.generate(
+                idx, max_new, temperature, top_k=top_k, top_p=top_p)
             resp = bytes(out[0, idx.shape[1]:].tolist()).decode("utf-8", errors="replace")
             surprise = self.awake().model.mean_nll(ub, self.device)  # 对用户输入的困惑度
             with self.feed_lock:
@@ -186,7 +246,7 @@ class Dolphin:
                 self.learn_total += 1  # G3：部署侧经验流入总量（守护模式的恢复信号）
             return resp, eid
         finally:
-            self.learn_busy -= 1
+            self._busy_dec()
 
     def feedback(self, eid, reward):
         return self.buffer.feedback(eid, reward)
@@ -197,14 +257,14 @@ class Dolphin:
         双线程约束：mean_nll 是部署计算，锁外做（部署永不排队等锁）；
         只有缓冲交换持 feed_lock，与训练线程的快照/换班互斥。
         learn_busy 供训练线程在动睡脑前等待在途读取清零——
-        刚退休的醒脑可能还有 learn 在读，梯度训练前必须等它读完。
+        刚换下的醒脑可能还有 learn 在读，梯度训练前必须等它读完。
         """
         data = text.encode("utf-8")
-        self.learn_busy += 1
+        self._busy_inc()
         try:
             surprise = self.awake().model.mean_nll(data, self.device)
         finally:
-            self.learn_busy -= 1
+            self._busy_dec()
         with self.feed_lock:
             eid = self.buffer.add(data, surprise)
             self._since_sleep += 1
@@ -215,7 +275,7 @@ class Dolphin:
 
     def maybe_sleep(self, force=False, **kw):
         """单线程睡眠路径（M0 兼容）。M4 起派发到 life.run_cycle（唯一睡眠周期
-        实现；sleep.py 冻结为历史件，M0 等价性由 tests 钉死）。
+        实现；sleep.py 冻结为历史件，M0 等价性由 tests 固定）。
 
         注意：与其他线程的 learn/serve 并发使用不安全（本方法不走 feed_lock
         快照流程）——双线程部署请走 feed.py 的 SleepTrainer。
@@ -294,6 +354,11 @@ class Dolphin:
                 "dream_k": self.dream_k,
                 "target_interval": self.target_interval,
                 "promote_hits": self.memory.promote_hits,
+                # M2 修复（2026-10-06）：kd_alpha/kd_T/sleep_steps 随档透传，
+                # 与 autotune.tunables 一致（load 后属性与 tunables 同步恢复）。
+                "kd_alpha": self.kd_alpha,
+                "kd_T": self.kd_T,
+                "sleep_steps": self.sleep_steps,
                 # G7：created 入档——记忆逐出优先级 (score, created) 跨重启不漂移
                 "memory": [(e.text, e.score, e.hits, e.cycle, e.kind, e.created)
                            for e in self.memory.entries],
@@ -304,6 +369,13 @@ class Dolphin:
                 # 状态机、双半球形态（手术后模型可跨重启复原）、营养因子账本。
                 # 战役进行中时 campaign 里含权重快照（体积翻倍仅限战役期）。
                 "life": self.life_ctl.to_state(),
+                # 值自成自动调参（2026-10-05）：律定量反馈控制器状态随档。
+                "autotune": self.autotune.to_state(),
+                # 杏仁核温度自动托管（2026-10-08）：温度/信号/调整周期随档，
+                # 重启后恢复上次的自动托管状态。
+                "amygdala": self.amygdala.to_state(),
+                # 参数自适应控制律（2026-10-06）：三段式下跌状态机随档。
+                "param_adaptive": self.param_adaptive.to_state(),
             }
         # G7 原子写：先写同目录临时文件再 os.replace——任何瞬间断电，目标文件
         # 要么是旧版要么是新版，绝不出现写了一半的存档。
@@ -337,6 +409,12 @@ class Dolphin:
         # 结构与 base cfg 不同，须按形态重放移植体/平铺，再装入权重）。
         if ck.get("life"):
             self.life_ctl.from_state(ck["life"])
+        if ck.get("autotune"):
+            self.autotune.from_state(ck["autotune"])
+        if ck.get("amygdala"):  # 2026-10-08：杏仁核状态随档恢复（旧档无此字段则保持初值）
+            self.amygdala.from_state(ck["amygdala"])
+        if ck.get("param_adaptive"):
+            self.param_adaptive.from_state(ck["param_adaptive"])
         from .surgery import apply_morphology
         lrs = ck.get("lrs", [h.opt.param_groups[0]["lr"] for h in self.h])
         for i, h in enumerate(self.h):
@@ -368,6 +446,12 @@ class Dolphin:
             self.target_interval = ck["target_interval"]
         if "promote_hits" in ck:
             self.memory.promote_hits = ck["promote_hits"]
+        # M2 修复（2026-10-06）：恢复 kd_alpha/kd_T/sleep_steps 属性（缺省=初值，
+        # 兼容旧档）。load 后这些属性与 autotune.tunables 一起恢复，训练路径
+        # 值自成覆盖会读取它们。
+        self.kd_alpha = float(ck.get("kd_alpha", self.kd_alpha))
+        self.kd_T = float(ck.get("kd_T", self.kd_T))
+        self.sleep_steps = int(ck.get("sleep_steps", self.sleep_steps))
         if "feed_cursor" in ck:  # G3：喂食游标透传恢复（语义归 feed.py 解释）
             self.feed_cursor = ck["feed_cursor"]
         if "buffer" in ck:  # v2 起经验缓冲随档恢复，换班季中断零丢失
@@ -402,7 +486,7 @@ class Dolphin:
 
     @classmethod
     def from_birth(cls, path, **kw):
-        """用胎教产物（birth.pt）出生：两个半球从同一个基座复制。"""
+        """用出生基座权重（birth.pt）初始化：两个半球从同一个基座复制。"""
         ck = torch.load(path, map_location="cpu", weights_only=True)
         cfg = Config(**ck["cfg"])
         d = cls(cfg=cfg, **kw)

@@ -7,7 +7,7 @@
      副本尺度 1/√k，由绑定头约束 k·t_r²=1 唯一确定；LN(平铺)=平铺(LN) 精确成立）
 
 精确性的实现形态（前置浮点实验定标，2026-10-04）：
-  逐位相等的敌人不是数学而是 GEMM 的 K 维变化——CPU/CUDA 内核按形状选择，
+  逐位相等的障碍在于 GEMM 的 K 维变化——CPU/CUDA 内核按形状选择，
   即使追加纯零列也会改变老输出的舍入次序（实测 max|Δ|≈4e-7）。因此轴①②做成
   **移植体**：老 fc/qkv/proj 模块原封不动（GEMM 形状与算子次序逐位不变），
   新单元走独立旁路 GEMM，其输出权重零初始化——y + F.linear(·, 0) = y + 0.0
@@ -21,7 +21,7 @@
 在**训练恢复前**单独施加（那一刻起放弃逐位性——这正是噪声的目的）。
 
 幽灵探测 ghost_probe（规格 B）：只挂 **LN 免疫位**（MLP 隐层单元、attn-v 通道）
-——残差流挂幽灵会被 √(1+Δ/d) 污染测量（对质已证伪），残差流位**拒绝挂载**。
+——残差流挂幽灵会被 √(1+Δ/d) 污染测量（经对照实验证伪），残差流位**拒绝挂载**。
 一阶口径：新单元（方向 u，输出列 w）的损失梯度增益 = ‖Σ_pos g·a_ghost‖₂，
 g = 该位输出侧梯度；等价于"若插入此幽灵，其输出参数将收到的梯度范数"。
 
@@ -31,7 +31,7 @@ born-again 蒸馏（规格 B）：教师=现脑（醒脑，L3 冻结），学生
 重放照 L6 律执行——"真实回放"指数据来源真实，非自生成内容）。
 
 显存预算（规格 B）：变宽前核算新足迹（参数×16B：fp32 权重+梯度+Adam m,v，
-架构设计 §6），超 1.9GB 推迟（WDDM 倒页 6 倍减速的教训）。
+架构设计 §6），超 1.9GB 推迟（WDDM 倒页会带来约 6 倍减速）。
 
 形态持久化：morphology（纯 list/dict）随档保存；load 时 apply_morphology 先
 重建同构模型再 load_state_dict——宽化后的脑可跨重启复原。
@@ -189,11 +189,11 @@ def ghost_probe(model, layer, data, site=None, n_ghosts=8, seed=0, device=None):
     方向取均值（随机方向=对"残差梯度可利用成分"的草图估计）。
 
     site="residual_stream"（或任何残差流位）→ ValueError 拒绝挂载：
-    残差流挂幽灵会被 √(1+Δ/d) 污染测量（对质已证伪，规格 B）。
+    残差流挂幽灵会被 √(1+Δ/d) 污染测量（经对照实验证伪，规格 B）。
     """
     if site in RESIDUAL_SITES:
         raise ValueError(
-            "残差流位拒绝挂幽灵（√(1+Δ/d) 缝隙污染测量，对质已证伪；"
+            "残差流位拒绝挂幽灵（√(1+Δ/d) 缝隙污染测量，经对照实验证伪；"
             f"LN 免疫位仅有 {IMMUNE_SITES}）")
     if site is not None and site not in IMMUNE_SITES:
         raise ValueError(f"未知探测位 {site}（免疫位：{IMMUNE_SITES}）")
@@ -202,10 +202,10 @@ def ghost_probe(model, layer, data, site=None, n_ghosts=8, seed=0, device=None):
     # 2026-10-05 呼吸实验发现并修复：与 life._redo 同款设备 bug——torch.Generator()
     # 默认 CPU，而 CUDA 上 randn(device=cuda, generator=cpu_gen) 抛 RuntimeError。
     # 幽灵探测此前从未在 CUDA 真实运行过（只在平台期第三阶梯排程时执行），
-    # 且 life._schedule 的 except (ValueError, RuntimeError) 会把该异常静默吞成
-    # "无增益"——即阶梯哪天打开，生长判决也会在 GPU 上静默失效。本修复只动
+    # 且 life._schedule 的 except (ValueError, RuntimeError) 会把该异常静默转为
+    # "无增益"——即阶梯一旦打开，生长判决也会在 GPU 上静默失效。本修复只动
     # generator 设备侧，CPU 路径语义不变（种子口径原样保留）。
-    gen = torch.Generator(device=device).manual_seed(int(seed))  # 探测不碰全局随机源（M0 等价性）
+    gen = torch.Generator(device=device).manual_seed(int(seed))  # 探测不使用全局随机源（M0 等价性）
     out = {"mlp_hidden": None, "attn_v": None, "attn_v_per_head": [], "loss": None}
     T = min(model.cfg.block_size, len(data) - 1)
 
@@ -248,7 +248,7 @@ def ghost_probe(model, layer, data, site=None, n_ghosts=8, seed=0, device=None):
         att = (q @ k.transpose(-2, -1)) / math.sqrt(hd)
         mask = blk.attn.mask[0, 0, :T, :T]   # (T,T)：探测路径无 batch 维，att 是
         att = att.masked_fill(mask == 0, float("-inf"))   # (H,T,T)——带 (1,1,T,T)
-        att = F.softmax(att, dim=-1)                      # 的原 mask 广播会撑出 4 维
+        att = F.softmax(att, dim=-1)                      # 的原 mask 广播会扩展出 4 维
         per_head = []
         for h in range(H):
             gh = []
@@ -285,8 +285,8 @@ def widen_mlp(model, layer, delta, seed=0, noise_std=INIT_STD):
     """轴①：MLP 隐层 +delta 单元（精确函数保持，逐位）。"""
     gen = torch.Generator().manual_seed(int(seed))
     blk = model.blocks[layer]
-    dev = blk.mlp.fc.weight.device  # 新模块必须跟上脑所在设备（CUDA 脑上新建
-    before = blk.mlp.fc.out_features  # 的 nn.Linear 默认 CPU——不同步就是部署炸弹）
+    dev = blk.mlp.fc.weight.device  # 新模块必须跟上模型所在设备（CUDA 上新建
+    before = blk.mlp.fc.out_features  # 的 nn.Linear 默认 CPU——不同步会导致设备不一致）
     blk.mlp = WidenedMLP(blk.mlp, int(delta), gen, noise_std).to(dev)
     return {"axis": "mlp", "layer": layer, "delta": int(delta),
             "hidden": f"{before} -> {before + int(delta)}"}
@@ -359,13 +359,13 @@ def widen_d_model(model, k, device=None, verify=True):
     1/√k 精确补偿）。浮点上 K 维随副本增长且各项非零，逐位不可达（前置实验
     实测相对误差 ~3e-6），用 allclose(1e-4,1e-4) 验收，并在 widen_d_model 内
     置自检。**拒绝叠加**：模型带轴①②移植体时抛错——移植体参数的平铺折叠
-    留待下一棒。（措辞修正，监督审计 P1-2：控制器的手术排程从不停靠轴③
+    留待后续处理。（措辞修正，监督审计 P1-2：控制器的手术排程不使用轴③
     ——life._schedule 的轴映射只有 ①/②，并无"自动改轴"动作；需轴③时由
     调用方自行改轴。）
     """
     if has_transplants(model):
-        raise ValueError("轴③拒绝叠加：模型带轴①②移植体（折叠平铺留待下一棒）；"
-                         "需变宽请改用 mlp/attn_v 轴（控制器排程本就只用这两轴）")
+        raise ValueError("轴③拒绝叠加：模型带轴①②移植体（折叠平铺留待后续处理）；"
+                         "需变宽请改用 mlp/attn_v 轴（控制器排程仅使用这两轴）")
     if k < 2:
         raise ValueError("轴③倍数 k 必须 ≥2")
     device = device or next(model.parameters()).device
@@ -379,7 +379,7 @@ def widen_d_model(model, k, device=None, verify=True):
     # eps_old/k 后，sqrt(t_r²σ²+eps')=t_r·sqrt(σ²+eps_old) 对任意 σ² 逐字成立，
     # LN(平铺)=平铺(LN) 才在含 eps 的定义下严格精确。不修此项：随机初始化权重
     # 的残差方差 (~4e-4) 与 eps(1e-5) 同量级，实测 |Δlogit|~4e-3；训练后期
-    # σ²≫eps 时误差隐没——恰好骗过"只在训练后的脑上验"的侥幸。
+    # σ²≫eps 时误差隐没——恰好掩盖"只在训练后的脑上验"的遗漏。
     eps_old = model.blocks[0].ln1.eps
     for mod in new_model.modules():
         if isinstance(mod, nn.LayerNorm):
@@ -388,7 +388,7 @@ def widen_d_model(model, k, device=None, verify=True):
     if verify:
         g = torch.Generator().manual_seed(1234)
         # 探测输入先用 CPU generator 生成再上目标设备（randint 的 generator 必须与
-        # device 同侧，CUDA 直造会抛错——内置自检此前只在 CPU 上跑过）
+        # device 同侧，CUDA 直造会抛错——内置自检此前仅在 CPU 上执行过）
         x = torch.randint(0, 256, (1, min(64, old_cfg.block_size)),
                           generator=g).to(device)
         model.eval(); new_model.eval()
@@ -454,12 +454,12 @@ def widen(model, layer, delta, axis="auto", vitals_snap=None, seed=0, device=Non
 # ============================================================================
 
 def shrink_config(cfg, vitals=None, target=0.7):
-    """born-again 学生的小身体（规格 B）。
+    """born-again 学生的缩小配置（规格 B）。
 
     - n_heads 整除保持：d_model' = n_heads × max(1, round(head_dim·target))；
     - 深度按账本逐层平均 stable-Taylor 重要性排序，保留最重要的
       round(n_layers·target) 层（学生从头初始化，层数=保留数；重要性排序决定
-      收缩幅度并向记录交代"丢了谁"）；
+      收缩幅度并向记录交代"丢弃了哪些层"）；
     - vitals 缺席时按均匀重要性处理。
     返回 (new_cfg, info)。
     """
@@ -483,8 +483,8 @@ def shrink_config(cfg, vitals=None, target=0.7):
         dropped = sorted(ranked[: cfg.n_layers - n_new])
         kept = [li for li in range(cfg.n_layers) if li not in set(dropped)]
     elif n_new < cfg.n_layers:
-        # 无账本：去尾（确定性），info 如实交代"丢了谁"——否则 kept/dropped 与
-        # 实际 n_layers 自相矛盾（记录谎言比不记录更糟）
+        # 无账本：去尾（确定性），info 如实交代"丢弃了哪些层"——否则 kept/dropped
+        # 与实际 n_layers 自相矛盾（记录不一致比不记录更糟）
         dropped = list(range(cfg.n_layers - n_new, cfg.n_layers))
         kept = list(range(cfg.n_layers - n_new))
     new_cfg = Config(d_model=d_new, n_layers=n_new, n_heads=cfg.n_heads,
@@ -503,7 +503,7 @@ def born_again_student(cfg, vitals, target, device, seed=0):
     缓冲真实回放，L5 锚定）。
     """
     s_cfg, info = shrink_config(cfg, vitals, target)
-    torch.manual_seed(int(seed))  # 学生出生种子（从头初始化，与教师无关）
+    torch.manual_seed(int(seed))  # 学生初始化种子（从头初始化，与教师无关）
     student = ByteTransformer(s_cfg).to(device)
     opt = torch.optim.AdamW(student.parameters(), lr=5e-5, weight_decay=0.01)
     return student, opt, info
@@ -512,7 +512,7 @@ def born_again_student(cfg, vitals, target, device, seed=0):
 def rebuild_optimizer(old_model, old_opt, new_model, lr):
     """手术后优化器重建（规格 B：受影响参数优化器状态重置 + LR 重启）。
 
-    同名同形状的参数**迁移** Adam 动量（未受手术影响的脑区不丢巩固进度）；
+    同名同形状的参数**迁移** Adam 动量（未受手术影响的区域不丢失巩固进度）；
     新生/变形参数状态重置。weight_decay 与 Hemisphere 惯例一致（0.01）。
     """
     new_opt = torch.optim.AdamW(new_model.parameters(), lr=lr, weight_decay=0.01)
@@ -564,7 +564,7 @@ def delta_params_dmodel(cfg, k):
 def mem_budget_ok(device, delta_params, reserved=None):
     """显存预算检查（规格 B）：预计足迹 = 当前预留 + Δ参数×16B + 裕量 ≤ 1.9GB。
 
-    超预算 → 推迟变宽（WDDM 倒页 6 倍减速的教训）。CPU 恒放行（无倒页问题）。
+    超预算 → 推迟变宽（WDDM 倒页会带来约 6 倍减速）。CPU 始终放行（无倒页问题）。
     """
     if device != "cuda":
         return True, "cpu 无显存预算约束"
@@ -596,10 +596,10 @@ def apply_morphology(base_cfg, morph, device):
 
     - d_model_k：轴③平铺倍数（真实 d_model = 学生/基座 d_model × k）；
     - shrink：born-again 学生体型（d_model/n_layers 直接取学生出生值——
-      平铺史已折进该值；无记录则用基座）。没有它，凋零换装后的脑存档
+      平铺史已折算进该值；无记录则用基座）。没有它，收缩重建后的模型存档
       load 时会按基座 cfg 重建 → state_dict 形状不匹配 → 加载崩溃。
     - eps：k>1 时 LayerNorm eps 除以 k（与 widen_d_model 同一精确性约定，
-      state_dict 不含 eps，只能按形态重放——漏掉则平铺脑重启后函数静默漂移）。"""
+      state_dict 不含 eps，只能按形态重放——漏掉则平铺模型重启后函数静默漂移）。"""
     morph = morph or empty_morphology()
     k = int(morph.get("d_model_k", 1) or 1)
     shrink = morph.get("shrink") or {}
@@ -615,7 +615,7 @@ def apply_morphology(base_cfg, morph, device):
                 mod.eps = mod.eps / k
     for li_s, widths in (morph.get("mlp") or {}).items():
         blk = m.blocks[int(li_s)]
-        blk.mlp = WidenedMLP(blk.mlp, 0)  # 空壳；旁路结构由下面的重放补齐
+        blk.mlp = WidenedMLP(blk.mlp, 0)  # 空结构；旁路结构由下面的重放补齐
         lins = [nn.Linear(real_cfg.d_model, int(w)) for w in (widths or [])]
         blk.mlp.bypass_fcs = nn.ModuleList(lins)
         blk.mlp.proj_new_ws = nn.ParameterList(
@@ -628,6 +628,6 @@ def apply_morphology(base_cfg, morph, device):
         blk.attn.proj_new_ws = nn.ParameterList(
             [nn.Parameter(torch.zeros(real_cfg.d_model, int(w))) for w in (widths or [])])
     # 新建的移植体模块默认 CPU——整体跟上目标设备（load_state_dict 的 copy_ 不会
-    # 改变参数自身设备，漏掉这步会造出 CUDA/CPU 混血模型）
+    # 改变参数自身设备，漏掉这步会造出 CUDA/CPU 设备不一致的模型）
     m = m.to(device)
     return m, real_cfg

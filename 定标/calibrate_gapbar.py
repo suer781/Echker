@@ -21,7 +21,7 @@ XI_HI/GAP_BORN 注释与架构设计引用"真实身体稳态 gap̄"，但分布
   gap̄       = 可动刀位（mlp_hidden / attn_out）的均值
 
 复跑：
-  PY="C:/Users/13682/AppData/Local/Programs/Python/Python312/python.exe"
+  PY="python"
   $PY 定标/calibrate_gapbar.py                 # 模式 A（CPU，秒级）
   $PY 定标/calibrate_gapbar.py --live 2        # 模式 A+B（GPU，约 1.5 分钟）
 """
@@ -36,9 +36,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ---- 冷层隔离（防线①，事故后加固）----
-# 首轮现跑实测暴露：live 周期里 memory._demote 对**新文本**是 append-only 直写
-# 生产 memory_cold.jsonl（1206→1208 行），不存档也落盘。本定标的教训与修复
+# ---- 冷层隔离（防线①，问题记录后加固）----
+# 首轮现跑实测发现：live 周期里 memory._demote 对**新文本**是 append-only 直写
+# 生产 memory_cold.jsonl（1206→1208 行），不存档也落盘。本定标的修复
 # 同 smoke_test.py P2-1：MemoryStore 默认解析指向生产冷层时一律改写进沙箱，
 # 现跑的降级/复活全部落在沙箱文件里，生产冷层零触碰（sha256 哨兵仍在收尾兜底）。
 from dolphin.memory import MemoryStore  # noqa: E402
@@ -247,7 +247,7 @@ def main():
                "以同样口径（滚动 p90）持续自校准，不依赖本工件的绝对数。",
                "现跑协议：重复喂同一批真实记录（cmath 呼吸切片，稳态语义——无新"
                "需求），冷层走沙箱（_demote 对新文本 append-only 直写，不隔离则"
-               "碰生产冷层——2026-10-05 首轮现跑实测教训，已恢复并加固）。",
+               "碰生产冷层——2026-10-05 首轮现跑实测发现，已修复并加固）。",
            ]}
     with open(OUT_JSON, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)

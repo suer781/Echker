@@ -1,6 +1,6 @@
 """字节级因果 Transformer——全自研实现。
 
-律 L1（架构设计.md）：模型直接吃原始字节（0-255），无固定 tokenizer，
+律 L1（架构设计.md）：模型直接处理原始字节（0-255），无固定 tokenizer，
 无任何现成 GPT 工程代码。唯一依赖 PyTorch 张量运算。
 """
 import math
@@ -112,7 +112,7 @@ class ByteTransformer(nn.Module):
             logits, _ = self(ctx)
             logits = logits[:, -1, :] / max(temperature, 1e-6)
             probs = F.softmax(logits, dim=-1)
-            # top_k / top_p 过滤（默认 None=不启用，保持旧行为——直接走 softmax+
+            # top_k / top_p 过滤（默认 None=不启用，保持既有行为——直接走 softmax+
             # multinomial，不引入重新归一化的数值差异）。top_k=0 或 top_p=1.0
             # （杏仁核托管初值=不启用）同样视为未启用，原路径严格不变。
             # 两个参数都启用时按 top_k 先行过滤、top_p 再核采样，最后统一重新
@@ -144,7 +144,7 @@ class ByteTransformer(nn.Module):
 
     @torch.no_grad()
     def mean_nll(self, data: bytes, device, max_chunks=8) -> float:
-        """对一段原始字节流的平均负对数似然 = 系统对它的“惊讶度”。"""
+        """对一段原始字节流的平均负对数似然 = 系统对它的惊讶度。"""
         return self.mean_nll_batch([data], device, max_chunks=max_chunks)[0]
 
     @torch.no_grad()

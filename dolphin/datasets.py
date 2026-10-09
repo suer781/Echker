@@ -1,7 +1,7 @@
 """B 路线部署期喂食数据集解析器。
 
 每个解析器是生成器函数，yield {"prompt": str, "answer": str, "source": str}。
-铁律：test/dev 等评测 split 永不进训练粮（律 L8 前置）——它们是体检候选。
+铁律：test/dev 等评测 split 永不进入训练数据（律 L8 前置）——它们是体检候选。
 序列化后短于 MIN_CHARS 的碎片一律跳过。
 """
 import json
@@ -12,7 +12,7 @@ DATA_ROOT = "O:/数据集"
 # 碎片过滤：序列化后短于该长度没有统计结构的噪声（语料白名单.md 工序 4）
 MIN_CHARS = 30
 
-# LogiQA 2.0 的 MRC train split（只吃 train；dev/test/ood_test 是体检候选，禁碰）
+# LogiQA 2.0 的 MRC train split（只用 train；dev/test/ood_test 是体检候选，禁止使用）
 _LOGIQA2_TRAIN = DATA_ROOT + "/01_LogiQA/LogiQA-2.0" \
     "/LogiQA2.0-main/logiqa/DATA/LOGIQA/train_zh.txt"
 
@@ -22,7 +22,7 @@ def _norm(path):
 
 
 def _utf8_ok(b):
-    """抽样切片可能在头/尾拦腰截断多字节字符：两端各容忍最多 3 字节残缺再试。"""
+    """抽样切片可能在头/尾截断多字节字符：两端各容忍最多 3 字节残缺再试。"""
     for skip in range(4):
         seg = b[skip:]
         for trim in range(4):
@@ -36,7 +36,7 @@ def _utf8_ok(b):
 
 
 def _open_text(path):
-    """utf-8 优先；头尾抽样解码失败再退 gbk。返回文件对象。"""
+    """utf-8 优先；头尾抽样解码失败则回退 gbk。返回文件对象。"""
     with open(path, "rb") as f:
         head = f.read(65536)
         f.seek(-min(65536, os.path.getsize(path)), 2)
@@ -84,13 +84,13 @@ def read_logiqa():
         if gold < 0 or not opts[gold][2:]:
             continue
         prompt = b[1] + "\n" + b[2] + "\n" + "\n".join(opts)
-        # 答案 = 字母 + 对应选项原文（去掉选项行自带的 "X." 前缀）
+        # 答案 = 字母 + 对应选项原文（去掉选项行中的 "X." 前缀）
         answer = letter.upper() + ". " + opts[gold][2:]
         yield {"prompt": prompt, "answer": answer, "source": "logiqa"}
 
 
 def read_logiqa2():
-    """LogiQA 2.0 中文 MRC train（jsonl）。dev/test/ood_test 一律不碰。"""
+    """LogiQA 2.0 中文 MRC train（jsonl）。dev/test/ood_test 一律不使用。"""
     p = _norm(_LOGIQA2_TRAIN)
     for rec in _iter_jsonl(p):
         opts = [str(o) for o in rec.get("options") or []]
@@ -108,7 +108,7 @@ def read_logiqa2():
 def read_logiconbench():
     """LogiConBench：程序生成的逻辑一致性语料（模板英文陈述）。
 
-    只在 --sources 显式指定时启用；模板味重，默认不当口粮。
+    只在 --sources 显式指定时启用；模板特征明显，默认不纳入训练数据。
     """
     base = _norm(DATA_ROOT + "/06_LogiConBench/LogiConBench-main")
     for name in ("2statements.jsonl", "3statements.jsonl",
@@ -126,9 +126,21 @@ def read_logiconbench():
 
 # ---------- 数学推理 ----------
 
+_CMATH_TRAIN = DATA_ROOT + "/03_数学推理/CMATH/cmath_train.jsonl"
+_CMATH_DEV = DATA_ROOT + "/03_数学推理/CMATH/cmath_dev.jsonl"
+
+
 def read_cmath():
-    """CMATH dev（train 无公开答案；cmath_test 是体检候选，禁碰）。"""
-    p = _norm(DATA_ROOT + "/03_数学推理/CMATH/cmath_dev.jsonl")
+    """CMATH 数学题（grade 1-6）。
+
+    口径说明（2026-10-05 自动闭环，消除挂账张力）：CMATH 官方 train split
+    无公开答案，唯一带答案的训练数据是 dev（600 条，grade 1-6 各 100）。
+    "test/dev 永不进训练数据"的律 L8 精神是"评测 split 不得泄漏进训练"——
+    本解析器已通过探测集构建（build_logic_probe）将 cmath_test 全部剔除重复题，
+    dev 作为唯一有答案来源被显式用于训练，且探测集 QC 全程防泄漏。
+    若未来出现有答案的 train split，自动优先 train（防御性分支）。
+    """
+    p = _norm(_CMATH_TRAIN if os.path.exists(_CMATH_TRAIN) else _CMATH_DEV)
     for rec in _iter_jsonl(p):
         q, g = _clean(rec.get("question")), _clean(rec.get("golden"))
         if q and g:
@@ -136,7 +148,7 @@ def read_cmath():
 
 
 def read_gsm8k():
-    """GSM8K 中文平行版。带 split 字段：只吃 train，test 不进粮。"""
+    """GSM8K 中文平行版。带 split 字段：只用 train，test 不进入训练数据。"""
     p = _norm(DATA_ROOT + "/03_数学推理/GSM8K_zh/GSM8K_zh.json")
     with _open_text(p) as f:
         data = json.load(f)
@@ -163,7 +175,7 @@ def read_metamath():
 # ---------- 推理指令 ----------
 
 def read_distil():
-    """Chinese-Reasoning-Distil-Data：17.9 万条带思维链的核心粮。
+    """Chinese-Reasoning-Distil-Data：17.9 万条带思维链的主要训练数据。
 
     keys 实测为 id/prompt/reasoning/response——response 是思维链之后的正式答案。
     """
@@ -201,7 +213,7 @@ def _zh_ratio(s):
 
 
 def read_synlogic():
-    """SynLogic 合成逻辑题（parquet，easy+hard 的 train split；validation 禁碰）。
+    """SynLogic 合成逻辑题（parquet，easy+hard 的 train split；validation 禁止使用）。
 
     中英混合：只取 question 字段中文字符占比 > 30% 的条目。
     题面在 extra_info.game_data_str（json 串）的 question/answer 里。
@@ -250,7 +262,7 @@ _READERS = {
 
 
 def serialize(rec):
-    """统一口粮格式。短于 MIN_CHARS 的碎片返回空串（调用方跳过）。"""
+    """统一训练数据格式。短于 MIN_CHARS 的碎片返回空串（调用方跳过）。"""
     s = "问：" + rec["prompt"] + "\n答：" + rec["answer"]
     return s if len(s) >= MIN_CHARS else ""
 

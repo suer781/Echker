@@ -176,7 +176,7 @@ def install_ledger_hooks(model, steps, svd_stride=1):
     arrays[(metric, site)] = np[steps, C]；er_series=np[steps, n_layers]（未采步=NaN）；
     grams[li][half] = 该层残差流（每步去均值）X^T X 的精确累计（half=周期半）。
 
-    实现注记（2026-10-04 首跑教训）：不能用张量钩子 x.register_hook(闭包捕获 x)——
+    实现注记（2026-10-04 首跑发现）：不能用张量钩子 x.register_hook(闭包捕获 x)——
     x→钩子表→闭包→x 构成引用环，环不破则 x 的整段反向子图（数十 MB/步）被滞留，
     120 步后显存 8.27GB 溢出 3GB 显存进 WDDM 共享内存（分页又拖慢 6 倍）。
     正确做法：模块级 register_full_backward_hook（每模块注册一次，无每步注册），
@@ -236,7 +236,7 @@ def install_ledger_hooks(model, steps, svd_stride=1):
     def blk_factory(li):
         def fwd(mod, inp, out):
             # 整段 no_grad：Gram/svdvals 是测量，绝不能并进自动微分图
-            # （否则 grams 被反向图链住，逐步滞留激活图——首跑 2845MB 峰值的根因）
+            # （否则 grams 被反向图链住，逐步滞留激活图——首跑 2845MB 峰值的原因）
             with torch.no_grad():
                 idx = store["idx"]
                 X = out[0]  # (T, d_model) 残差流

@@ -28,8 +28,8 @@ def _sentences(text):
 def varied_replay(data: bytes, rng: random.Random, donor=None) -> bytes:
     """律 L6：重放 = 改写。
 
-    换序、跨经验拼接、字符 dropout。逐字复读会语义饱和（只剩笔画丢了意义），
-    改写才能逼出要点。
+    换序、跨经验拼接、字符 dropout。逐字复读会导致语义饱和（仅保留表面字符
+    而丢失语义），改写才能提取核心信息。
     """
     text = data.decode("utf-8", errors="replace")
     sents = _sentences(text)
@@ -126,9 +126,9 @@ def run_cycle(dolphin, steps=40, kd_alpha=0.5, kd_T=2.0, verbose=True):
     report["kd_last"] = round(kd_hist[-1], 4)
 
     if passed:
-        dolphin.swap()  # 睡脑上岗，旧醒脑转睡
+        dolphin.swap()  # 换班：睡脑转为醒脑，旧醒脑转为睡脑
         report["swapped"] = True
-        # 律 L10 快通道：新醒脑最自信的片段作为蒸馏笔记入记忆库（预支，立即可引用）
+        # 律 L10 快通道：新醒脑上损失最低的片段作为蒸馏笔记入记忆库（预支，立即可引用）
         # 必须显式给 key：并列 NLL 会让元组比较去比 Experience，而它没有 __lt__（律：不可比语义）
         # 次级键用稳定的 Experience.id，保证并列时顺序确定、可复现（禁止随机）
         ranked = sorted(
@@ -141,7 +141,7 @@ def run_cycle(dolphin, steps=40, kd_alpha=0.5, kd_T=2.0, verbose=True):
         dolphin.budget = min(0.60, dolphin.budget * 1.05)
     else:
         report["swapped"] = False
-        # 作废回滚：睡脑重置为与醒脑同源，从好状态再睡
+        # 作废回滚：睡脑重置为与醒脑同源，从该状态重新训练
         sleeping.model.load_state_dict(awake.model.state_dict())
         dolphin.budget = max(0.25, dolphin.budget * 0.90)  # 值自成：收紧预算
 

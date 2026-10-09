@@ -9,7 +9,7 @@
      在重复数据（cmath 呼吸切片）与全新数据（gsm8k）上各扫一遍，
      对照 GHOST_GAIN_MIN=1e-4 给出"本会发生的判决"。
 
-  ② ReDo 彩票定量（平台期计数器为什么被反复清零？）
+  ② ReDo 扰动定量（平台期计数器为什么被反复清零？）
      每次抽样：快照睡脑权重+账本 → 调 life.LifeController._redo（M4 真实
      回收路径）→ 测探测损失差 Δprobe。Δprobe 的分布 = 每周期强加在
      margin 上的结构噪声（EPS_PLATEAU=0.005 与之同尺度竞争）。
@@ -69,7 +69,7 @@ def main():
     pa, pb = params_of(a), params_of(b)
     log(f"读档完成：cycle={d.cycle} 醒脑={d.awake().name} 状态机={d.life_ctl.state} "
         f"平台期={d.life_ctl.plateau}")
-    log(f"[铁证|诊断起点] A={pa:,} B={pb:,} Σ={pa + pb:,}  d_model={b.model.cfg.d_model}")
+    log(f"[证据|诊断起点] A={pa:,} B={pb:,} Σ={pa + pb:,}  d_model={b.model.cfg.d_model}")
     probe_a = d.probe_loss(a)
     probe_b = d.probe_loss(b)
     log(f"探测损失：醒脑{a.name}={probe_a:.4f}  睡脑{b.name}={probe_b:.4f}  "
@@ -102,7 +102,7 @@ def main():
             f"（门槛 GHOST_GAIN_MIN={GHOST_GAIN_MIN}）→ {verdict}  耗时{time.monotonic()-t0:.1f}s")
         log(f"    前三：{[(f'b{k[0]}.{k[1]}', round(v, 6)) for k, v in top]}")
 
-    # ---------- ② ReDo 彩票定量 ----------
+    # ---------- ② ReDo 扰动定量 ----------
     log("—— ② ReDo 每周期扰动定量（5 次抽样，投掷实例，绝不存档）——")
     v = d.life_ctl.vitals_for(d, h.name)
     pristine_v = copy.deepcopy(v.to_state())

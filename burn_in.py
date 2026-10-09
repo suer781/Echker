@@ -1,10 +1,10 @@
 """烤机体检 v2：fp64 仲裁版显存完整性 + 训练轨迹一致性 + 有效算力。
 
-v1 教训（用户抓的）：max(|z-ref|/(|ref|+1e-3)) 会在 ref≈0 的元素上，
+v1 问题：max(|z-ref|/(|ref|+1e-3)) 会在 ref≈0 的元素上，
 把 CPU/GPU 求和顺序的正常舍入差放大成 ~0.1 的假错误。
 v2 用 CPU float64 当裁判，容差 = atol + rtol*|ref|，谁越界谁算错，GPU/CPU 分开判。
 注意：本测试能分辨 GPU 与 CPU 谁在错，不能完全担保系统内存条
-（内存超频的终审是 memtest86 的领域）。
+（内存超频的最终检测由 memtest86 承担）。
 """
 import time
 
@@ -37,7 +37,7 @@ def trajectory(steps=50):
 
     2026-10-04 修复：旧实现 max(|a-b|/max(|b|,1e-6)) 是纯相对偏差——
     训练后期 loss 趋 0 时，正常舍入差被除以极小分母放大成假错误
-    （v1 的病根在 trajectory 里残留，memtest 早已改用混合容差）。
+    （v1 的问题在 trajectory 里残留，memtest 早已改用混合容差）。
     现与 memtest 的 excess() 统一：容差 = atol + rtol*|ref|（混合容差），
     返回"超出容差的最大量"，<=0 表示轨迹完全重合在容差内。
     """
@@ -112,7 +112,7 @@ if __name__ == "__main__":
     try:
         tf = throughput()
         print(f"③ 有效算力（57M 模型实测）：{tf:.2f} TFLOPS"
-              f"  → 100MB/50M 胎教 ≈ {6 * 5e7 * 1e8 / (tf * 1e12) / 86400:.1f} 天")
+              f"  → 100MB/50M 预训练 ≈ {6 * 5e7 * 1e8 / (tf * 1e12) / 86400:.1f} 天")
     except RuntimeError as e:
         ok = False
         print(f"③ 有效算力：✗ 训练负载下 CUDA 崩溃（{str(e).splitlines()[0]}）")

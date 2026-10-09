@@ -49,7 +49,7 @@ SynLogic 目录本身就是 easy/hard、LogiConBench 文件名就是 2/3/4/5 语
   - GSM8K：英文 `answer` 的 `<<...>>` 步骤数实测分布良好（train 7,473 条：1 步 404 / 2 步 2175 / 3 步 2137 / 4 步 1424 / 5 步 785…），可按步骤数分桶。
   - SynLogic：`synlogic_easy`（15,837）/ `synlogic_hard`（32,840）目录即难度档。
   - LogiConBench：`2/3/4/5statements.jsonl` 文件名即推理链长度档。
-- 裁决：ProCuRL 的"能力-难度匹配"落到海豚 = **能力轴（surprise EMA，免费）× 难度轴（元数据档位）× 目标带（L4 band）**。三者全部现成或零成本可得，是三个算法里唯一不需要新增前向计算/rollout 的。
+- 裁决：ProCuRL 的"能力-难度匹配"落到蓝蓟智能 = **能力轴（surprise EMA，免费）× 难度轴（元数据档位）× 目标带（L4 band）**。三者全部现成或零成本可得，是三个算法里唯一不需要新增前向计算/rollout 的。
 - **结论**：MVP 采用 ProCuRL 式匹配的廉价实现。
 
 ### 3. PACED：训练侧 KD 调度，不是喂食侧选料
@@ -120,7 +120,7 @@ SynLogic 目录本身就是 easy/hard、LogiConBench 文件名就是 2/3/4/5 语
 
 ### 开放问题 2：Band-Tier Matching 是否真的优于线性喂食？（A/B 验证）
 
-- **为什么**：N1 引用的 `When Do Curricula Work?`（ICLR 2021）指出显式课程在标准基准上收益微弱，海豚的带通选拔本身已是"动态训练集"——需要验证排序层的边际收益。
+- **为什么**：N1 引用的 `When Do Curricula Work?`（ICLR 2021）指出显式课程在标准基准上收益微弱，蓝蓟智能的带通选拔本身已是"动态训练集"——需要验证排序层的边际收益。
 - **最小实验设计**：
   - 数据：CMATH dev（有 grade，可做档位调度）600 条。
   - 跑法（未来实验）：两条手臂，各用 `seed` 模型 + 隔离冷层/存档：

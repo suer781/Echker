@@ -21,13 +21,13 @@
                                  0.32–0.45，显著高于随机基线 ~0.03）；bottom-1%
                                  名单洗牌（~0.2）不得作为手术对象。
   - DORMANT_CONFIRM = 2          【定标】连续 2 周期确认——把 ~0.4 的单周期集合
-                                 稳定性复利成跨周期确认。
+                                 稳定性累积为跨周期确认。
   - stable-Taylor 周期中位数重整  【定标】Taylor 有 trend=-0.27 的系统性量级衰减
                                  （跨周期漂移 ~35% 主导）；stable 口径不重整会把
-                                 梯度量级衰减误读成"全员凋零"。
+                                 梯度量级衰减误读成"全部通道凋零"。
   - PROBATION_CYCLES = 3         【值自成】新生/回收通道观察期，期间豁免休眠判决。
 
-采集安全（Q6 定标脚本用显存换来的教训，此处照方抓药）：
+采集安全（基于 Q6 定标脚本的显存占用问题，此处采用相同规避措施）：
   - 禁止张量钩子 x.register_hook(闭包捕获 x)——x→钩子表→闭包→x 引用环滞留整段
     反向子图，120 步即溢出 3GB 显存进 WDDM（6 倍减速）。
   - 正确做法：模块级 register_full_backward_hook（每模块注册一次），forward 钩子
@@ -94,7 +94,7 @@ class SiteLedger:
 
     def observe(self, act_means, tay_means):
         if len(act_means) != self.C:
-            return  # 形态与账本不符且未经 remap：丢弃本步（回滚/换脑竞态兜底）
+            return  # 形态与账本不符且未经 remap：丢弃本步（回滚/换脑竞态防护）
         a = 1.0 - 0.5 ** (1.0 / TAG_HALF_LIFE)  # 【定标】tag EMA 步级系数
         for c in range(self.C):
             self.tag_act[c] += a * (act_means[c] - self.tag_act[c])
@@ -128,7 +128,7 @@ class SiteLedger:
             bottom = {c for _, c in vals[:k]}
             for c in pool:
                 self.dorm_cycles[c] = self.dorm_cycles[c] + 1 if c in bottom else 0
-        for c in range(self.C):  # probation 递减；期满摘新生帽
+        for c in range(self.C):  # probation 递减；期满清除新生标记
             if self.probation[c] > 0:
                 self.probation[c] -= 1
                 if self.probation[c] == 0:
@@ -145,7 +145,7 @@ class SiteLedger:
                 if self.probation[c] == 0 and self.dorm_cycles[c] >= DORMANT_CONFIRM]
 
     def shares(self):
-        """层内分位数归一化份额（【预留接口，现状无生产消费者】——预留给战斗
+        """层内分位数归一化份额（【预留接口，现状无生产消费者】——预留给后续
         决策（如 M4 手术层选址）使用；休眠判决**不经过它**，end_cycle 直接按
         原始激活值排序取 bottom-5%。措辞修正（监督审计 P2-1）：旧注释称本函数
         影响"休眠判决"，系前瞻性辩护冒充现状（用途漂移），已删）。
@@ -159,7 +159,7 @@ class SiteLedger:
         def pct(vals):
             # 并列值取平均秩：全等 → 全 0.5 中性。分位数必须只由数值决定——
             # 若按索引洗牌打破并列，全等的 Taylor 账本会给"索引靠后"的通道虚高
-            # 份额（实测能把最沉睡通道推到 1.0）。此修正属于本函数自身的正确性
+            # 份额（实测会把最低活跃度通道抬到 1.0）。此修正属于本函数自身的正确性
             # 要求，与休眠判决无关（判决不走 shares()）。
             n = len(vals)
             if n <= 1:
@@ -181,12 +181,12 @@ class SiteLedger:
         return {c: 0.5 * (pa[c] + pt[c]) for c in range(self.C)}
 
     def utilization_indices(self, q=DORMANT_QUANTILE, p=0.10):
-        """连续利用率指数（研究报告_自适应原理 §3.1：恒温器的"钙"）。
+        """连续利用率指数（研究报告_自适应原理 §3.1：恒温器的关键输入）。
 
         返回 (utilization_gap, headroom_hot)，均从 **stable 激活**（禁止 tag——
         测量阻尼第一重）构造，分位池与休眠判决同域（probation 豁免）：
           gap = (med − bottom-q 均值) / med ∈ [0,1]——尾部落后量（过剩信号，
-                连续化的休眠占比；0=尾部齐平，1=尾部死透）；
+                连续化的休眠占比；0=尾部齐平，1=尾部完全落后）；
           hot = top-p 均值 / med——头部过热程度（1=完全齐平，>1 有过热）。
         med ≤ 1e-12（冷账本/全零）→ (0.0, 1.0)（既不过剩也不过热——无信号）。
         分位并列不再特殊处理：指数读的是均值距离不是名单，并列天然给中性值。
@@ -271,7 +271,7 @@ class Vitals:
         self.er = {}             # 层 → 有效秩（每周期一个值）
         self.enabled = False
         self._handles = []
-        self._stash = {}         # 定标教训：暂存/弹出，零引用环
+        self._stash = {}         # 定标结论：暂存/弹出，零引用环
         self._grams = {}         # 层 → 残差流 Gram
         self._steps_seen = 0
 
@@ -290,7 +290,7 @@ class Vitals:
     # ---------- hook 装卸 ----------
 
     def attach(self, model):
-        """注册训练期采集 hook（模块级、每模块一次；每周期重挂，重复调用安全）。"""
+        """注册训练期采集 hook（模块级、每模块一次；每周期重新注册，重复调用安全）。"""
         self.detach()
         dev = next(model.parameters()).device
         for li, blk in enumerate(model.blocks):
@@ -306,7 +306,7 @@ class Vitals:
                 key = f"b{li}.{kind}.new.{i}"
                 self._ensure_site(key, lin.out_features)
                 self._install_io_hook(key, lin, kind="bypass")
-            # 每层残差流 Gram（有效秩原料）——全程 no_grad（定标教训：误入微分图
+            # 每层残差流 Gram（有效秩原料）——全程 no_grad（定标结论：误入微分图
             # 会把测量链进反向子图，逐步滞留激活）
             self._ensure_gram(li, dev)
 
@@ -380,7 +380,7 @@ class Vitals:
     def _ensure_site(self, name, C):
         led = self.sites.get(name)
         if led is None or led.C != C:
-            self.sites[name] = SiteLedger(name, C)  # 无 remap 的形态变化：重建（兜底）
+            self.sites[name] = SiteLedger(name, C)  # 无 remap 的形态变化：重建（防护）
 
     def _ensure_gram(self, li, dev):
         self._grams[li] = None  # 延迟到首步按真实尺寸/设备建（形态变化安全）
@@ -426,3 +426,14 @@ class Vitals:
 
     def site_names(self):
         return sorted(self.sites)
+
+    def remap_split(self, k):
+        """复制分裂（轴③ d_model 平铺）的全账本委托：每个 site 逐通道账本 → k 份，
+        各继承父值/k（SiteLedger.remap_split 语义，k 份合起来守恒）。
+
+        2026-10-05 发育出生检查发现并修复的潜伏 bug：life._execute_grow 的轴③
+        路径调用 v.remap_split(...)，而委托方法此前只存在于 SiteLedger——轴③
+        生长真实执行即 AttributeError。恒温器排程不使用轴③（控制器只用①②），
+        该路径仅手工计划可达，故既有断言从未触发。"""
+        for led in self.sites.values():
+            led.remap_split(k)

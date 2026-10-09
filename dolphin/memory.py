@@ -6,7 +6,7 @@
 - 冷层（2026-10-03 G1 施工）：逐出=降级落盘 memory_cold.jsonl（append-only 日志），
   不是删除——被逐出条目跨周期仍可检索、可复活，L9"可检索可复活"对冷层同样成立。
 - 做梦（同上）：dream() 按检索分数自我回忆——喂食模式没有人工对话供给检索
-  命中，hits 由做梦代偿，复活通道不再死亡。
+  命中，hits 由做梦代偿，复活通道保持可用。
 """
 import json
 import os
@@ -64,14 +64,14 @@ class MemoryStore:
                     line = line.strip()
                     if not line:
                         continue
-                    try:  # 崩溃尾行的半行日志不拖垮整卷
+                    try:  # 崩溃尾行的半行日志不影响整体加载
                         en = MemoryEntry.from_json(json.loads(line))
                     except (json.JSONDecodeError, KeyError, ValueError):
                         continue
-                    # 2026-10-04 修复：旧实现逐行 append，反刍把同一条反复逐出
+                    # 2026-10-04 修复：旧实现逐行 append，反刍把同一条反复逐出，
                     # 会导致同一 text 落盘成百上千行（生产实况 16316 行仅 153 条
                     # 唯一 text）。加载时按 text 去重：保留 hits 最大、created 最早
-                    # 的一条（信息量最大且保留审计链），一次加载即自愈旧档。
+                    # 的一条（信息量最大且保留审计链），一次加载即修复旧档。
                     existing = next((x for x in self.cold_entries if x.text == en.text), None)
                     if existing is None:
                         self.cold_entries.append(en)
@@ -80,7 +80,7 @@ class MemoryStore:
                             existing.hits = en.hits
                         if en.created < existing.created:
                             existing.created = en.created
-                        # 保留更低的 score（逐出优先级 min 取低分，早逐出者更该留）
+                        # 保留更低的 score（逐出优先级 min 取低分，早逐出者应优先保留）
                         if en.score < existing.score:
                             existing.score = en.score
         self._cold_loaded = True
@@ -91,8 +91,8 @@ class MemoryStore:
 
     def flush_cold(self):
         """把冷层影子索引（含检索命中计数）写回落盘，供存档时调用——
-        冷层命中进度跨重启不丢。缓存从未加载过则落盘文件即真相，不动；
-        冷层从未启用过（无逐出、文件也不存在）则零足迹，不凭空造文件。"""
+        冷层命中进度跨重启不丢。缓存从未加载过则落盘文件为唯一依据，不做改动；
+        冷层从未启用过（无逐出、文件也不存在）则零足迹，不额外创建文件。"""
         with self._cold_lock:
             if not self._cold_loaded or (not self.cold_entries
                                          and not os.path.exists(self.cold_path)):
@@ -119,9 +119,9 @@ class MemoryStore:
         """逐出优先级（G1）：零命中 > 低分 > 最旧（note 与 residue 同规则）。
 
         - 候选=零命中条目，且排除本次刚写入的新条目：它还没活过一个周期，
-          逐出它=add 的净效果是删除（审计实锤的新条目自杀 bug）。
+          逐出它会使 add 的净效果变为删除（审计确认的新条目自删缺陷）。
         - 零命中集合为空（全员被检索过）→ 不逐出，扩容一档：cap 由事件驱动
-          上调（值：自成）——旧知识不因新知识到来而被处决。
+          上调（值：自成）——旧知识不因新知识到来而被移除。
         - 逐出=降级进冷层落盘，不是删除：L9"可检索可复活"跨周期成立。
         """
         candidates = [e for e in self.entries if e.hits == 0 and e is not protect]
@@ -163,7 +163,7 @@ class MemoryStore:
         q = _grams(query.decode("utf-8", errors="replace"))
         if not q:
             return []
-        self._ensure_cold()  # 冷层同场竞技：G1 修复前被逐出条目从此永远查无此人
+        self._ensure_cold()  # 冷层同场参与检索：G1 修复前被逐出条目从此无法检索到
         scored = []
         # 2026-10-04 修复：训练线程（_evict/_demote/resurrect）会并发修改
         # self.entries / self.cold_entries，直接迭代会跳过元素/漏检索（语义错误）。
@@ -194,39 +194,39 @@ class MemoryStore:
         - 先 _ensure_cold()：与 retrieve()/dream() 一致。部署喂食路径
           （feed.py --resume → life.run_cycle(feeding=True)）只调 resurrect()、
           不调 serve()/retrieve()，缺这一步则新进程冷层为空，上一进程逐出的知识
-          重启后完全不可见，违反 L9「可检索可复活」= 静默丢弃。
-        - 遍历副本：原来边遍历 cold_entries 边 remove()，索引左移导致隔一条漏一条，
+          重启后完全不可见，违反 L9「可检索可复活」= 数据静默丢失。
+        - 遍历副本：原实现边遍历 cold_entries 边 remove()，索引左移导致隔一条漏一条，
           间隔重复通道吞吐减半、且残留条目 hits 已达标却未被消费（状态不一致）。
         锁：全程不持 _cold_lock——_ensure_cold() 内部自行取放，且下方 _evict()→_demote()
-        会再次取 _cold_lock（Lock 不可重入，整体加锁即自死锁）。_cold_lock 是叶锁：
+        会再次取 _cold_lock（Lock 不可重入，整体加锁必然死锁）。_cold_lock 是叶锁：
         永不持有其它锁时再取、且不取任何锁，故与 feed_lock 只能形成 feed_lock→_cold_lock
         单向顺序，不存在 AB-BA 环路。
         """
         out = []
-        self._ensure_cold()  # 冷层不加载 = 重启后失聪（retrieve/dream 早有，此处曾遗漏）
+        self._ensure_cold()  # 冷层不加载 = 重启后不可用（retrieve/dream 早有，此处曾遗漏）
         for en in self.entries:
             if en.hits >= self.promote_hits:
                 out.append(en.text.encode("utf-8", errors="replace"))
                 en.hits = 0
         promoted = []
-        for en in list(self.cold_entries):  # 副本：原实现边遍历边删 → 隔一条漏一条
+        for en in list(self.cold_entries):  # 副本：原实现边遍历边删除 → 隔一条漏一条
             if en.hits >= self.promote_hits:
                 out.append(en.text.encode("utf-8", errors="replace"))
                 self.cold_entries.remove(en)
                 self.entries.append(en)
                 en.hits = 0
                 promoted.append(en)
-        while len(self.entries) > self.cap:  # 冷层升回可能顶满：热层规矩照旧
+        while len(self.entries) > self.cap:  # 冷层升回可能超过容量：热层规则不变
             self._evict(protect=promoted[-1] if promoted else None)
         return out
 
     def dream(self, queries, k=5):
-        """做梦（G1）：按检索分数从记忆库抽样旧事，供周期头部注入缓冲。
+        """做梦（G1）：按检索分数从记忆库抽样旧经验，供周期头部注入缓冲。
 
         喂食模式没有人工对话供给检索命中——用近期经验做联想线索自我回忆，
-        hits 由此增长，复活通道不再依赖有人来聊。注入量封顶 k（≤5），
-        防旧知识挤占新经验的选拔预算（审计 G11：满带权挤压）。
-        只抽 hits < promote_hits 的条目：达标者是 resurrect() 的业务，
+        hits 由此增长，复活通道不再依赖外部检索。注入量封顶 k（≤5），
+        防旧知识占用新经验的选拔预算（审计 G11：满带权挤压）。
+        只抽 hits < promote_hits 的条目：达标者是 resurrect() 的职责，
         两条复活通道不重复注入同一条。返回 MemoryEntry 列表（命中计数 +1）。
         """
         qs = [_grams(q.decode("utf-8", errors="replace")) for q in (queries or [])]
