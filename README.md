@@ -30,6 +30,11 @@ python pretrain.py --steps 300   # 从 corpus/ 干净语料预训练基座
 python smoke_test.py              # M0 端到端冒烟测试
 ```
 
+## 存档与持久化
+
+- 系统运行中每 5 个睡眠周期自动存档到 `dolphin/fed_state.pt`（原子写 + `dolphin/archive/` 滚动备份 3 份），退出（Ctrl+C/收工）时也会存档。
+- 下次启动 `python feed.py --resume` 或 `python chat.py` 会自动读档续跑（恢复权重、优化器动量、记忆、喂食游标等全部状态）；无存档则随机初始化，从零积累。
+
 ## 运行测试
 
 ```bash
