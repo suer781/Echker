@@ -36,3 +36,6 @@ __pycache__/
 # ---- Q6 定标原始测量数据：exp1_data.npz 由 calibrate_q6.py 可重建（121MB），
 # 按项目惯例（可重建二进制不入库，同 dolphin/*.pt）忽略；定标报告/结果 JSON/脚本入库 ----
 定标/exp1_data.npz
+
+# ---- 本机双击入口（不入库）----
+*.bat

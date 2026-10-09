@@ -1,42 +1,63 @@
-# 海豚 Dolphin —— 自学习 AI（M0）
+# 蓝蓟智能（Echker）—— 自学习 AI 系统
 
-双半球轮换 + 睡眠周期 + 价值门控 + 部分有损蒸馏交接。
+开发代号：haolie（昊冽）
 
-**全自研声明**：只依赖 PyTorch 与 Python 标准库；无 nanoGPT/minGPT/HuggingFace，
-无任何现成 tokenizer（律 L1：模型直接吃原始字节流）。完整设计与生物学依据见
-[架构设计.md](架构设计.md)。
+一个从零实现的自学习 AI 系统：不依赖任何现成 LLM 工程（无 nanoGPT / minGPT / HuggingFace / 现成 tokenizer），仅使用 PyTorch 与 Python 标准库。模型直接学习原始字节流（律 L1），通过"无模式统一自循环"持续从任何输入中学习。
+
+完整设计与生物学依据见 [架构设计.md](架构设计.md)。
+
+## 核心机制
+
+- **无模式统一自循环**：任何输入（用户对话、批量文件、数据流）统一成为学习信号，走同一条"经验 → 缓冲 → 选拔 → 睡眠训练 → 体检门控 → 换班"链路。
+- **无限循环喂食**：数据源喂尽自动轮转回第一个源，永不停歇；间隔重复本身即是巩固机制。
+- **杏仁核托管**：生成温度 / top_k / top_p 由 Amygdala 根据系统健康度自动调节，无需人工设置。
+- **体检门控**：固定探测集（任何 hemisphere 永不在此训练）作为换班金丝雀，通过才上岗。
+
+## 安装
+
+```bash
+pip install -r requirements.txt
+```
+
+依赖：`torch>=2.0`（见 [requirements.txt](requirements.txt)）。
 
 ## 快速开始
 
 ```bash
-python pretrain.py --steps 300   # 胎教：从 corpus/ 干净语料预训练基座
-python smoke_test.py             # M0 端到端冒烟测试
+python chat.py                    # 聊天入口（输入即学习，后台睡眠训练保持自循环）
+python feed.py --resume           # 从 dolphin/fed_state.pt 按喂食游标续喂（一键启动自循环）
+python pretrain.py --steps 300   # 从 corpus/ 干净语料预训练基座
+python smoke_test.py              # M0 端到端冒烟测试
 ```
 
-## 作为库使用
+## 运行测试
 
-```python
-from dolphin.dolphin import Dolphin
-
-d = Dolphin.from_birth("dolphin/birth.pt")   # 从基座出生（双半球同源）
-resp, eid = d.serve("人为什么要睡觉？")       # 醒脑服务（权重冻结）
-d.feedback(eid, 1.0)                         # 用户奖励
-d.maybe_sleep()                              # 压力够就睡：选拔→变异重放→蒸馏→体检→换班
-d.save("dolphin/state.pt")                   # 存档
+```bash
+python tests/test_conformance.py && python tests/test_growth_support.py && python tests/test_mean_nll_batch.py
 ```
 
-## 目录
+或使用 pytest（`pytest.ini` 已配置 `t_*` 收集规则）：
+
+```bash
+pytest tests/ -q
+```
+
+## 项目结构
 
 | 路径 | 职责 |
 |---|---|
-| `dolphin/model.py` | 字节级因果 Transformer（自研） |
+| `dolphin/model.py` | 字节级因果 Transformer（自研，无 tokenizer） |
 | `dolphin/experience.py` | 海马体：带通价值门控、窗口去重惩罚、睡眠压力 |
-| `dolphin/sleep.py` | 睡眠周期全流程（律 L5-L10） |
 | `dolphin/memory.py` | 记忆库：滞留、检索（预支）、复活（间隔重复） |
-| `dolphin/probe.py` | 固定探测集（任何训练永不触碰） |
+| `dolphin/life.py` | 睡眠周期全流程与结构恒温器（律 L5–L11） |
 | `dolphin/dolphin.py` | 双半球管理、服务接口、持久化 |
+| `dolphin/amygdala.py` | 杏仁核：生成参数自动托管 |
+| `feed.py` | 部署期喂食驱动器（守护模式、无限循环） |
+| `chat.py` | 聊天入口 |
+| `probes/` | 固定探测集与体检门控 |
+| `tests/` | 一致性、成长支持、均值 NLL 批次测试 |
 | `corpus/` | 胎教语料（只放干净来源） |
-| `probes/probe.txt` | 体检探测集 |
+| `实验记录/` | 实验报告与归档 |
 
 ## 律与值
 
