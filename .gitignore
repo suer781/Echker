@@ -48,6 +48,7 @@ dolphin/memory_cold.jsonl
 实验记录/**/*.bak*
 实验记录/**/*.jsonl.bak*
 实验记录/**/*.jsonl
+实验记录/零点实验归档_20261004/memory_cold.jsonl
 实验记录/归档_*/
 实验记录/发育档备份_*/
 # 内部审计/验收报告（开源前移出跟踪）
