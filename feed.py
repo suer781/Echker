@@ -556,10 +556,10 @@ def parse_args():
     ap.add_argument("--sleep-every", type=int, default=500, help="每喂多少条通知训练线程睡眠")
     ap.add_argument("--sleep-steps", type=int, default=120, help="每次睡眠的训练步数")
     ap.add_argument("--model", default="auto", choices=["57", "small", "seed", "auto"],
-                    help="57=默认 57M 模型；small=冒烟用小模型；"
+                    help="57=历史默认出生档（≈57M 参数，非容量上限）；small=冒烟用小模型；"
                          "seed=发育模式最小种子 d32×2 层×2 头（41,856 参数随机初始化，"
                          "生长机制可用——模型规模随经验增长）；"
-                         "auto=有存档则读存档 cfg（默认），无存档回落 57")
+                         "auto=有存档则读存档 cfg（默认），无存档回落历史默认出生档 57")
     ap.add_argument("--resume", action="store_true", help="从 dolphin/fed_state.pt 按喂食游标续喂")
     ap.add_argument("--no-guard", action="store_true",
                     help="关闭守护模式（数据尽即收工；默认开启：数据尽后转入反刍等待新经验）")
@@ -610,7 +610,8 @@ def make_cfg(which):
         # "基因组"=律，不生长；可生长部分（d_model/MLP 隐层/attn-v）交给恒温器。
         return Config(d_model=32, n_layers=2, n_heads=2, block_size=256)
     if which == "auto":
-        # 无人值守默认档：有存档则用存档模型（load 会覆盖），无存档回落 57M。
+        # 无人值守默认档：有存档则用存档模型（load 会覆盖），无存档回落历史默认出生档
+        # （≈57M，非容量上限；生产起点已改为最小种子档）。
         # 实际模型由 Dolphin.load() 从存档 cfg 决定，此处只提供占位 Config。
         if os.path.exists(FED_STATE):
             try:
@@ -618,8 +619,8 @@ def make_cfg(which):
                 return Config(**ck["cfg"])
             except Exception:
                 pass
-        return Config(d_model=768, n_layers=8, n_heads=8, block_size=256)  # ≈57M 参数
-    return Config(d_model=768, n_layers=8, n_heads=8, block_size=256)  # ≈57M 参数
+        return Config(d_model=768, n_layers=8, n_heads=8, block_size=256)  # 历史默认出生档 ≈57M 参数（非容量上限）
+    return Config(d_model=768, n_layers=8, n_heads=8, block_size=256)  # 历史默认出生档 ≈57M 参数（非容量上限）
 
 
 def _sigbreak_to_interrupt(sig, frame):

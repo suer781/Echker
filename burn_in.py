@@ -68,6 +68,7 @@ def trajectory(steps=50):
 
 
 def throughput(steps=30):
+    # 有效算力按历史默认出生档（d768×8×8，≈57.1M 参数）实测；该档位非容量上限。
     cfg = Config(d_model=768, n_layers=8, n_heads=8, block_size=256)
     model = ByteTransformer(cfg).cuda()
     n = sum(p.numel() for p in model.parameters())
@@ -88,7 +89,7 @@ def throughput(steps=30):
         opt.step()
     torch.cuda.synchronize()
     dt = time.time() - t0
-    return 6 * n * 16 * 256 * steps / dt / 1e12
+    return 6 * n * 16 * 256 * steps / dt / 1e12, n
 
 
 if __name__ == "__main__":
@@ -110,8 +111,8 @@ if __name__ == "__main__":
     print(f"② 训练轨迹一致性（50 步 GPU vs CPU）：超出混合容差 {traj:+.2e}  {'✓' if t_ok else '✗'}")
 
     try:
-        tf = throughput()
-        print(f"③ 有效算力（57M 模型实测）：{tf:.2f} TFLOPS"
+        tf, n_params = throughput()
+        print(f"③ 有效算力（{n_params/1e6:.1f}M 模型实测，历史默认出生档非容量上限）：{tf:.2f} TFLOPS"
               f"  → 100MB/50M 预训练 ≈ {6 * 5e7 * 1e8 / (tf * 1e12) / 86400:.1f} 天")
     except RuntimeError as e:
         ok = False
