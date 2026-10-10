@@ -7,8 +7,9 @@
 import json
 import os
 
-# 数据根：部署机上 O: 盘挂载数据集（工作目录里的 datasets 符号链接亦指向它）
-DATA_ROOT = "O:/数据集"
+# 数据根：优先取环境变量 ECHKER_DATA_ROOT，否则回退到仓库根目录旁的 datasets/ 目录
+DATA_ROOT = os.environ.get("ECHKER_DATA_ROOT",
+                           os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "datasets")))
 # 碎片过滤：序列化后短于该长度没有统计结构的噪声（语料白名单.md 工序 4）
 MIN_CHARS = 30
 
