@@ -57,13 +57,17 @@ Ctrl+C 与 --max-idle（连续 N 个空选拔周期后允许收工，防真死�
 触发"数据尽"。用 --no-loop-feed 可关闭（恢复旧有限批次语义）。
 """
 import argparse
+import gzip
 import hashlib
 import itertools
 import os
+import shutil
 import signal
 import sys
 import threading
 import time
+import traceback
+from datetime import datetime
 
 import torch
 
@@ -80,8 +84,155 @@ MAX_IDLE_DEFAULT = 8  # 值：自成——守护模式连续 8 个空选拔周�
 # 核心交付（生长曲线），dict repr 日志不适合机器复绘，故每周期追加一行 JSON。
 GROWTH_TIMELINE = os.path.join("实验记录", "发育时间线_20261004.jsonl")
 
+# 日志轮转（2026-10-10，无人值守可靠性）：目录级轮转阈值与回落目标比例。
+# 只处理日志文件（.log/.jsonl/.log.gz/.jsonl.gz 等实验记录），绝不触碰生产资产
+# （dolphin/fed_state.pt、dolphin/memory_cold.jsonl、探针、存档、归档目录等）。
+LOG_DIR = os.path.join("实验记录", "")
+LOG_ROTATE_MAX_BYTES = int(os.environ.get("LOG_ROTATE_MAX_MB", "100")) * 1024 * 1024
+LOG_ROTATE_TARGET_RATIO = 0.80  # 压缩到总大小低于阈值的 80%
+LOG_ROTATE_KEEP_GZ = int(os.environ.get("LOG_ROTATE_KEEP_GZ", "5"))  # 压缩后仍超限时保留的最近 .gz 份数
+
+# 崩溃退避（2026-10-10）：指数退避上限与默认最大连续崩溃次数（保持原行为 5）。
+CRASH_BACKOFF_CAP = 300.0  # 指数退避上限（秒）
+CRASH_MAX_RESTARTS_DEFAULT = 5  # 默认最大连续崩溃次数（保持原行为）
+
 _PRINT_LOCK = threading.Lock()
 _T0 = time.monotonic()
+_CURRENT_CYCLE = None  # 最近一次运行中的 Dolphin.cycle（崩溃记录用，模块级线程安全近似）
+
+# 日志文件扩展名集合（目录级轮转只处理这些"可压缩日志"）。
+_LOG_EXTS = (".log", ".jsonl", ".txt", ".out", ".gz")
+
+
+def _is_log_filename(name):
+    """判断文件名是否属于可轮转的日志文件（.log/.jsonl 等实验记录）。"""
+    low = name.lower()
+    return any(low.endswith(ext) for ext in _LOG_EXTS)
+
+
+def _log_candidates(log_dir):
+    """列出日志目录下应参与轮转的日志文件（不含子目录、不含生产资产）。
+
+    只扫描 log_dir 顶层文件（不递归）：实验记录/ 下的归档子目录存放的是
+    .pt 存档等生产资产，绝不进入轮转逻辑（红线）。
+    """
+    out = []
+    if not os.path.isdir(log_dir):
+        return out
+    for name in os.listdir(log_dir):
+        full = os.path.join(log_dir, name)
+        if not os.path.isfile(full):
+            continue  # 子目录（归档等）一律跳过
+        if _is_log_filename(name):
+            out.append(full)
+    return out
+
+
+def _total_size(paths):
+    try:
+        return sum(os.path.getsize(p) for p in paths)
+    except OSError:
+        return 0
+
+
+def rotate_log_dir(log_dir=None, max_bytes=None, target_ratio=None, keep_gz=None):
+    """启动时目录级日志轮转：压缩最旧日志直到总大小低于阈值。
+
+    策略（2026-10-10）：
+      1. 扫描日志目录（默认 实验记录/）顶层日志文件（.log/.jsonl 等）；
+      2. 若总大小超过 max_bytes（默认 100MB，可用环境变量 LOG_ROTATE_MAX_MB 覆盖）：
+         按 mtime 从旧到新，将最旧日志压缩为 .gz（gzip，压缩后删除原文件），
+         直到总大小低于 max_bytes * target_ratio（默认 80%）；
+      3. 若全部压缩后仍超阈值，则删除最旧的 .gz（保留最近 keep_gz 份）。
+    红线：只处理日志文件，绝不删除/移动/修改生产资产（dolphin/fed_state.pt、
+    dolphin/memory_cold.jsonl、探针、存档、归档目录等）。
+
+    返回动作描述列表（测试用）。"""
+    log_dir = log_dir if log_dir is not None else LOG_DIR
+    max_bytes = max_bytes if max_bytes is not None else LOG_ROTATE_MAX_BYTES
+    target_ratio = target_ratio if target_ratio is not None else LOG_ROTATE_TARGET_RATIO
+    keep_gz = keep_gz if keep_gz is not None else LOG_ROTATE_KEEP_GZ
+    actions = []
+    files = _log_candidates(log_dir)
+    if not files:
+        return actions
+    total = _total_size(files)
+    if total <= max_bytes:
+        return actions  # 未超阈值，无需轮转
+
+    target = max_bytes * target_ratio
+    # 按 mtime 从旧到新排序（旧文件优先压缩）。
+    files.sort(key=lambda p: os.path.getmtime(p))
+    # 只压缩尚未压缩的日志（.gz 已压缩，压缩无收益，跳过）。
+    plain = [p for p in files if not p.lower().endswith(".gz")]
+    for path in plain:
+        if _total_size(files) <= target:
+            break
+        try:
+            gz_path = path + ".gz"
+            with open(path, "rb") as f_in, gzip.open(gz_path, "wb", compresslevel=6) as f_out:
+                shutil.copyfileobj(f_in, f_out, length=1024 * 1024)
+            os.remove(path)  # 压缩成功后删除原日志
+            files.remove(path)
+            files.append(gz_path)
+            actions.append(f"compress {os.path.basename(path)} -> {os.path.basename(gz_path)}")
+        except OSError as e:
+            actions.append(f"compress FAIL {os.path.basename(path)}: {e!r}")
+
+    # 压缩后仍超阈值：删除最旧 .gz（保留最近 keep_gz 份）。
+    if _total_size(files) > target:
+        gz_files = sorted((p for p in files if p.lower().endswith(".gz")),
+                        key=os.path.getmtime)
+        while len(gz_files) > keep_gz and _total_size(files) > target:
+            oldest = gz_files.pop(0)
+            try:
+                sz = os.path.getsize(oldest)
+                os.remove(oldest)
+                files.remove(oldest)
+                actions.append(f"delete {os.path.basename(oldest)} ({sz} B)")
+            except OSError as e:
+                actions.append(f"delete FAIL {os.path.basename(oldest)}: {e!r}")
+    return actions
+
+
+def crash_log_path():
+    """崩溃记录文件：实验记录/CRASH_YYYYMMDD.log（按天追加）。"""
+    return os.path.join("实验记录", f"CRASH_{datetime.now().strftime('%Y%m%d')}.log")
+
+
+def write_crash_record(cycle, exc):
+    """每次崩溃时追加写崩溃记录到 CRASH_YYYYMMDD.log（失败不影响主流程）。"""
+    try:
+        os.makedirs("实验记录", exist_ok=True)
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        with open(crash_log_path(), "a", encoding="utf-8") as f:
+            f.write(f"\n===== {datetime.now().isoformat(timespec='seconds')} =====\n"
+                    f"cycle={cycle}\n{tb}\n")
+    except Exception as e:
+        log("崩溃记录", f"写入失败（忽略）：{e!r}")
+
+
+def write_crash_fatal(cycle, exc, crash_count):
+    """超过 --max-restarts 最终放弃时写 CRASH_FATAL_<时间戳>.md 告警标记。"""
+    try:
+        os.makedirs("实验记录", exist_ok=True)
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join("实验记录", f"CRASH_FATAL_{ts}.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"# CRASH FATAL（请人工介入）\n\n"
+                    f"- 时间：{datetime.now().isoformat(timespec='seconds')}\n"
+                    f"- 崩溃次数：{crash_count}\n"
+                    f"- 当前 cycle：{cycle}\n"
+                    f"- 异常类型：{type(exc).__name__}\n"
+                    f"- 异常内容：{exc!r}\n\n"
+                    f"## 最后 traceback\n\n```\n{tb}\n```\n\n"
+                    f"## 建议\n\n系统超过最大连续崩溃次数后放弃自动重启。"
+                    f"请人工检查 feed.py 运行环境（数据源/磁盘/模型存档）。"
+                    f"存档未被删除/清空（dolphin/fed_state.pt 保留现场）。\n")
+        log("崩溃记录", f"最终放弃，已写告警标记 → {path}")
+    except Exception as e:
+        log("崩溃记录", f"CRASH_FATAL 写入失败（忽略）：{e!r}")
 
 
 def log(tag, msg):
@@ -597,6 +748,10 @@ def parse_args():
     ap.add_argument("--no-loop-feed", dest="loop_feed", action="store_false",
                     help="关闭无限循环喂食（数据源喂尽后走旧路径：反刍/待机等待，"
                          "即旧守护模式语义）")
+    ap.add_argument("--max-restarts", type=int, default=CRASH_MAX_RESTARTS_DEFAULT,
+                    help=f"常驻守护：最大连续崩溃次数，超过后放弃自动重启"
+                         f"（默认 {CRASH_MAX_RESTARTS_DEFAULT}，保持原行为；"
+                         f"退避为指数退避，上限 {CRASH_BACKOFF_CAP:.0f}s）")
     return ap.parse_args()
 
 
@@ -638,9 +793,23 @@ def main():
         if n not in SOURCES:
             sys.exit(f"未知数据源 {n}，可选：{SOURCES}")
 
+    # —— 日志轮转（2026-10-10）：启动时压缩/清理超限日志，保护磁盘 ——
+    try:
+        actions = rotate_log_dir()
+        if actions:
+            for a in actions:
+                log("日志轮转", a)
+            log("日志轮转", f"共 {len(actions)} 个动作（阈值 "
+                f"{LOG_ROTATE_MAX_BYTES // (1024 * 1024)}MB）")
+        else:
+            log("日志轮转", f"日志未超阈值（{LOG_ROTATE_MAX_BYTES // (1024 * 1024)}MB），跳过")
+    except Exception as e:
+        log("日志轮转", f"轮转失败（不影响启动）：{e!r}")
+
     # —— 常驻守护（无人值守自循环）：进程级异常自动重启，持续运行 ——
     # 只有 KeyboardInterrupt（用户主动 Ctrl+C）才真正退出；其余异常记录后
-    # 退避重试（最多 5 次连续失败后放弃，避免无限崩溃循环）。
+    # 指数退避重试（最多 --max-restarts 次连续失败后放弃，避免无限崩溃循环）。
+    max_restarts = max(1, args.max_restarts)
     consecutive_crashes = 0
     while True:
         try:
@@ -658,15 +827,21 @@ def main():
             return
         except Exception as e:
             consecutive_crashes += 1
+            write_crash_record(_CURRENT_CYCLE, e)
             log("守护", f"进程异常（第 {consecutive_crashes} 次）：{e!r}——自动重启")
-            if consecutive_crashes >= 5:
-                log("守护", "连续 5 次异常，放弃自动重启（请人工检查）")
+            if consecutive_crashes >= max_restarts:
+                write_crash_fatal(_CURRENT_CYCLE, e, consecutive_crashes)
+                log("守护", f"连续 {max_restarts} 次异常，放弃自动重启（请人工检查）")
                 raise
-            time.sleep(min(30, 5 * consecutive_crashes))  # 退避：5s/10s/15s/20s/30s
+            # 指数退避：5/10/20/40/80/160/300s…（上限 300s）
+            backoff = min(CRASH_BACKOFF_CAP, 5 * (2 ** (consecutive_crashes - 1)))
+            log("守护", f"退避 {backoff:.0f}s 后重启（指数退避）")
+            time.sleep(backoff)
 
 
 def _run_once(args, names):
     """单轮喂食+反刍（可被守护循环反复调用）。返回退出原因字符串。"""
+    global _CURRENT_CYCLE
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     # 无人值守默认 auto：有存档自动续喂（load 用存档 cfg 覆盖 --model），无存档随机初始化
     d = Dolphin(cfg=make_cfg(args.model), device=dev)
@@ -675,6 +850,7 @@ def _run_once(args, names):
         d.load(FED_STATE)  # load 会用存档里的 cfg 覆盖 --model 选项
         log("续喂", f"从 {FED_STATE} 读档：cycle={d.cycle} 醒脑={d.awake().name}")
         resumed = True
+        _CURRENT_CYCLE = d.cycle
     elif args.resume:
         log("续喂", f"{FED_STATE} 不存在，按随机初始化创建")
 
@@ -739,6 +915,7 @@ def _run_once(args, names):
     stop_reason = "数据尽/limit"
     try:
         while True:  # feed ↔ ruminate 状态机（G3 自续运行：触发、执行、验收全内部完成）
+            _CURRENT_CYCLE = d.cycle  # 崩溃记录用：保持最后已知周期
             quota = None if args.limit is None else max(0, args.limit - total)
             fed, limit_hit, skip = feed_from(
                 d, names, cursor, seen, trainer=trainer, sleep_every=args.sleep_every,

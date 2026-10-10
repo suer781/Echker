@@ -9,12 +9,22 @@
 - 查房新增字段：状态来源与存档时间戳、喂食游标 feed_cursor、总喂入
   learn_total、记忆库热/冷层条数、当前周期与醒脑（原有格式风格保留）。
 
+2026-10-10 新增（独立看门狗 --watch）：
+- 不破坏原查房功能；--watch 进入常驻模式，周期性检查 feed.py 是否存活、
+  dolphin/fed_state.pt 是否陈旧；若 feed.py 不在运行且存档陈旧则自动拉起。
+- 防循环：内存记录最近 1 小时拉起时间戳，超过 --max-restarts-per-hour 进入
+  3600s 冷却并写告警。日志写到 实验记录/watchdog_YYYYMMDD.log。
+- --dry-run：只打印检查结果，不拉起进程（验证用）。
+
 注：learn_total 的累计口径当前不随档落盘（feed.py 的存档 payload 未含），
 存档里没有时查房如实报"本次查房会话计数"并注明口径，绝不谎报为累计值；
 存档未来带上 learn_total 字段后此处自动切换为存档口径。
 """
+import argparse
 import os
+import subprocess
 import sys
+import time
 from datetime import datetime
 
 import torch
@@ -28,6 +38,8 @@ FED_STATE = os.path.join(ROOT, "dolphin", "fed_state.pt")
 BIRTH = os.path.join(ROOT, "dolphin", "birth.pt")
 OLD_STATE = os.path.join(ROOT, "dolphin", "state.pt")
 
+WATCH_LOG_DIR = os.path.join(ROOT, "实验记录")
+
 
 def param_breakdown(model):
     total = sum(p.numel() for p in model.parameters())
@@ -38,6 +50,140 @@ def param_breakdown(model):
 def _fmt_time(ts):
     # Windows 的 strftime 不支持 %f（交接文档 §8），此处只用秒级精度
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ---------------- 独立看门狗（--watch，2026-10-10） ----------------
+
+def _watch_log(msg):
+    """看门狗日志：追加写 实验记录/watchdog_YYYYMMDD.log，同时打印到 stdout。"""
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    try:
+        os.makedirs(WATCH_LOG_DIR, exist_ok=True)
+        path = os.path.join(WATCH_LOG_DIR, f"watchdog_{datetime.now().strftime('%Y%m%d')}.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception as e:
+        print(f"[看门狗] 日志写入失败（忽略）：{e!r}", flush=True)
+
+
+def _feed_pids():
+    """用 PowerShell 检测 feed.py 进程，返回 PID 列表（可能为空）。
+
+    Windows 中文路径编码：subprocess 以 UTF-8 解码输出（errors=replace 兜底）。
+    排除 powershell 自身（$PID）与只含命令字符串的误匹配——只匹配 python 进程。
+    """
+    ps_cmd = ("Get-CimInstance Win32_Process | "
+              "Where-Object { $_.Name -match 'python' -and $_.CommandLine -match 'feed\\.py' "
+              "-and $_.ProcessId -ne $PID } | "
+              "Select-Object -ExpandProperty ProcessId")
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, timeout=30)
+        out = proc.stdout.decode("utf-8", errors="replace").strip()
+        if not out:
+            return []
+        return [int(line.strip()) for line in out.splitlines() if line.strip().isdigit()]
+    except Exception as e:
+        _watch_log(f"进程检测失败：{e!r}")
+        return []
+
+
+def _state_age():
+    """返回 fed_state.pt 距今秒数；不存在返回 None。"""
+    if not os.path.exists(FED_STATE):
+        return None
+    return time.time() - os.path.getmtime(FED_STATE)
+
+
+def _relaunch_feed():
+    """拉起 python feed.py --resume（独立新进程，不阻塞看门狗）。
+
+    日志重定向到 实验记录/喂养_watchdog_<时间戳>.log（.log 后缀可被日志轮转覆盖）。
+    """
+    os.makedirs(WATCH_LOG_DIR, exist_ok=True)
+    log_path = os.path.join(WATCH_LOG_DIR,
+                            f"喂养_watchdog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    try:
+        logf = open(log_path, "a", encoding="utf-8")
+    except OSError as e:
+        _watch_log(f"拉起日志文件打开失败：{e!r}")
+        logf = None
+    flags = 0
+    if os.name == "nt":
+        flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "feed.py", "--resume"],
+            cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT,
+            creationflags=flags,
+            stdin=subprocess.DEVNULL)
+        _watch_log(f"已拉起 feed.py（PID {proc.pid}），日志 → {os.path.basename(log_path)}")
+        return proc.pid
+    except Exception as e:
+        _watch_log(f"拉起 feed.py 失败：{e!r}")
+        return None
+
+
+def watch_loop(args):
+    """常驻看门狗主循环：检查存档新鲜度 + feed.py 进程存活，必要时自动拉起。"""
+    _watch_log("看门狗启动（--watch）："
+               f"interval={args.interval}s stale_after={args.stale_after}s "
+               f"max_restarts_per_hour={args.max_restarts_per_hour} "
+               f"dry_run={bool(getattr(args, 'dry_run', False))}")
+    launch_times = []          # 最近 1 小时拉起时间戳（防循环）
+    cooldown_until = 0.0       # 冷却截止时间戳（超过上限后 3600s 不拉起）
+    bootstrap_done = False     # 全新环境（无存档）首次拉起标记
+
+    while True:
+        now = time.time()
+        age = _state_age()
+        pids = _feed_pids()
+        alive = bool(pids)
+
+        if age is None:
+            # 存档不存在（全新环境）：首次拉起一次，之后以存档新鲜度为准。
+            if not bootstrap_done and not getattr(args, "dry_run", False):
+                _watch_log("存档不存在（全新环境）→ 首次拉起 feed.py 初始化并创建存档")
+                _relaunch_feed()
+                launch_times.append(now)
+                bootstrap_done = True
+            elif not bootstrap_done:
+                _watch_log("存档不存在（全新环境）→ dry-run：本应首次拉起（已跳过）")
+                bootstrap_done = True
+            else:
+                _watch_log(f"存档仍不存在（距上次拉起已等待），不再反复拉起")
+            time.sleep(args.interval)
+            continue
+
+        age_s = int(age)
+        stale = age_s > args.stale_after
+        if alive:
+            _watch_log(f"检查：feed.py 运行中（PID {pids}），存档年龄 {age_s}s"
+                       f"{'（陈旧）' if stale else '（新鲜）'}")
+        else:
+            _watch_log(f"检查：feed.py 未运行，存档年龄 {age_s}s"
+                       f"{'（陈旧）' if stale else '（新鲜，无需拉起）'}")
+
+        if not alive and stale:
+            # 过滤超过 1 小时的时间戳（防循环窗口）
+            launch_times[:] = [t for t in launch_times if now - t < 3600]
+            if now < cooldown_until:
+                remain = int(cooldown_until - now)
+                _watch_log(f"冷却中（还剩 {remain}s），跳过拉起")
+            elif len(launch_times) >= args.max_restarts_per_hour:
+                cooldown_until = now + 3600
+                _watch_log(f"告警：1 小时内已拉起 {len(launch_times)} 次，"
+                           f"超过上限 {args.max_restarts_per_hour}，进入 3600s 冷却")
+            else:
+                if getattr(args, "dry_run", False):
+                    _watch_log("dry-run：本应拉起 feed.py（已跳过）")
+                else:
+                    _relaunch_feed()
+                    launch_times.append(time.time())
+        time.sleep(args.interval)
 
 
 def load_dolphin(dev=None, fed_state_path=None, birth_path=None,
@@ -139,9 +285,32 @@ def samples(d, prompts, n=60):
         print(f"  问：{q}\n  答：{resp.replace(chr(10), ' ')[:60]!r}")
 
 
-if __name__ == "__main__":
+def main_cli():
+    ap = argparse.ArgumentParser(description="查房 / 独立看门狗（ward）")
+    ap.add_argument("--watch", action="store_true",
+                    help="常驻看门狗模式：周期性检查 feed.py 进程与存档新鲜度，"
+                         "必要时自动拉起 feed.py（不破坏原查房功能）")
+    ap.add_argument("--interval", type=int, default=60,
+                    help="看门狗检查间隔秒数（默认 60）")
+    ap.add_argument("--stale-after", type=int, default=600,
+                    help="存档 mtime 超过该秒数视为陈旧（默认 600）")
+    ap.add_argument("--max-restarts-per-hour", type=int, default=5,
+                    help="1 小时内最大拉起次数，超过进入 3600s 冷却（默认 5）")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="只打印检查结果，不实际拉起 feed.py（验证用）")
+    args = ap.parse_args()
+
+    if args.watch:
+        watch_loop(args)
+        return
+
+    # —— 原查房功能（零参数运行，保持不变）——
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     d, info = load_dolphin(dev)
     report(d, "查房 · 蓝蓟智能当前状态", info)
     print("\n----- 生成输出示例（字节级模型，观察结构）-----")
     samples(d, ["心脏的功能", "感冒了怎么办", "烫伤后第一步", "人体最大的器官是"])
+
+
+if __name__ == "__main__":
+    main_cli()
