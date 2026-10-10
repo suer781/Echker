@@ -16,6 +16,7 @@ import shutil
 import sys
 import tempfile
 
+import pytest
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2683,7 +2684,13 @@ def t_cold_untouched():
     memory_cold.jsonl（正常冷层日志追加/重写）。把「外部进程正常写入」与
     「测试自身污染」区分开：追加方向 → 黄色警告（测试自身未污染，check 仍
     通过）；删减/重写或 probe.txt 变化 → 判红失败。
+
+    干净 clone / 生产资产不在场时（dolphin/memory_cold.jsonl 未生成）：
+    本测试无可验证对象，显式跳过而非判红——但文件一旦存在，必须继续验证
+    「生产资产零触碰」（before == after），检测能力保持不变。
     """
+    if not os.path.exists(_PROD_COLD):
+        pytest.skip("dolphin/memory_cold.jsonl not present (production asset absent)")
     ok, warnings, detail = verify_cold_quarantine()
     for w in warnings:
         print(f"  ⚠ {w}")
