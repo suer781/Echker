@@ -59,6 +59,18 @@ class MemoryStore:
             return
         self.cold_entries = []
         if os.path.exists(self.cold_path):
+            # 2026-10-04 修复：旧实现逐行 append，反刍把同一条反复逐出，
+            # 会导致同一 text 落盘成百上千行（生产实况 16316 行仅 153 条
+            # 唯一 text）。加载时按 text 去重：保留 hits 最大、created 最早
+            # 的一条（信息量最大且保留审计链），一次加载即修复旧档。
+            #
+            # 2026-10-11 根治：旧实现用 next() 线性扫描已加载列表做去重，
+            # 对 75 万行是 O(n²)（≈2.8 万亿次字符串比较），加载卡死数十分钟。
+            # 改为 dict 按 text 哈希去重，O(n)：遍历时 seen 累积唯一条目，
+            # 重复 text 合并字段，语义与旧实现完全一致（hits 取 max、created 取
+            # min、score 取 min），遍历结束后一次转列表。dict 保持插入顺序，
+            # 列表顺序仍为各唯一 text 首次出现的顺序，与旧实现一致。
+            seen = {}
             with open(self.cold_path, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -68,13 +80,9 @@ class MemoryStore:
                         en = MemoryEntry.from_json(json.loads(line))
                     except (json.JSONDecodeError, KeyError, ValueError):
                         continue
-                    # 2026-10-04 修复：旧实现逐行 append，反刍把同一条反复逐出，
-                    # 会导致同一 text 落盘成百上千行（生产实况 16316 行仅 153 条
-                    # 唯一 text）。加载时按 text 去重：保留 hits 最大、created 最早
-                    # 的一条（信息量最大且保留审计链），一次加载即修复旧档。
-                    existing = next((x for x in self.cold_entries if x.text == en.text), None)
+                    existing = seen.get(en.text)
                     if existing is None:
-                        self.cold_entries.append(en)
+                        seen[en.text] = en
                     else:
                         if en.hits > existing.hits:
                             existing.hits = en.hits
@@ -83,6 +91,7 @@ class MemoryStore:
                         # 保留更低的 score（逐出优先级 min 取低分，早逐出者应优先保留）
                         if en.score < existing.score:
                             existing.score = en.score
+            self.cold_entries = list(seen.values())
         self._cold_loaded = True
 
     def _ensure_cold(self):
