@@ -37,6 +37,9 @@ _DOMAINS = {
     # sleep_steps 相同（AUTOTUNE_EVERY=20 周期、±5%、回滚率高上调/稳定通过下调）。
     "sleep_steps_light": (8, 40),   # 浅睡：低强度快速巩固
     "sleep_steps_rem": (20, 80),    # REM：中等强度记忆巩固
+    # 判决带传导系数（2026-10-11）：K_MARGIN 真正接入反馈回路——域 [1.0,3.0]，
+    # 域本身是律（1.0=1SE 判决下限，3.0≈单侧 99.9% 上限，越界会破坏门控语义）。
+    "k_margin": (1.0, 3.0),
 }
 
 # 每多少个睡眠周期调整一次（慢环；测试周期数远小于此，永不触发）
@@ -66,9 +69,16 @@ class Autotune:
             "target_interval": 15, "sleep_steps": 120,
             # 三档睡眠（2026-10-11）：light/rem 独立步数域初值（域内）。
             "sleep_steps_light": 16, "sleep_steps_rem": 40,
+            # 判决带传导系数（2026-10-11）：初值 2.0 = probe.K_MARGIN（域内）。
+            "k_margin": 2.0,
         }
         self.cycle_count = 0   # 已运行周期数（Autotune 内部计数）
         self.last_adjust = {} # 上次调整记录（报告用）
+        # 门控历史（2026-10-11，K_MARGIN 调节用）：最近一个 AUTOTUNE_EVERY
+        # 窗口内的 (passed, gate_margin, gate_eps) 样本，只收集 deep/rem 模式
+        # （light 浅睡不参与惩罚/调节）。adjust 时消费后清空。不随档持久化
+        # （短期调节缓存，丢失无害，重启后从空窗口重新累积）。
+        self.gate_history = []
 
     # ---------- 持久化 ----------
 
@@ -130,9 +140,17 @@ class Autotune:
         since = getattr(d, "_since_sleep", 0)
         s["sleep_interval_ema"] = 0.9 * s["sleep_interval_ema"] + 0.1 * since
         # 回滚率
-        if report.get("passed") is not None:
+        # 2026-10-11：light 浅睡失败不惩罚——不更新 rollback_rate 信号
+        # （浅睡步数少、几乎不可能正改善，若计入会让浅睡被过度惩罚）。
+        mode = report.get("mode")
+        if report.get("passed") is not None and mode != "light":
             rb = 0.0 if report.get("passed") else 1.0
             s["rollback_rate"] = 0.9 * s["rollback_rate"] + 0.1 * rb
+        # K_MARGIN 调节历史（仅 deep/rem 模式；light 不参与门控尺度调节）
+        if mode != "light" and report.get("passed") is not None:
+            m, e = report.get("gate_margin"), report.get("gate_eps")
+            if m is not None and e is not None and e > 0:
+                self.gate_history.append((bool(report["passed"]), float(m), float(e)))
 
     # ---------- 慢速调整（每 AUTOTUNE_EVERY 周期一次） ----------
 
@@ -204,8 +222,31 @@ class Autotune:
             v = nudge("target_interval", -_STEP, *_DOMAINS["target_interval"])
             if v: adj["target_interval"] = ("down", round(v, 2), f"interval={s['sleep_interval_ema']:.1f}")
 
+        # lr 回升（2026-10-11）：连续高回滚 + lr 已退火到过低（如 1e-05 卡死）时，
+        # 优先小幅回升 lr，而不是只加 sleep_steps（避免步数无限上涨）。
+        # 这是 autotune 的慢速干预（每 AUTOTUNE_EVERY=20 周期一次）；Plasticity
+        # 仍控制 lr 的日常退火/回升，此处只在「高回滚 + lr 低于阈值」时兜底抬升。
+        lr_boosted = False
+        if d is not None and s["rollback_rate"] > 0.4:
+            plasticity = getattr(d, "plasticity", None)
+            lr_max = getattr(plasticity, "lr_max", 2e-4) if plasticity else 2e-4
+            lr_boost_threshold = 3e-5   # 低于此阈值视为退火过低（lr_min=1e-5 卡死）
+            lr_boost_cap = min(lr_max, 1e-4)  # 回升封顶：≤1e-4 且不越物理域上限
+            cur_lr = d.h[0].opt.param_groups[0]["lr"]
+            if cur_lr < lr_boost_threshold:
+                new_lr = min(cur_lr * 1.15, lr_boost_cap)
+                if new_lr > cur_lr + 1e-12:
+                    for hh in d.h:
+                        hh.opt.param_groups[0]["lr"] = new_lr
+                    adj["lr_recover"] = ("up", round(new_lr, 8),
+                                         f"rollback={s['rollback_rate']:.2f} lr过低回升")
+                    if report is not None:
+                        report["lr"] = new_lr  # 报告与实际 opt lr 保持一致
+                    lr_boosted = True
+
         # sleep_steps：回滚率高 → 训练不足，步数上调；长期稳定通过 → 步数下调（降低算力开销）
-        if s["rollback_rate"] > 0.4:
+        # 本轮已回升 lr 时不再上调步数（lr 优先；避免步数无限上涨）。
+        if s["rollback_rate"] > 0.4 and not lr_boosted:
             v = nudge("sleep_steps", _STEP, *_DOMAINS["sleep_steps"])
             if v: adj["sleep_steps"] = ("up", round(v, 2), f"rollback={s['rollback_rate']:.2f}")
         elif s["rollback_rate"] < 0.1:
@@ -214,7 +255,8 @@ class Autotune:
 
         # 三档睡眠（2026-10-11）：light/rem 步数域与 sleep_steps 同律调节但各自独立。
         # light 浅睡：回滚率高 → 上调（浅睡也不能无效空转）；稳定通过 → 下调（保持低强度）。
-        if s["rollback_rate"] > 0.4:
+        # 本轮已回升 lr 时不再上调（与 sleep_steps 同律）。
+        if s["rollback_rate"] > 0.4 and not lr_boosted:
             v = nudge("sleep_steps_light", _STEP, *_DOMAINS["sleep_steps_light"])
             if v: adj["sleep_steps_light"] = ("up", round(v, 2), f"rollback={s['rollback_rate']:.2f}")
         elif s["rollback_rate"] < 0.1:
@@ -222,12 +264,47 @@ class Autotune:
             if v: adj["sleep_steps_light"] = ("down", round(v, 2), f"rollback={s['rollback_rate']:.2f}")
 
         # rem：回滚率高 → 上调；稳定通过 → 下调（REM 是中等强度巩固，步数域更宽）。
-        if s["rollback_rate"] > 0.4:
+        # 本轮已回升 lr 时不再上调（与 sleep_steps 同律）。
+        if s["rollback_rate"] > 0.4 and not lr_boosted:
             v = nudge("sleep_steps_rem", _STEP, *_DOMAINS["sleep_steps_rem"])
             if v: adj["sleep_steps_rem"] = ("up", round(v, 2), f"rollback={s['rollback_rate']:.2f}")
         elif s["rollback_rate"] < 0.1:
             v = nudge("sleep_steps_rem", -_STEP, *_DOMAINS["sleep_steps_rem"])
             if v: adj["sleep_steps_rem"] = ("down", round(v, 2), f"rollback={s['rollback_rate']:.2f}")
+
+        # k_margin：判决带尺度自适应（2026-10-11，K_MARGIN 真正接入反馈回路）。
+        # 与 sleep_steps 的调节并行且独立——sleep_steps 管「训练量」，k_margin 管
+        # 「判决带尺度」，两者不冲突。
+        # - 高回滚（rollback_rate>0.6）且失败样本 margin 中位接近 ε（|margin-ε|<0.5ε，
+        #   说明是判决带边缘的抖动失败）→ 下调 k_margin（放宽带，域下限 1.0）。
+        # - 高通过（rollback_rate<0.15）且通过样本 margin 中位远大于 ε（>3ε，
+        #   说明改善幅度远超判决带，带过松）→ 上调 k_margin（收紧带，域上限 3.0）。
+        gh = self.gate_history
+        if gh:
+            fails = [(m, e) for (p, m, e) in gh if not p]
+            passes = [(m, e) for (p, m, e) in gh if p]
+            if s["rollback_rate"] > 0.6 and fails:
+                fm = sorted(m for m, _ in fails)
+                fe = sorted(e for _, e in fails)
+                med_m = fm[len(fm) // 2]
+                med_e = max(fe[len(fe) // 2], 1e-12)
+                if abs(med_m - med_e) < 0.5 * med_e:
+                    v = nudge("k_margin", -_STEP, *_DOMAINS["k_margin"])
+                    if v:
+                        adj["k_margin"] = ("down", round(v, 3),
+                                           f"边缘失败 margin≈ε rollback={s['rollback_rate']:.2f}")
+            elif s["rollback_rate"] < 0.15 and passes:
+                pm = sorted(m for m, _ in passes)
+                pe = sorted(e for _, e in passes)
+                med_m = pm[len(pm) // 2]
+                med_e = max(pe[len(pe) // 2], 1e-12)
+                if med_m > 3 * med_e:
+                    v = nudge("k_margin", _STEP, *_DOMAINS["k_margin"])
+                    if v:
+                        adj["k_margin"] = ("up", round(v, 3),
+                                           f"通过 margin>{3*med_e:.4f} rollback={s['rollback_rate']:.2f}")
+        # 消费门控历史（每 AUTOTUNE_EVERY 周期一次）
+        self.gate_history = []
 
         self.last_adjust = adj
         # 把调整后的值同步到 Dolphin 对象（dolphin.py 使用这些属性）。
@@ -248,6 +325,8 @@ class Autotune:
             # life.run_cycle 按 mode 读取对应属性。
             d.sleep_steps_light = int(round(t["sleep_steps_light"]))
             d.sleep_steps_rem = int(round(t["sleep_steps_rem"]))
+            # 判决带传导系数（2026-10-11）：同步回 Dolphin 属性，Dolphin.gate 消费。
+            d.k_margin = round(t["k_margin"], 4)
         return adj
 
     # ---------- 周期入口（由 run_cycle 调用） ----------

@@ -100,6 +100,10 @@ class Dolphin:
         # autotune.adjust() 会按与 sleep_steps 相同的调节律同步回这些属性。
         self.sleep_steps_light = 16
         self.sleep_steps_rem = 40
+        # 判决带传导系数（2026-10-11）：K_MARGIN 真正接入 autotune 慢速反馈——
+        # 默认 2.0 与 probe.K_MARGIN 一致，autotune 按体检通过率/边缘信号在
+        # [1.0,3.0] 域内慢速自调，Dolphin.gate 传此值给 gate_decision。
+        self.k_margin = 2.0
         # 值自成自动调参（2026-10-05）：note_k/dream_k/promote_hits/kd_alpha/kd_T/
         # target_interval/sleep_steps 的世界信号反馈控制器——这些量不再写死，
         # 由 Autotune 慢速积分自调（律固定，值自成）。随档持久化。
@@ -181,7 +185,8 @@ class Dolphin:
         """
         per_old = probe_eval(old_hem.model, self.probe_chunks, self.device)[1]
         per_new = probe_eval(new_hem.model, self.probe_chunks, self.device)[1]
-        return gate_decision(per_old, per_new)
+        # k_margin 由 autotune 慢速自调（域 [1.0,3.0]，随档持久化）；默认 2.0。
+        return gate_decision(per_old, per_new, k_margin=self.k_margin)
 
     # ---------- 体检门控就绪检查（G8 护航骨） ----------
 
@@ -371,6 +376,8 @@ class Dolphin:
                 # 三档睡眠（2026-10-11）：light/rem 独立自适应步数域随档透传。
                 "sleep_steps_light": self.sleep_steps_light,
                 "sleep_steps_rem": self.sleep_steps_rem,
+                # 判决带传导系数（2026-10-11）：随档透传，autotune 慢速自调。
+                "k_margin": self.k_margin,
                 # 训练债平衡（2026-10-11）：两半球累计训练步数随档透传。
                 "hemi_trained_steps": list(self.hemi_trained_steps),
                 # G7：created 入档——记忆逐出优先级 (score, created) 跨重启不漂移
@@ -469,6 +476,8 @@ class Dolphin:
         # 三档睡眠（2026-10-11）：light/rem 独立步数域，缺省=初值兼容旧档。
         self.sleep_steps_light = int(ck.get("sleep_steps_light", self.sleep_steps_light))
         self.sleep_steps_rem = int(ck.get("sleep_steps_rem", self.sleep_steps_rem))
+        # 判决带传导系数（2026-10-11）：缺省=初值 2.0，兼容旧档。
+        self.k_margin = float(ck.get("k_margin", self.k_margin))
         # 训练债平衡（2026-10-11）：两半球累计训练步数，缺省=[0,0] 兼容旧档。
         self.hemi_trained_steps = [int(x) for x in ck.get("hemi_trained_steps", [0, 0])]
         if "feed_cursor" in ck:  # G3：喂食游标透传恢复（语义归 feed.py 解释）

@@ -1720,6 +1720,11 @@ class LifeController:
         if passed:
             self.consec_rollback = 0
             return "swap"
+        # 2026-10-11：light 浅睡失败不惩罚——回滚仍执行，但不累加 consec_rollback
+        # （浅睡步数少、几乎不可能正改善，若累加会让浅睡连锁触发 ROLLBACK_GUARD/
+        # lr 退火/autotune 回滚率，被过度惩罚）。
+        if report.get("mode") == "light":
+            return "rollback"
         self.consec_rollback += 1
         return "rollback"
 
@@ -1962,7 +1967,10 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
         else:
             # M0 语义：同构半球，只 load_state_dict（动量跨周期保留）
             sleeping.model.load_state_dict(awake.model.state_dict())
-        dolphin.budget = max(0.25, dolphin.budget * 0.90)  # 值自成：收紧预算
+        # 值自成：收紧预算。2026-10-11：light 浅睡失败不惩罚——不收紧预算
+        # （避免浅睡反复失败把 budget 打到下限 0.25，破坏后续 deep/rem 的选拔）。
+        if mode != "light":
+            dolphin.budget = max(0.25, dolphin.budget * 0.90)
     else:  # keep：WITHERING 战役学生保留（规格 C），不回滚权重
         report["swapped"] = False
         dolphin.budget = max(0.25, dolphin.budget * 0.90)
@@ -1975,7 +1983,12 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     else:
         lr_center, lr_width = buf.band()  # 带通在周期末重取（M0 语义；buf 尚未清）
     cur_lr = sleeping.opt.param_groups[0]["lr"]
-    new_lr = dolphin.plasticity.next_lr(cur_lr, mean_surp, lr_center, lr_width, passed)
+    # 2026-10-11：light 浅睡失败不退火——保持当前 lr 不变（浅睡失败不惩罚）。
+    # deep/rem 失败仍走 Plasticity.next_lr 的体检否决退火（×anneal）。
+    if mode == "light" and not passed:
+        new_lr = cur_lr
+    else:
+        new_lr = dolphin.plasticity.next_lr(cur_lr, mean_surp, lr_center, lr_width, passed)
     if m4:
         if ctl.lr_window > 0:  # 规格 B：LR 重启 base×2，≤lr_max，窗口后交还
             new_lr = min(dolphin.plasticity.lr_base * SURGERY_LR_MULT,

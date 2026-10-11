@@ -12,8 +12,10 @@
 import torch
 
 EPS_FLOOR = 1e-6   # 律定：浮点守卫（完全同源的两模型逐块差恒为 0，必须判否），非判决带
-K_MARGIN = 2.0     # 律定（暂）：判决带传导系数——真实噪声尺度全部由数据估计（SE），
-                   # k 只定"几倍 SE 才算真改善"；单侧 ~97.5% 置信。M4 接入反馈回路时另行确定。
+K_MARGIN = 2.0     # 律定初值：判决带传导系数——真实噪声尺度全部由数据估计（SE），
+                   # k 只定"几倍 SE 才算真改善"；单侧 ~97.5% 置信。
+                   # M4 已接入反馈回路（autotune 慢速自调，域 [1.0,3.0]），
+                   # 此常量保持为默认初值，Dolphin.gate 经 self.k_margin 传入实际值。
 MIN_GATE_CHUNKS = 8  # 律定（2026-10-04 修复）：统计判决带的下限样本数。
                      # 旧实现 n<2 时 var=0 → SE=0 → eps=EPS_FLOOR → 任何 >1e-6 的
                      # "改善"即放行 = 判决带消失（退化成"只要变好就通过"）。
@@ -62,11 +64,14 @@ def evaluate(model, chunks, device):
     return sum(per) / len(per), per, len(per)
 
 
-def gate_decision(per_old, per_new, k=K_MARGIN):
+def gate_decision(per_old, per_new, k_margin=K_MARGIN):
     """律 L8 判决带（唯一实现，两条训练路径共用）。
 
     配对逐块差 d_i = old_i − new_i（正=改善）。passed ⟺ mean_new < mean_old − ε，
-    ε = max(EPS_FLOOR, k·SE)，SE = std(d)/√n 全部由本轮数据在线估计（值：自成）。
+    ε = max(EPS_FLOOR, k_margin·SE)，SE = std(d)/√n 全部由本轮数据在线估计（值：自成）。
+    k_margin 为判决带传导系数（默认 K_MARGIN=2.0；Dolphin.gate 传 self.k_margin，
+    autotune 慢速自调，域 [1.0,3.0]）。M4-E 冻结路径（sleep.run_cycle）走默认参数，
+    行为不变。
     返回 (passed, detail)；detail 直接并入睡眠报告。
     """
     n = min(len(per_old), len(per_new))
@@ -88,7 +93,7 @@ def gate_decision(per_old, per_new, k=K_MARGIN):
     mean_d = sum(d) / n
     var = sum((x - mean_d) ** 2 for x in d) / (n - 1) if n > 1 else 0.0
     se = (var ** 0.5) / (n ** 0.5)
-    eps = max(EPS_FLOOR, k * se)
+    eps = max(EPS_FLOOR, k_margin * se)
     passed = mean_d > eps
     detail = {
         "probe_old": round(sum(per_old[:n]) / n, 4),
