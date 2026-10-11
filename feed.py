@@ -426,7 +426,10 @@ class SleepTrainer(threading.Thread):
             else:
                 self.idle_cycles += 1  # 空选拔周期：反刍"消化完毕"的计数证据（G3）
             self.swaps += 1 if report.get("swapped") else 0
-            self.rollbacks += 0 if report.get("swapped") else 1
+            # swap-first 模式（2026-10-12）：swapped 表示周期内发生过上岗切换
+            # （先换班恒为 True）；训练成果是否上岗由 trained_swapped 区分——
+            # 通过体检后训练成果上岗（不计数回滚），失败/保留则计一次作废回滚。
+            self.rollbacks += 0 if report.get("trained_swapped") else 1
             log("训练线程", f"睡眠报告 {report}")
             self._timeline(report)  # 发育实验：结构化生长时间线 + 生长曲线打印
             if self.cycles % self.save_every == 0:

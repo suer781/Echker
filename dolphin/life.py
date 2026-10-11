@@ -1738,8 +1738,11 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     """睡眠周期全流程。
 
     feeding=False：与 sleep.run_cycle 逐字同语义（M0 等价性，tests 固定）；
-    feeding=True：与原 feed.trainer_cycle 同语义（做梦注入、摘除式快照、
-    learn_busy 等待、锁内换班、内部阈值反馈）。
+    feeding=True：先换班、后训练的双半球流水线（swap-first sleep mode）——
+    睡眠周期开始立即换班（上一轮就绪的睡脑立即上岗服务），旧醒脑下台成为
+    本轮训练对象；训练在后台继续（做梦注入、摘除式快照、learn_busy 等待、
+    内部阈值反馈保持），训练完体检通过再换班让训练成果上岗，失败则回滚。
+    任何时刻服务侧的醒脑都是「最近一次通过体检的半球」（律 L8 门控律不破）。
     M4 钩子仅在 d.life_enabled 且 life_ctl 在场时生效；NORMAL 空账本下全部
     为无训练副作用的观察者（等价性测试固定）。
 
@@ -1802,6 +1805,15 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
             sel, rest = buf.select(dolphin.budget)
             report["selected"], report["residue"] = len(sel), len(rest)
             buf.clear()  # 摘除：名单已处置，缓冲即刻腾空（主线程喂数不丢）
+            # —— 先换班（swap-first，2026-10-12）：睡眠周期开始立即换班 ——
+            # 当前 sleeping（上一轮就绪/已体检验证过的睡脑）→ 立即上岗服务；
+            # 当前 awake（旧醒脑）→ 下台成为本轮训练对象（后台继续训练）。
+            # 这样服务侧无需等待训练完成；训练成果体检通过后再换班上岗。
+            dolphin.swap()
+            report["swap_first"] = True
+        # 重新获取半球引用：新 awake = 上一轮就绪睡脑（立即上岗），
+        # 新 sleeping = 旧醒脑（下台，本轮后台训练对象）。
+        awake, sleeping = dolphin.awake(), dolphin.sleeping()
     else:
         report["candidates"] = len(buf.items)
         # 间隔重复：命中达阈值的记忆复活，以带通中心惊讶度重新入选拔
@@ -1936,11 +1948,16 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
 
     if directive == "swap":
         if feeding:
+            # 训练成果通过体检 → 第二次换班：训练后的新 sleeping 上岗，
+            # 原新 awake（先换班上位的上一轮成果）下台。服务侧始终是最近
+            # 一次通过体检的半球（律 L8 门控律不破）。
             with lock:
                 dolphin.swap()  # awake_idx 只在锁内翻（一次赋值）
+            report["swapped"] = True
+            report["trained_swapped"] = True
         else:
             dolphin.swap()  # 换班：睡脑转为醒脑，旧醒脑转为睡脑
-        report["swapped"] = True
+            report["swapped"] = True
         # 律 L10 快通道：新醒脑上损失最低的片段作为蒸馏笔记入记忆库（预支）。
         # 显式给 key：并列 NLL 时次级键用稳定 Experience.id（禁止随机）
         # light 浅睡：快通道笔记降级为只记 top-1（低强度快速巩固）。
@@ -1954,7 +1971,14 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
             dolphin.memory.add(e.data, nll, dolphin.cycle, "note")
         dolphin.budget = min(0.60, dolphin.budget * 1.05)  # 值自成：通过 → 预算放宽
     elif directive == "rollback":
-        report["swapped"] = False
+        if feeding:
+            # 先换班已发生（swap_first）：服务侧保持第一次 swap 上岗的半球
+            # （上一轮就绪成果），此处回滚训练后的新 sleeping 权重——训练
+            # 成果未上岗，但周期内确实发生过上岗切换 → swapped=True。
+            report["swapped"] = True
+            report["trained_swapped"] = False
+        else:
+            report["swapped"] = False
         if m4 and report.get("m4_rollback") == "grow":
             pass  # grow 回滚已在 post_exam 还原形态+装回醒脑权重
         elif m4 and report.get("m4_wither_abandoned"):
@@ -1972,7 +1996,12 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
         if mode != "light":
             dolphin.budget = max(0.25, dolphin.budget * 0.90)
     else:  # keep：WITHERING 战役学生保留（规格 C），不回滚权重
-        report["swapped"] = False
+        if feeding:
+            # 先换班已发生：服务侧保持第一次 swap 上岗的半球，学生保留续训。
+            report["swapped"] = True
+            report["trained_swapped"] = False
+        else:
+            report["swapped"] = False
         dolphin.budget = max(0.25, dolphin.budget * 0.90)
 
     # 值自成：学习率反馈（Plasticity 唯一控制器）+ 手术 LR 窗口 / 退役阶梯退火（不再触发）
@@ -2034,10 +2063,16 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     if verbose:
         body = report.get("body") or {}
         act = body.get("action", {})
+        # swap-first（feeding=True）：swapped 恒 True（周期内先换班已发生）；
+        # 训练成果是否上岗由 trained_swapped 区分。feeding=False 保持原语义。
+        if "trained_swapped" in report:
+            outcome = "✓ 换班" if report.get("trained_swapped") else "✗ 作废回滚"
+        else:
+            outcome = "✓ 换班" if report.get("swapped") else "✗ 作废回滚"
         print(f"[睡眠 {report['cycle']}] 选拔 {report['selected']} / 滞留 {report['residue']}"
               f"  体检 {report.get('probe_old')} → {report.get('probe_new')}"
               f"  lr={new_lr:.2e}"
               f"  体 {body.get('d_model', '?')}/{'%.2f' % body.get('util_gap', 0)}"
-              f"  {'✓ 换班' if report.get('swapped') else '✗ 作废回滚'}"
+              f"  {outcome}"
               f"{'  刀:' + str(act.get('kind')) if act.get('kind', 'hold') != 'hold' else ''}")
     return report
