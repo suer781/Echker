@@ -31,7 +31,11 @@ BAK_PATH = os.path.join(ROOT, "probes", "probe_medical.txt.bak")
 
 # 重叠抽查的训练粮来源表（与 dolphin.datasets.SOURCES 同一口径；candidates.py 复用）
 TRAIN_SOURCES = ["logiqa", "logiqa2", "cmath", "gsm8k", "distil",
-                 "coig", "synlogic", "metamath", "logiconbench"]
+                 "coig", "synlogic", "metamath", "logiconbench",
+                 "school_math_r1", "cmid", "math_ds_r1_10k", "basic_math_1m",
+                 "math_hard_zh", "mathinstruct_zh", "belle_math_zh",
+                 "openqa_reasoning_50k", "math23k", "ape210k", "gaokao_math",
+                 "xnli_zh", "clue", "logic_cot_zh"]
 
 
 def grain_stream(name):

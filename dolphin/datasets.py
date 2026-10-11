@@ -54,8 +54,106 @@ def _iter_jsonl(path):
                 yield json.loads(line)
 
 
+def _iter_stream_json(path):
+    """流式解析多个 JSON 对象（对象间无分隔拼接，如 Math23K 的 train.json）。
+
+    用 json.JSONDecoder.raw_decode 在累积缓冲上逐个解析完整对象；不完整片段
+    留在缓冲等待下一块。大文件不整读进内存。
+    """
+    dec = json.JSONDecoder()
+    with _open_text(path) as f:
+        buf = ""
+        for chunk in iter(lambda: f.read(1 << 20), ""):
+            buf += chunk
+            idx = 0
+            n = len(buf)
+            while True:
+                while idx < n and buf[idx].isspace():
+                    idx += 1
+                if idx >= n:
+                    break
+                try:
+                    obj, end = dec.raw_decode(buf, idx)
+                except json.JSONDecodeError:
+                    break  # 对象不完整，等下一块
+                yield obj
+                idx = end
+            buf = buf[idx:]
+        # 文件尾：解析剩余缓冲
+        idx = 0
+        while idx < len(buf):
+            while idx < len(buf) and buf[idx].isspace():
+                idx += 1
+            if idx >= len(buf):
+                break
+            obj, end = dec.raw_decode(buf, idx)
+            yield obj
+            idx = end
+
+
+def _iter_json_array(path):
+    """流式解析缩进 JSON 数组（对象跨行，元素间逗号分隔，如 belle-math-zh）。
+
+    标准数组整体 json.load 会把整个文件读进内存（126MB 可接受），但这里用
+    raw_decode 流式解析，避免一次性驻留全部对象字符串。
+    """
+    with _open_text(path) as f:
+        data = f.read()
+    dec = json.JSONDecoder()
+    idx = 0
+    n = len(data)
+    while idx < n and (data[idx].isspace() or data[idx] == "["):
+        idx += 1
+    while idx < n:
+        while idx < n and (data[idx].isspace() or data[idx] == ","):
+            idx += 1
+        if idx >= n or data[idx] == "]":
+            break
+        obj, end = dec.raw_decode(data, idx)
+        yield obj
+        idx = end
+
+
+def _iter_parquet(path, batch_size=256):
+    """流式读 parquet（pyarrow），逐批 yield pylist。未装 pyarrow 时返回空迭代。"""
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        print(f"[datasets] 未安装 pyarrow，parquet 源跳过（pip install pyarrow 后可用）")
+        return
+    pf = pq.ParquetFile(path)
+    for batch in pf.iter_batches(batch_size=batch_size):
+        for rec in batch.to_pylist():
+            yield rec
+
+
 def _clean(s):
     return " ".join(str(s or "").split())
+
+
+def _messages_qa(messages):
+    """把 messages 对话格式（[{role, content}, ...]）压成 (prompt, answer)。
+
+    user 内容为题面，assistant 内容为答案；多个 user/assistant 轮次按顺序拼接。
+    返回 (prompt, answer)；无法构成问答对时返回 (None, None)。
+    """
+    if not messages:
+        return None, None
+    user_parts, asst_parts = [], []
+    for m in messages:
+        role = (m.get("role") or "").strip().lower()
+        content = str(m.get("content") or "").strip()
+        if not content:
+            continue
+        if role in ("user", "human"):
+            user_parts.append(content)
+        elif role in ("assistant", "gpt", "model"):
+            asst_parts.append(content)
+    prompt = "\n".join(user_parts)
+    answer = "\n".join(asst_parts)
+    if not prompt or not answer:
+        return None, None
+    return prompt, answer
 
 
 # ---------- 逻辑推理 ----------
@@ -246,19 +344,452 @@ def read_synlogic():
                 yield {"prompt": q, "answer": a, "source": "synlogic"}
 
 
+# ---------- 第三批扩充：10_数学推理扩充（纯中文） ----------
+
+def read_school_math_r1():
+    """School-Math-R1-Distil-Chinese-220K：中文小学数学 R1 蒸馏。
+
+    keys 实测为 id/prompt/reasoning/response——response 是正式解答，reasoning 是思维链。
+    """
+    p = _norm(DATA_ROOT + "/10_数学推理扩充/"
+              "School-Math-R1-Distil-Chinese-220K/train.jsonl")
+    for rec in _iter_jsonl(p):
+        prompt = _clean(rec.get("prompt"))
+        reasoning = str(rec.get("reasoning") or "").strip()
+        response = str(rec.get("response") or "").strip()
+        if not prompt or not (reasoning or response):
+            continue
+        answer = reasoning + ("\n" + response if response else "")
+        yield {"prompt": prompt, "answer": answer, "source": "school_math_r1"}
+
+
+def read_cmid():
+    """CMID-Chinese_Math_Instruct_Dataset：中文数学指令集（初高中/竞赛，含 LaTeX）。
+
+    keys 实测为 id/query/response。
+    """
+    p = _norm(DATA_ROOT + "/10_数学推理扩充/"
+              "CMID-Chinese_Math_Instruct_Dataset/train.jsonl")
+    for rec in _iter_jsonl(p):
+        prompt = _clean(rec.get("query"))
+        answer = str(rec.get("response") or "").strip()
+        if prompt and answer:
+            yield {"prompt": prompt, "answer": answer, "source": "cmid"}
+
+
+def read_math_ds_r1_10k():
+    """Math-Chinese-DeepSeek-R1-10K：中文数学 DeepSeek-R1 风格推理。
+
+    keys 实测为 id/prompt/reasoning/response。
+    """
+    p = _norm(DATA_ROOT + "/10_数学推理扩充/"
+              "Math-Chinese-DeepSeek-R1-10K/train.jsonl")
+    for rec in _iter_jsonl(p):
+        prompt = _clean(rec.get("prompt"))
+        reasoning = str(rec.get("reasoning") or "").strip()
+        response = str(rec.get("response") or "").strip()
+        if not prompt or not (reasoning or response):
+            continue
+        answer = reasoning + ("\n" + response if response else "")
+        yield {"prompt": prompt, "answer": answer, "source": "math_ds_r1_10k"}
+
+
+def read_basic_math_1m():
+    """Basic-Math-Chinese-1M：基础数学问答，逐行 JSON。
+
+    每行一个对象 {"text": "### Human: ...### Assistant: ..."}。
+    注意 llama2 许可证（商用受限，接入前已由语料白名单把关）。
+    """
+    p = _norm(DATA_ROOT + "/10_数学推理扩充/"
+              "Basic-Math-Chinese-1M/Basic-Math-Chinese-1M.json")
+    for rec in _iter_jsonl(p):
+        text = str(rec.get("text") or "")
+        marker = "### Assistant:"
+        i = text.find(marker)
+        if i < 0:
+            continue
+        prompt = text[:i].replace("### Human:", "").strip()
+        answer = text[i + len(marker):].strip()
+        if prompt and answer:
+            yield {"prompt": prompt, "answer": answer, "source": "basic_math_1m"}
+
+
+def read_math_hard_zh():
+    """MATH-Hard-Chinese：MATH 难题中文翻译（parquet，messages 对话格式）。"""
+    p = _norm(DATA_ROOT + "/10_数学推理扩充/"
+              "MATH-Hard-Chinese/math-hard-zh.parquet")
+    for rec in _iter_parquet(p):
+        prompt, answer = _messages_qa(rec.get("messages"))
+        if prompt and answer:
+            yield {"prompt": prompt, "answer": answer, "source": "math_hard_zh"}
+
+
+def read_mathinstruct_zh():
+    """MathInstruct-Chinese：MathInstruct 中文翻译版（parquet，messages 对话格式）。"""
+    p = _norm(DATA_ROOT + "/10_数学推理扩充/"
+              "MathInstruct-Chinese/mathinstruct-zh.parquet")
+    for rec in _iter_parquet(p):
+        prompt, answer = _messages_qa(rec.get("messages"))
+        if prompt and answer:
+            yield {"prompt": prompt, "answer": answer, "source": "mathinstruct_zh"}
+
+
+def read_belle_math_zh():
+    """belle-math-zh：中文数学指令（instruction/output）。
+
+    文件为流式 JSON 数组（对象跨行缩进），用 _iter_json_array 流式解析。
+    """
+    p = _norm(DATA_ROOT + "/10_数学推理扩充/"
+              "belle-math-zh/belle_math_zh.json")
+    for rec in _iter_json_array(p):
+        prompt = _clean(rec.get("instruction"))
+        extra = _clean(rec.get("input"))
+        if extra:
+            prompt += "\n" + extra
+        answer = str(rec.get("output") or "").strip()
+        if prompt and answer:
+            yield {"prompt": prompt, "answer": answer, "source": "belle_math_zh"}
+
+
+def read_openqa_reasoning_50k():
+    """Chinese-OpenQA-Reasoning-50K：中文开放域推理问答（非纯数学）。
+
+    keys 实测为 id/prompt/reasoning/content——content 是正式回答。
+    """
+    p = _norm(DATA_ROOT + "/10_数学推理扩充/"
+              "Chinese-OpenQA-Reasoning-50K/data.jsonl")
+    for rec in _iter_jsonl(p):
+        prompt = _clean(rec.get("prompt"))
+        reasoning = str(rec.get("reasoning") or "").strip()
+        content = str(rec.get("content") or "").strip()
+        if not prompt or not (reasoning or content):
+            continue
+        answer = reasoning + ("\n" + content if content else "")
+        yield {"prompt": prompt, "answer": answer, "source": "openqa_reasoning_50k"}
+
+
+def read_math23k():
+    """Math23K：中文数学应用题经典基准（train split）。
+
+    文件为流式 JSON 多对象无分隔拼接，需 JSONDecoder.raw_decode 流式解析。
+    字段：original_text / equation / ans。
+    """
+    p = _norm(DATA_ROOT + "/10_数学推理扩充/"
+              "Math23K/Math23k-main/math23k_train.json")
+    for rec in _iter_stream_json(p):
+        prompt = _clean(rec.get("original_text"))
+        ans = str(rec.get("ans") or "").strip()
+        equation = str(rec.get("equation") or "").strip()
+        if prompt and ans:
+            answer = ans + ("\n方程：" + equation if equation else "")
+            yield {"prompt": prompt, "answer": answer, "source": "math23k"}
+
+
+def read_ape210k():
+    """Ape210K：猿辅导 21 万中文小学应用题（parquet）。
+
+    必须用 question_chinese 列（question 列是英文）。答案取 result（数值/表达式），
+    附 equation 作为推导信息。
+    """
+    p = _norm(DATA_ROOT + "/10_数学推理扩充/"
+              "Ape210K/data/train-00000-of-00001-b9f022a8492442e4.parquet")
+    for rec in _iter_parquet(p):
+        prompt = _clean(rec.get("question_chinese"))
+        result = str(rec.get("result") or "").strip()
+        equation = str(rec.get("equation") or "").strip()
+        if prompt and result:
+            answer = result + ("\n方程：" + equation if equation else "")
+            yield {"prompt": prompt, "answer": answer, "source": "ape210k"}
+
+
+_GAOKAO_DIR = DATA_ROOT + "/10_数学推理扩充"
+
+
+def _norm_gaokao_key(text):
+    """高考题去重键：题面去所有空白后作为指纹（三份来源同源重叠）。"""
+    return "".join(str(text or "").split())
+
+
+def read_gaokao_math():
+    """高考数学（2010-2022）：合并 RUCAIBox / Gaokao-LLM / xDAN 三份同源来源，按题去重。
+
+    - RUCAIBox：jsonl（test 目录下的数学选择题，实为公开高考真题，非评测 split）
+    - Gaokao-LLM：json 的 example 数组
+    - xDAN：parquet（instruction/answer/output）
+    去重键 = 规范化题面文本（去空白）。答案优先用 xDAN 的解析（output），否则用 answer。
+    """
+    seen = {}
+
+    def put(prompt, answer):
+        if not prompt or not answer:
+            return
+        key = _norm_gaokao_key(prompt)
+        if key and key not in seen:
+            seen[key] = (prompt, answer)
+
+    # 1) RUCAIBox（jsonl）
+    for name in ("2010-2022_Math_I_MCQs.jsonl", "2010-2022_Math_II_MCQs.jsonl"):
+        p = _norm(_GAOKAO_DIR + "/GAOKAO-Bench_RUCAIBox/test/" + name)
+        for rec in _iter_jsonl(p):
+            prompt = _clean(rec.get("question"))
+            ans_parts = rec.get("answer")
+            if isinstance(ans_parts, list):
+                ans = "".join(str(a) for a in ans_parts)
+            else:
+                ans = str(ans_parts or "")
+            analysis = str(rec.get("analysis") or "").strip()
+            answer = ans + ("\n解析：" + analysis if analysis else "")
+            put(prompt, answer)
+
+    # 2) Gaokao-LLM（json 的 example 数组）
+    for name in ("2010-2022_Math_I_MCQs.json", "2010-2022_Math_II_MCQs.json",
+                "2010-2022_Math_I_Fill-in-the-Blank.json",
+                "2010-2022_Math_I_Open-ended_Questions.json"):
+        p = _norm(_GAOKAO_DIR + "/Gaokao-LLM-data_math/src/高考数据集/" + name)
+        with _open_text(p) as f:
+            data = json.load(f)
+        for rec in data.get("example") or []:
+            prompt = _clean(rec.get("question"))
+            ans_parts = rec.get("answer")
+            if isinstance(ans_parts, list):
+                ans = "".join(str(a) for a in ans_parts)
+            else:
+                ans = str(ans_parts or "")
+            analysis = str(rec.get("analysis") or "").strip()
+            answer = ans + ("\n解析：" + analysis if analysis else "")
+            put(prompt, answer)
+
+    # 3) xDAN（parquet，带 output 解析）
+    p = _norm(_GAOKAO_DIR + "/GAOKAO_2010_to_2022_xDAN/train.parquet")
+    for rec in _iter_parquet(p):
+        prompt = _clean(rec.get("instruction"))
+        ans = str(rec.get("answer") or "").strip()
+        output = str(rec.get("output") or "").strip()
+        answer = ans + ("\n解析：" + output if output else "")
+        put(prompt, answer)
+
+    for prompt, answer in seen.values():
+        yield {"prompt": prompt, "answer": answer, "source": "gaokao_math"}
+
+
+# ---------- 第三批扩充：11_逻辑推理扩充（纯中文） ----------
+
+def read_xnli_zh():
+    """XNLI（zh）：中文自然语言推理三分类（train split）。
+
+    label 0=entailment / 1=neutral / 2=contradiction。
+    转成「前提 + 假设 → 判断关系」的自然语言推理问答。
+    """
+    labels = ("蕴含", "中立", "矛盾")
+    p = _norm(DATA_ROOT + "/11_逻辑推理扩充/"
+              "XNLI-zh/train-00000-of-00001.parquet")
+    for rec in _iter_parquet(p):
+        premise = _clean(rec.get("premise"))
+        hypothesis = _clean(rec.get("hypothesis"))
+        label = int(rec.get("label", -1))
+        if not premise or not hypothesis or not 0 <= label <= 2:
+            continue
+        prompt = f"前提：{premise}\n假设：{hypothesis}\n问：假设与前提是什么关系？"
+        yield {"prompt": prompt, "answer": labels[label], "source": "xnli_zh"}
+
+
+_CLUE_BASE = DATA_ROOT + "/11_逻辑推理扩充/CLUE"
+
+# tnews 15 类中文类别名（按 parquet label 索引 0-14 排列，对应原始类别 ID 100-116）
+_TNEWS_LABELS = ["民生故事", "文化", "娱乐", "体育", "财经", "房产", "汽车",
+                "教育", "科技", "军事", "旅游", "国际", "股票", "农业", "游戏"]
+
+
+def _clue_nli(s1, s2, label):
+    """CMNLI/OCNLI：三分类 NLI → 自然语言推理问答。
+
+    注意：CLUE 的 cmnli/ocnli 的 label 编码与 XNLI 不同（0=neutral / 1=entailment /
+    2=contradiction，见 parquet huggingface metadata 的 label.names），
+    与 XNLI 的 0=entailment 相反，不能混用。
+    """
+    names = ("中立", "蕴含", "矛盾")
+    if not s1 or not s2 or not 0 <= int(label) <= 2:
+        return None
+    prompt = f"前提：{_clean(s1)}\n假设：{_clean(s2)}\n问：假设与前提是什么关系？"
+    return {"prompt": prompt, "answer": names[int(label)]}
+
+
+def _clue_afqmc(s1, s2, label):
+    """AFQMC：语义相似二分类（0=不同义 1=同义）。"""
+    if not s1 or not s2:
+        return None
+    prompt = f"句子1：{_clean(s1)}\n句子2：{_clean(s2)}\n问：这两句话意思是否相同？"
+    return {"prompt": prompt, "answer": "相同" if int(label) == 1 else "不同"}
+
+
+def _clue_csl(abst, keywords, label):
+    """CSL：关键词是否与摘要匹配（0=不匹配 1=匹配）。"""
+    if not abst:
+        return None
+    prompt = f"摘要：{_clean(abst)}\n关键词：{'、'.join(str(k) for k in (keywords or []))}\n问：这些关键词是否与摘要匹配？"
+    return {"prompt": prompt, "answer": "匹配" if int(label) == 1 else "不匹配"}
+
+
+def _clue_wsc(text, target, label):
+    """CLUEWSC2020：指代消解。
+
+    parquet 的 label 列是整数索引（0=true / 1=false，见 label.names），
+    不能直接用字符串 'true'/'false' 比较。
+    """
+    if not text or not target:
+        return None
+    span1 = _clean(target.get("span1_text"))
+    span2 = _clean(target.get("span2_text"))
+    if not span1 or not span2:
+        return None
+    prompt = f"文本：{_clean(text)}\n问：\"{span2}\" 是否指代 \"{span1}\"？"
+    return {"prompt": prompt, "answer": "是" if int(label) == 0 else "否"}
+
+
+def _clue_c3(rec):
+    """C3：对话阅读理解选择题。context 为多轮对话列表，choice 为 4 个选项。"""
+    ctx = "\n".join(str(c) for c in (rec.get("context") or []))
+    q = _clean(rec.get("question"))
+    choices = [str(c) for c in (rec.get("choice") or [])]
+    ans = _clean(rec.get("answer"))
+    if not ctx or not q or len(choices) != 4 or not ans:
+        return None
+    letter = "ABCD"[choices.index(ans)] if ans in choices else ""
+    prompt = f"对话：{ctx}\n问题：{q}\n选项：\n" + \
+        "\n".join(f"{'ABCD'[i]}. {c}" for i, c in enumerate(choices))
+    answer = (letter + ". " if letter else "") + ans
+    return {"prompt": prompt, "answer": answer}
+
+
+def _clue_chid(rec):
+    """CHID：成语完形填空。content 含 #idiomNNNNNN# 占位符，candidates 为候选成语。"""
+    content = "\n".join(str(c) for c in (rec.get("content") or []))
+    candidates = [str(c) for c in (rec.get("candidates") or [])]
+    answers = rec.get("answers") or {}
+    ans_texts = [str(t) for t in (answers.get("text") or [])]
+    if not content or not candidates or not ans_texts:
+        return None
+    prompt = f"文本：{content}\n候选成语：{('；'.join(candidates))}\n问：请为每个空缺填入正确的成语。"
+    return {"prompt": prompt, "answer": "；".join(ans_texts)}
+
+
+def _clue_rc(rec):
+    """DRCD/CMRC2018：抽取式阅读理解问答。"""
+    ctx = _clean(rec.get("context"))
+    q = _clean(rec.get("question"))
+    ans = (rec.get("answers") or {}).get("text") or []
+    if not ctx or not q or not ans:
+        return None
+    prompt = f"阅读以下内容：\n{ctx}\n问题：{q}"
+    return {"prompt": prompt, "answer": _clean(ans[0])}
+
+
+def _clue_tnews(rec):
+    """TNEWS：今日头条新闻 15 类分类。
+
+    parquet 的 label 列是整数索引 0-14（对应原始类别 ID 100-116），
+    用 _TNEWS_LABELS 按索引取中文类别名。
+    """
+    sentence = _clean(rec.get("sentence"))
+    label = int(rec.get("label", -1))
+    if not sentence or not 0 <= label < len(_TNEWS_LABELS):
+        return None
+    prompt = f"新闻：{sentence}\n问：这段新闻属于哪个类别？"
+    return {"prompt": prompt, "answer": _TNEWS_LABELS[label]}
+
+
+def _clue_iflytek(rec):
+    """IFLYTEK：App 描述 119 类分类。
+
+    说明：parquet 仅保留 label 整数 ID（0-118），官方中文类别名未随文件提供，
+    此处答案用「类别ID：N」的降级形式；待取得官方 labels.json 后可升级为中文名。
+    """
+    sentence = _clean(rec.get("sentence"))
+    label = int(rec.get("label", -1))
+    if not sentence or label < 0:
+        return None
+    prompt = f"应用描述：{sentence}\n问：这段描述属于哪类应用？"
+    return {"prompt": prompt, "answer": f"类别ID：{label}"}
+
+
+def read_clue():
+    """CLUE 全量 12 任务（只用 train split；test/validation 是评测 split，禁止进入训练）。
+
+    各任务转成中文推理/问答文本：CMNLI/OCNLI（NLI 三分类）、AFQMC（语义相似）、
+    CSL（关键词匹配）、CLUEWSC2020（指代消解）、C3/DRCD/CMRC（阅读理解）、
+    CHID（成语完形填空）、TNEWS（新闻分类）、IFLYTEK（应用分类）。
+    """
+    handlers = {
+        "cmnli": lambda rec: _clue_nli(rec.get("sentence1"), rec.get("sentence2"), rec.get("label")),
+        "ocnli": lambda rec: _clue_nli(rec.get("sentence1"), rec.get("sentence2"), rec.get("label")),
+        "afqmc": lambda rec: _clue_afqmc(rec.get("sentence1"), rec.get("sentence2"), rec.get("label")),
+        "csl": lambda rec: _clue_csl(rec.get("abst"), rec.get("keyword"), rec.get("label")),
+        "cluewsc2020": lambda rec: _clue_wsc(rec.get("text"), rec.get("target"), rec.get("label")),
+        "c3": _clue_c3,
+        "chid": _clue_chid,
+        "drcd": _clue_rc,
+        "cmrc2018": _clue_rc,
+        "tnews": _clue_tnews,
+        "iflytek": _clue_iflytek,
+    }
+    for sub, handler in handlers.items():
+        p = _norm(_CLUE_BASE + "/" + sub + "/train-00000-of-00001.parquet")
+        for rec in _iter_parquet(p):
+            out = handler(rec)
+            if out:
+                out["source"] = "clue"
+                yield out
+
+
+def read_logic_cot_zh():
+    """logic_reasoning_cot_zh：中文逻辑推理 CoT（NemoSA，97 条）。
+
+    keys 实测为 Question/Response/Complex_CoT。
+    """
+    p = _norm(DATA_ROOT + "/11_逻辑推理扩充/"
+              "logic_reasoning_cot_zh/all_details.json")
+    with _open_text(p) as f:
+        data = json.load(f)
+    for rec in data:
+        prompt = _clean(rec.get("Question"))
+        response = str(rec.get("Response") or "").strip()
+        cot = str(rec.get("Complex_CoT") or "").strip()
+        if not prompt or not (response or cot):
+            continue
+        answer = response + ("\n" + cot if cot else "")
+        yield {"prompt": prompt, "answer": answer, "source": "logic_cot_zh"}
+
+
 # ---------- 统一序列化 ----------
 
 SOURCES = ["logiqa", "logiqa2", "cmath", "gsm8k", "distil",
-           "coig", "synlogic", "metamath", "logiconbench"]
+           "coig", "synlogic", "metamath", "logiconbench",
+           "school_math_r1", "cmid", "math_ds_r1_10k", "basic_math_1m",
+           "math_hard_zh", "mathinstruct_zh", "belle_math_zh",
+           "openqa_reasoning_50k", "math23k", "ape210k", "gaokao_math",
+           "xnli_zh", "clue", "logic_cot_zh"]
 
-# 质量排序的默认喂食顺序（logiconbench 默认不启用）
-DEFAULT_ORDER = ["logiqa", "cmath", "gsm8k", "distil", "coig", "synlogic", "metamath"]
+# 质量排序的默认喂食顺序（logiconbench 默认不启用；扩充源按数学→逻辑次序追加）
+DEFAULT_ORDER = ["logiqa", "cmath", "gsm8k", "distil", "coig", "synlogic",
+                 "metamath", "school_math_r1", "cmid", "math_ds_r1_10k",
+                 "basic_math_1m", "math_hard_zh", "mathinstruct_zh",
+                 "belle_math_zh", "openqa_reasoning_50k", "math23k",
+                 "ape210k", "gaokao_math", "xnli_zh", "clue", "logic_cot_zh"]
 
 _READERS = {
     "logiqa": read_logiqa, "logiqa2": read_logiqa2, "cmath": read_cmath,
     "gsm8k": read_gsm8k, "distil": read_distil, "coig": read_coig,
     "synlogic": read_synlogic, "metamath": read_metamath,
     "logiconbench": read_logiconbench,
+    "school_math_r1": read_school_math_r1, "cmid": read_cmid,
+    "math_ds_r1_10k": read_math_ds_r1_10k, "basic_math_1m": read_basic_math_1m,
+    "math_hard_zh": read_math_hard_zh, "mathinstruct_zh": read_mathinstruct_zh,
+    "belle_math_zh": read_belle_math_zh,
+    "openqa_reasoning_50k": read_openqa_reasoning_50k,
+    "math23k": read_math23k, "ape210k": read_ape210k,
+    "gaokao_math": read_gaokao_math,
+    "xnli_zh": read_xnli_zh, "clue": read_clue,
+    "logic_cot_zh": read_logic_cot_zh,
 }
 
 
