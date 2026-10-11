@@ -95,6 +95,11 @@ class Dolphin:
         self.kd_alpha = 0.5
         self.kd_T = 2.0
         self.sleep_steps = 120
+        # 三档睡眠模式（2026-10-11）：light 浅睡/rem REM 各自独立的自适应步数域，
+        # 默认值落在各自物理域内（light [8,40] 默认 16，rem [20,80] 默认 40）。
+        # autotune.adjust() 会按与 sleep_steps 相同的调节律同步回这些属性。
+        self.sleep_steps_light = 16
+        self.sleep_steps_rem = 40
         # 值自成自动调参（2026-10-05）：note_k/dream_k/promote_hits/kd_alpha/kd_T/
         # target_interval/sleep_steps 的世界信号反馈控制器——这些量不再写死，
         # 由 Autotune 慢速积分自调（律固定，值自成）。随档持久化。
@@ -113,6 +118,10 @@ class Dolphin:
         self.rng = secrets.SystemRandom()
         self.plasticity = Plasticity()  # 成年灵敏度：睡眠学习率的唯一控制器
         self.cycle = 0
+        # 训练债平衡（2026-10-11）：两半球各自累计实际训练步数，用于判定
+        # 睡眠模式时识别"欠训侧"，优先安排 light 浅睡快速训练并换班以缩小差距。
+        # 换班/回滚后不变——只累加实际训练过的那个半球（sleeping_idx）。
+        self.hemi_trained_steps = [0, 0]
         self._since_sleep = 0
         # 2026-10-06 修复：上次睡眠的墙钟时间戳（None=冷启动/测试）。
         # 用于 sleep_debt 的真实时间债务度量——批量喂食下睡眠周期频繁触发，
@@ -359,6 +368,11 @@ class Dolphin:
                 "kd_alpha": self.kd_alpha,
                 "kd_T": self.kd_T,
                 "sleep_steps": self.sleep_steps,
+                # 三档睡眠（2026-10-11）：light/rem 独立自适应步数域随档透传。
+                "sleep_steps_light": self.sleep_steps_light,
+                "sleep_steps_rem": self.sleep_steps_rem,
+                # 训练债平衡（2026-10-11）：两半球累计训练步数随档透传。
+                "hemi_trained_steps": list(self.hemi_trained_steps),
                 # G7：created 入档——记忆逐出优先级 (score, created) 跨重启不漂移
                 "memory": [(e.text, e.score, e.hits, e.cycle, e.kind, e.created)
                            for e in self.memory.entries],
@@ -452,6 +466,11 @@ class Dolphin:
         self.kd_alpha = float(ck.get("kd_alpha", self.kd_alpha))
         self.kd_T = float(ck.get("kd_T", self.kd_T))
         self.sleep_steps = int(ck.get("sleep_steps", self.sleep_steps))
+        # 三档睡眠（2026-10-11）：light/rem 独立步数域，缺省=初值兼容旧档。
+        self.sleep_steps_light = int(ck.get("sleep_steps_light", self.sleep_steps_light))
+        self.sleep_steps_rem = int(ck.get("sleep_steps_rem", self.sleep_steps_rem))
+        # 训练债平衡（2026-10-11）：两半球累计训练步数，缺省=[0,0] 兼容旧档。
+        self.hemi_trained_steps = [int(x) for x in ck.get("hemi_trained_steps", [0, 0])]
         if "feed_cursor" in ck:  # G3：喂食游标透传恢复（语义归 feed.py 解释）
             self.feed_cursor = ck["feed_cursor"]
         if "buffer" in ck:  # v2 起经验缓冲随档恢复，换班季中断零丢失

@@ -110,6 +110,56 @@ def _is_log_filename(name):
     return any(low.endswith(ext) for ext in _LOG_EXTS)
 
 
+# 三档睡眠模式判定（2026-10-11）：返回 "deep" / "rem" / "light"。
+# deep：高压/结构手术/连续回滚等深度处理场景（= 现有全量行为）；
+# rem：中等压力、周期性 REM 插入、或记忆库有大量可做梦候选；
+# light：日常低压力（默认兜底），以及训练债差距大需平衡时优先浅睡快速训练。
+DEEP_PRESSURE_MULT = 1.8   # 压力 ≥ 阈值×1.8 → deep
+REM_PRESSURE_MULT = 1.2    # 压力 ≥ 阈值×1.2 → rem
+REM_CYCLE_PERIOD = 8       # 每第 8 个睡眠周期周期性插入一次 REM
+DEBT_GAP_MAX = 0.2         # 两半球训练步数差占比 > 0.2 视为训练债失衡
+MEM_DREAM_CANDIDATE_MIN = 50  # 记忆库条目数超过该值视为"大量可做梦候选"
+
+
+def decide_sleep_mode(d):
+    """根据当前 Dolphin 状态判定本次睡眠周期模式。
+
+    优先级：deep 硬条件 → 训练债平衡（light）→ rem 条件 → light 兜底。
+    """
+    pressure = d.buffer.pressure()
+    overflow = d.buffer.bytes > d.buffer.cap * 0.85
+    thr = getattr(d.buffer, "sleep_threshold", 4.0)
+    ctl = getattr(d, "life_ctl", None)
+    state = getattr(ctl, "state", None) if ctl is not None else None
+    consec_rollback = getattr(ctl, "consec_rollback", 0) if ctl is not None else 0
+    pending_surgery = bool(getattr(ctl, "plan", None) is not None) if ctl is not None else False
+    in_surgery_state = state in ("GROW_PLAN", "WITHER_PLAN", "WITHERING")
+
+    # —— deep 硬条件（深度处理场景）——
+    if pressure >= thr * DEEP_PRESSURE_MULT or overflow or in_surgery_state \
+            or consec_rollback >= 3 or pending_surgery:
+        return "deep"
+
+    # —— 训练债平衡：差距大且当前 sleeping 是欠训侧 → 优先 light 浅睡快速训练 ——
+    hemi = getattr(d, "hemi_trained_steps", [0, 0]) or [0, 0]
+    total = max(1, sum(hemi))
+    gap = abs(hemi[0] - hemi[1]) / total
+    sleeping_idx = 1 - d.awake_idx
+    if gap > DEBT_GAP_MAX and hemi[sleeping_idx] <= hemi[1 - sleeping_idx]:
+        return "light"
+
+    # —— rem 条件（中等强度记忆巩固）——
+    # 周期性 REM 插入：每第 8 个睡眠周期（cycle>0 时 cycle%8==0）插入一次。
+    if pressure >= thr * REM_PRESSURE_MULT \
+            or (getattr(d, "cycle", 0) > 0
+                and getattr(d, "cycle", 0) % REM_CYCLE_PERIOD == 0) \
+            or len(getattr(d.memory, "entries", [])) > MEM_DREAM_CANDIDATE_MIN:
+        return "rem"
+
+    # —— light 兜底（日常大多数睡眠是浅睡）——
+    return "light"
+
+
 def _log_candidates(log_dir):
     """列出日志目录下应参与轮转的日志文件（不含子目录、不含生产资产）。
 
@@ -353,7 +403,8 @@ class SleepTrainer(threading.Thread):
                 # M2 修复：autotune_steps=True 时传 None，让 run_cycle 从
                 # d.sleep_steps 读取 autotune 调好的步数（值自成）；否则走显式 steps。
                 run_steps = None if self.autotune_steps else self.steps
-                report = life_run_cycle(self.d, run_steps, feeding=True)
+                mode = decide_sleep_mode(self.d)
+                report = life_run_cycle(self.d, run_steps, feeding=True, mode=mode)
             except GateDisabled as e:  # G8：探测集缺失，拒绝开始睡眠（fail-fast，非静默回滚）
                 self.busy += time.monotonic() - t0
                 log("训练线程", f"门控不可用，拒绝开始睡眠（部署喂入继续，等 probe 恢复自动解禁）：{e}")

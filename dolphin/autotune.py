@@ -33,6 +33,10 @@ _DOMAINS = {
     "kd_T": (1.5, 3.0),        # 蒸馏温度：太低分布尖，太高软化过度
     "target_interval": (8, 40),  # 期望睡眠间隔（交互数）
     "sleep_steps": (40, 240),  # 每周期训练步数
+    # 三档睡眠（2026-10-11）：light/rem 各自独立的自适应步数域，调节律与
+    # sleep_steps 相同（AUTOTUNE_EVERY=20 周期、±5%、回滚率高上调/稳定通过下调）。
+    "sleep_steps_light": (8, 40),   # 浅睡：低强度快速巩固
+    "sleep_steps_rem": (20, 80),    # REM：中等强度记忆巩固
 }
 
 # 每多少个睡眠周期调整一次（慢环；测试周期数远小于此，永不触发）
@@ -60,6 +64,8 @@ class Autotune:
             "note_k": 5, "dream_k": 5, "promote_hits": 3,
             "kd_alpha": 0.5, "kd_T": 2.0,
             "target_interval": 15, "sleep_steps": 120,
+            # 三档睡眠（2026-10-11）：light/rem 独立步数域初值（域内）。
+            "sleep_steps_light": 16, "sleep_steps_rem": 40,
         }
         self.cycle_count = 0   # 已运行周期数（Autotune 内部计数）
         self.last_adjust = {} # 上次调整记录（报告用）
@@ -206,6 +212,23 @@ class Autotune:
             v = nudge("sleep_steps", -_STEP, *_DOMAINS["sleep_steps"])
             if v: adj["sleep_steps"] = ("down", round(v, 2), f"rollback={s['rollback_rate']:.2f}")
 
+        # 三档睡眠（2026-10-11）：light/rem 步数域与 sleep_steps 同律调节但各自独立。
+        # light 浅睡：回滚率高 → 上调（浅睡也不能无效空转）；稳定通过 → 下调（保持低强度）。
+        if s["rollback_rate"] > 0.4:
+            v = nudge("sleep_steps_light", _STEP, *_DOMAINS["sleep_steps_light"])
+            if v: adj["sleep_steps_light"] = ("up", round(v, 2), f"rollback={s['rollback_rate']:.2f}")
+        elif s["rollback_rate"] < 0.1:
+            v = nudge("sleep_steps_light", -_STEP, *_DOMAINS["sleep_steps_light"])
+            if v: adj["sleep_steps_light"] = ("down", round(v, 2), f"rollback={s['rollback_rate']:.2f}")
+
+        # rem：回滚率高 → 上调；稳定通过 → 下调（REM 是中等强度巩固，步数域更宽）。
+        if s["rollback_rate"] > 0.4:
+            v = nudge("sleep_steps_rem", _STEP, *_DOMAINS["sleep_steps_rem"])
+            if v: adj["sleep_steps_rem"] = ("up", round(v, 2), f"rollback={s['rollback_rate']:.2f}")
+        elif s["rollback_rate"] < 0.1:
+            v = nudge("sleep_steps_rem", -_STEP, *_DOMAINS["sleep_steps_rem"])
+            if v: adj["sleep_steps_rem"] = ("down", round(v, 2), f"rollback={s['rollback_rate']:.2f}")
+
         self.last_adjust = adj
         # 把调整后的值同步到 Dolphin 对象（dolphin.py 使用这些属性）。
         # d 可能为 None（单元测试/直调场景）：此时只维护 tunables 状态。
@@ -221,6 +244,10 @@ class Autotune:
             d.kd_alpha = round(t["kd_alpha"], 4)
             d.kd_T = round(t["kd_T"], 4)
             d.sleep_steps = int(round(t["sleep_steps"]))
+            # 三档睡眠（2026-10-11）：light/rem 步数域同步回 Dolphin 属性，
+            # life.run_cycle 按 mode 读取对应属性。
+            d.sleep_steps_light = int(round(t["sleep_steps_light"]))
+            d.sleep_steps_rem = int(round(t["sleep_steps_rem"]))
         return adj
 
     # ---------- 周期入口（由 run_cycle 调用） ----------

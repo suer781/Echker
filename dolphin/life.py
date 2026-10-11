@@ -623,11 +623,14 @@ class LifeController:
 
     # ---------- 恒温器：每周期入口 ----------
 
-    def thermo_cycle(self, d, report, v, stream, sel=None):
+    def thermo_cycle(self, d, report, v, stream, sel=None, observe_only=False):
         """连续结构恒温器每周期入口（rem_phase 调用）：观察 → 判决 → body 报告。
 
         战役中（非 NORMAL）只做观察与记账，不做新判决。每周期至多一次结构
         动作（判决在 NORMAL 且无 pending 计划时发生）。
+
+        observe_only=True（三档睡眠的 light/rem）：只做观察、记账与 body 报告，
+        不执行结构手术/判决动作——恒温器只观测不动刀。
         """
         self.supply_account(d, sel)
         # 成熟度（R2 修复）：原料从"平台期计数（margin<绝对 ε）"改为 margin
@@ -647,7 +650,11 @@ class LifeController:
         del self.dorm_hist[:-8]
 
         action = {"kind": "hold", "reason": "战役进行中（非 NORMAL，不做新判决）"}
-        if self.state == STATE_NORMAL and self.plan is None:
+        if observe_only:
+            # 三档睡眠 light/rem：恒温器只观察不动刀——不进入判决路径。
+            action = {"kind": "hold", "class": "观察模式（light/rem）",
+                      "reason": "只观察不动刀（observe_only）"}
+        elif self.state == STATE_NORMAL and self.plan is None:
             action = self._decide(d, report, v, stream, gaps, gap_bar)
         if action.get("kind") == "hold":
             self.no_action_streak += 1
@@ -1410,18 +1417,23 @@ class LifeController:
 
     # ---------- M4 钩子②：REM 样子相位（训练后、体检前） ----------
 
-    def rem_phase(self, d, report, stream, sel=None):
+    def rem_phase(self, d, report, stream, sel=None, mode="deep"):
         h = d.sleeping()
         v = self.vitals_for(d, h.name)
         # ① ReDo 回收（常规代谢，每周期；不占恒温器的"每周期至多一次结构动作"——
-        #    回收是代谢不是手术）
-        report["m4_redo"] = self._redo(d, h, v)
+        #    回收是代谢不是手术）。light 浅睡跳过 ReDo 回收（低强度快速巩固）。
+        if mode == "light":
+            report["m4_redo"] = {"recycled": {}, "dormant_frac": 0.0, "skipped": "light"}
+        else:
+            report["m4_redo"] = self._redo(d, h, v)
         # ② 凋零战役的软衰减分代（decay 模式的固定动作；born-again 模式无需衰减）
         if self.state == STATE_WITHERING and self.campaign.get("mode") == "decay":
             report["m4_decay"] = self._decay_generation(d, h, v)
         # ③ 连续结构恒温器（活性路径唯一判决者；2026-10-05 取代平台期阶梯——
         #    阶梯触发链数学不可达，见模块 docstring 诊断节）
-        self.thermo_cycle(d, report, v, stream, sel)
+        #    三档模式：deep 全量判决/手术；light/rem 只观察不动刀（observe_only）。
+        self.thermo_cycle(d, report, v, stream, sel,
+                          observe_only=(mode in ("light", "rem")))
         # （平台期阶梯 `_schedule` 已退役：方法体仅为 tests 固定的历史件保留，
         #   活性路径零调用——退役身份，不许再挂回。）
 
@@ -1716,7 +1728,8 @@ class LifeController:
 # 睡眠周期：唯一实现（M0 全语义 + feeding 线程安全语义 + M4 钩子）
 # ---------------------------------------------------------------------------
 
-def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feeding=False):
+def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feeding=False,
+              mode="deep"):
     """睡眠周期全流程。
 
     feeding=False：与 sleep.run_cycle 逐字同语义（M0 等价性，tests 固定）；
@@ -1729,14 +1742,32 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     调用方显式传参（测试路径）完全不变；未传参时（生产路径 feed.py/maybe_sleep）
     从 Dolphin 属性读取 autotune 调好的值（sleep_steps/kd_alpha/kd_T），实现
     "律固定、值自成"的完全自学习闭环——不再回落人工默认值/命令行参数。
+
+    三档睡眠模式（2026-10-11）：mode ∈ {"deep", "light", "rem"}。
+    - deep：现有完整行为（默认值，与 M0/M4 逐键一致——M4-E 等价性测试固定）。
+    - light：低强度快速巩固——独立步数域 [8,40]、KD 降频（每 4 步一次 KD）、
+      照常体检/换班、跳过 ReDo 回收、快通道笔记只记 top-1、恒温器只报告 body
+      不执行手术/判决、param_adaptive 不介入。
+    - rem：中等强度记忆巩固——独立步数域 [20,80]、KD 正常但 kd_alpha×0.8、
+      增强做梦注入（dream_k 取当前域上限或 +2）、照常体检/换班、恒温器只观察
+      不动刀、ReDo 正常、笔记正常。
     """
-    # M2 值自成覆盖：显式传参优先（测试兼容），否则读 Dolphin 属性（autotune 维护）。
+    report = {"cycle": dolphin.cycle, "mode": mode}
+    # M2 值自成覆盖：显式传参优先（测试兼容），否则按 mode 读 Dolphin 属性。
     if steps is None:
-        steps = getattr(dolphin, "sleep_steps", 40)
+        if mode == "light":
+            steps = getattr(dolphin, "sleep_steps_light", 16)
+        elif mode == "rem":
+            steps = getattr(dolphin, "sleep_steps_rem", 40)
+        else:
+            steps = getattr(dolphin, "sleep_steps", 40)
     if kd_alpha is None:
         kd_alpha = getattr(dolphin, "kd_alpha", 0.5)
     if kd_T is None:
         kd_T = getattr(dolphin, "kd_T", 2.0)
+    # rem：KD 正常但 kd_alpha × 0.8（中等强度蒸馏继承）。
+    if mode == "rem":
+        kd_alpha = kd_alpha * 0.8
     ctl = getattr(dolphin, "life_ctl", None)
     m4 = bool(ctl) and bool(getattr(dolphin, "life_enabled", True))
     # G8 fail-fast：探测集缺失时抛 GateDisabled 拒绝开睡（唯一入口不变）
@@ -1744,7 +1775,11 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     buf, rng, dev = dolphin.buffer, dolphin.rng, dolphin.device
     awake, sleeping = dolphin.awake(), dolphin.sleeping()
     lock = dolphin.feed_lock
-    report = {"cycle": dolphin.cycle}
+    # rem 增强做梦注入（2026-10-11）：dream_k 取当前域上限（8）或当前值+2，
+    # 取较小者——增强但不超过 autotune 物理域上限。
+    dream_k = getattr(dolphin, "dream_k", 5)
+    if mode == "rem":
+        dream_k = min(8, dream_k + 2)
 
     if feeding:
         # ① 锁内快照（毫秒级）：复活 + 做梦 + 选拔 + 摘除（原 trainer_cycle 语义；
@@ -1755,7 +1790,7 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
             for rb in dolphin.memory.resurrect():
                 buf.add(rb, surprise=center)
             queries = [e.data for e in buf.items[-8:]]
-            dreamed = dolphin.memory.dream(queries, k=dolphin.dream_k)
+            dreamed = dolphin.memory.dream(queries, k=dream_k)
             for en in dreamed:
                 buf.add(en.text.encode("utf-8", errors="replace"), surprise=center)
             report["dreamed"] = len(dreamed)
@@ -1842,7 +1877,7 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     ce_hist, kd_hist = [], []
     N = bt.numel()
     try:
-        for _ in range(steps):
+        for i in range(steps):
             s0 = rng.randrange(0, N - blk - 1)
             x = bt[s0:s0 + blk].unsqueeze(0)
             y = bt[s0 + 1:s0 + blk + 1].unsqueeze(0)
@@ -1850,10 +1885,15 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
                 t_logits, _ = awake.model(x)
             s_logits, _ = sleeping.model(x)
             ce = F.cross_entropy(s_logits.reshape(-1, dolphin.cfg.vocab), y.reshape(-1))
-            p_t = F.softmax(t_logits / kd_T, dim=-1)
-            kd = (kd_T ** 2) * F.kl_div(
-                F.log_softmax(s_logits / kd_T, dim=-1), p_t, reduction="batchmean")
-            loss = (1 - alpha) * ce + alpha * kd
+            # light 浅睡：KD 降频——每 4 步做一次 KD，其余步只 CE（低强度快速巩固）。
+            if mode == "light" and i % 4 != 0:
+                loss = ce
+                kd = torch.tensor(0.0, device=dev)
+            else:
+                p_t = F.softmax(t_logits / kd_T, dim=-1)
+                kd = (kd_T ** 2) * F.kl_div(
+                    F.log_softmax(s_logits / kd_T, dim=-1), p_t, reduction="batchmean")
+                loss = (1 - alpha) * ce + alpha * kd
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(sleeping.model.parameters(), 1.0)
@@ -1865,9 +1905,14 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
             vit.disable()
             vit.detach()
 
+    # 训练债平衡（2026-10-11）：只累加实际训练过的那个半球（sleeping_idx）。
+    # 换班/回滚后不变——hemi_trained_steps 只用于模式判定，不随 swap 平移。
+    sleeping_idx = 0 if sleeping is dolphin.h[0] else 1
+    dolphin.hemi_trained_steps[sleeping_idx] += steps
+
     # —— M4 钩子②：REM 样子相位（ReDo 回收 / 软衰减 / 连续结构恒温器）——
     if m4:
-        ctl.rem_phase(dolphin, report, stream, sel)
+        ctl.rem_phase(dolphin, report, stream, sel, mode=mode)
 
     # 体检（律 L8）：全卷逐块评分 + margin 判决带，判决唯一实现 Dolphin.gate
     passed, gate = dolphin.gate(awake, sleeping)
@@ -1893,12 +1938,14 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
         report["swapped"] = True
         # 律 L10 快通道：新醒脑上损失最低的片段作为蒸馏笔记入记忆库（预支）。
         # 显式给 key：并列 NLL 时次级键用稳定 Experience.id（禁止随机）
+        # light 浅睡：快通道笔记降级为只记 top-1（低强度快速巩固）。
         nlls = dolphin.awake().model.mean_nll_batch([e.data for _, e in sel], dev)
         ranked = sorted(
             zip(nlls, [e for _, e in sel]),
             key=lambda t: (t[0], t[1].id),
         )
-        for nll, e in ranked[: dolphin.note_k]:
+        note_k = 1 if mode == "light" else dolphin.note_k
+        for nll, e in ranked[: note_k]:
             dolphin.memory.add(e.data, nll, dolphin.cycle, "note")
         dolphin.budget = min(0.60, dolphin.budget * 1.05)  # 值自成：通过 → 预算放宽
     elif directive == "rollback":
@@ -1965,9 +2012,10 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
             report["m4_amygdala"] = adj
     # 参数自适应控制律（2026-10-06）：独立排计划控制器。生产默认开启
     # （param_adaptive_enabled=True）；测试通过 make_dolphin 工厂统一关闭，
-    # 确保参数自适应不在测试路径触发。
+    # 确保参数自适应不在测试路径触发。light 浅睡不介入（低强度快速巩固）。
     pa = getattr(dolphin, "param_adaptive", None)
-    if pa is not None and getattr(dolphin, "param_adaptive_enabled", False):
+    if pa is not None and getattr(dolphin, "param_adaptive_enabled", False) \
+            and mode != "light":
         pa.on_cycle(dolphin, report, None, report.get("util_gap", 0.0),
                     mem_ratio=None)
     if verbose:
