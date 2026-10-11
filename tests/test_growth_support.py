@@ -147,7 +147,7 @@ def t_candidates_parse():
     """真实候选流解析：与 build_logic_probe 同源规则，条数 > 0（O: 缺席则跳过）。"""
     need = [build_logic_probe.LLMEVAL_BASE, build_logic_probe.LLMEVAL_HARD,
             build_logic_probe.LOGIQA2_TRAIN,
-            os.path.join(build_logic_probe.LOGIQA1_DIR, "zh_test.txt"),
+            build_logic_probe.LOGIQA1_TEST,
             os.path.join(build_logic_probe.LOGIQA1_DIR, "zh_eval.txt"),
             build_logic_probe.CMATH_TEST, build_logic_probe.CMATH_DEV]
     if not all(os.path.exists(p) for p in need):

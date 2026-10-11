@@ -44,9 +44,10 @@ def grain_stream(name):
 DR = "O:/数据集"
 LLMEVAL_BASE = DR + "/02_LLMEval-Logic/LLMEval-Logic-main/bench/base/llmeval_logic_base.json"
 LLMEVAL_HARD = DR + "/02_LLMEval-Logic/LLMEval-Logic-main/bench/hard/llmeval_logic_hard.json"
-LOGIQA1_DIR = DR + "/01_LogiQA/LogiQA-1.0/LogiQA-dataset-master"
+LOGIQA1_DIR = DR + "/01_LogiQA/LogiQA-1.0/LogiQA-dataset-master"  # zh_eval.txt 仍在原目录
+LOGIQA1_TEST = "O:/评测集/LogiQA-1.0/LogiQA-1.0_zh_test.txt"  # zh_test.txt 已移入评测集
 LOGIQA2_TRAIN = DR + "/01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/train_zh.txt"
-CMATH_TEST = DR + "/03_数学推理/CMATH/cmath_test.jsonl"
+CMATH_TEST = "O:/评测集/CMATH/cmath_test.jsonl"  # 已移入评测集
 CMATH_DEV = DR + "/03_数学推理/CMATH/cmath_dev.jsonl"
 
 
@@ -89,8 +90,9 @@ def collect_candidates():
     # 先在内存里比对，撞题的丢弃，保证抽查能真零命中
     lq2_text = open(LOGIQA2_TRAIN, encoding="utf-8").read()
     n0 = len(items)
-    for name in ("zh_test.txt", "zh_eval.txt"):
-        for b in _read_logiqa1(os.path.join(LOGIQA1_DIR, name)):
+    # zh_test.txt 已移入 O:/评测集，zh_eval.txt 仍在原 LogiQA-1.0 目录
+    for path in (LOGIQA1_TEST, os.path.join(LOGIQA1_DIR, "zh_eval.txt")):
+        for b in _read_logiqa1(path):
             letter = b[0].strip().lower()
             gold = "abcd".find(letter)
             opts = b[3:7]
