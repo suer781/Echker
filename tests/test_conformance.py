@@ -1536,6 +1536,67 @@ def t_light_dream_sampling():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ==================== 2026-10-12 相对压力档位判定（压力与数据挂钩） ====================
+
+def _make_buf_with_surprise(d, sups):
+    """清空 d.buffer 并填入指定 surprise 序列的 Experience（直接构造，不跑模型）。"""
+    from dolphin.experience import Experience
+    d.buffer.items = []
+    d.buffer.bytes = 0
+    for i, s in enumerate(sups):
+        data = f"相对压力测试数据第{i}条，内容足够长以占缓冲。{i}".encode()
+        e = Experience(i, data, float(s))
+        d.buffer.items.append(e)
+        d.buffer.bytes += len(e.data)
+
+
+def t_rel_pressure_modes():
+    """绝对压力带档位判定（2026-10-12）：档位由数据惊讶度（绝对压力）驱动。
+
+    - 数据惊讶度在常态范围（≈5.54）→ light（浅睡默认，小修小补）
+    - 数据惊讶度显著偏高（≥6.0）→ deep（深睡巩固陌生知识）
+    - 数据惊讶度中等偏高（≥5.8）→ rem（中等强度巩固）
+    - 结构手术/连续回滚 → deep（真实硬条件，不受压力影响）
+    - 训练债失衡且欠训侧 → light（快速补训）
+    """
+    from dolphin.experience import Experience  # noqa: F401
+    from feed import decide_sleep_mode
+    from dolphin.dolphin import Dolphin  # noqa: F401
+
+    with _probe_fixture("dolphin_relp_") as probe:
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2, block_size=256),
+                         probe_path=probe, device="cpu")
+
+        # —— 场景1：常态压力（5.54）→ light ——
+        _make_buf_with_surprise(d, [5.54 + (i % 5 - 2) * 0.002 for i in range(80)])
+        mode = decide_sleep_mode(d)
+        check("REL 常态压力 → light", mode == "light", f"mode={mode}")
+
+        # —— 场景2：高压（6.2）→ deep ——
+        _make_buf_with_surprise(d, [6.20 + (i % 5 - 2) * 0.002 for i in range(80)])
+        mode = decide_sleep_mode(d)
+        check("REL 高压(6.2) → deep", mode == "deep", f"mode={mode}")
+
+        # —— 场景3：中等压力（5.9）→ rem ——
+        _make_buf_with_surprise(d, [5.90 + (i % 5 - 2) * 0.002 for i in range(80)])
+        mode = decide_sleep_mode(d)
+        check("REL 中等压力(5.9) → rem", mode == "rem", f"mode={mode}")
+
+        # —— 场景4：连续回滚硬条件 → deep（即使数据常态） ——
+        _make_buf_with_surprise(d, [5.54 + (i % 5) * 0.001 for i in range(80)])
+        d.life_ctl.consec_rollback = 3
+        mode = decide_sleep_mode(d)
+        check("REL 连续回滚≥3 → deep（硬条件）", mode == "deep", f"mode={mode}")
+        d.life_ctl.consec_rollback = 0
+
+        # —— 场景5：训练债失衡且 sleeping 侧欠训 → light ——
+        _make_buf_with_surprise(d, [5.54 + (i % 5) * 0.001 for i in range(80)])
+        d.hemi_trained_steps = [100, 50]  # 差距大
+        d.awake_idx = 1                   # sleeping=0 是欠训侧（50）
+        mode = decide_sleep_mode(d)
+        check("REL 训练债失衡且欠训侧 → light", mode == "light", f"mode={mode}")
+
+
 # ==================== 2026-10-04 M4 自生长/自凋零施工新增（交接 §6 规格 A-E） ====================
 
 
@@ -3055,6 +3116,7 @@ if __name__ == "__main__":
     t_g10_resurrect_cold_load()
     t_light_resurrect_sampling()  # 浅睡轻量复活（2026-10-12）
     t_light_dream_sampling()      # 浅睡轻量做梦（2026-10-12）
+    t_rel_pressure_modes()        # 相对压力档位判定（2026-10-12）
     t_m4_vitals()
     t_m4_dev_birth()
     t_m4_widen_exact()

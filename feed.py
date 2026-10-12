@@ -110,12 +110,23 @@ def _is_log_filename(name):
     return any(low.endswith(ext) for ext in _LOG_EXTS)
 
 
-# 三档睡眠模式判定（2026-10-11）：返回 "deep" / "rem" / "light"。
-# deep：高压/结构手术/连续回滚等深度处理场景（= 现有全量行为）；
-# rem：中等压力、周期性 REM 插入、或记忆库有大量可做梦候选；
-# light：日常低压力（默认兜底），以及训练债差距大需平衡时优先浅睡快速训练。
-DEEP_PRESSURE_MULT = 1.8   # 压力 ≥ 阈值×1.8 → deep
-REM_PRESSURE_MULT = 1.2    # 压力 ≥ 阈值×1.2 → rem
+# 三档睡眠模式判定（2026-10-11；2026-10-12 绝对压力带化）：
+# 返回 "deep" / "rem" / "light"。
+# deep：结构手术/连续回滚/缓冲溢出等真实硬条件，或数据惊讶度显著偏高
+#       （绝对压力 ≥ DEEP_ABS_PRESSURE）——深睡巩固真正陌生的知识；
+# rem：数据惊讶度中等偏高（绝对压力 ≥ REM_ABS_PRESSURE）、周期性 REM 插入、
+#       或记忆库有大量可做梦候选；
+# light：日常浅睡（数据惊讶度在常态范围=小修小补），以及训练债差距大需
+#        平衡时优先浅睡快速训练。
+# 为什么用绝对压力带而不用乘法阈值（2026-10-12）：原 deep 判定用
+# pressure ≥ sleep_threshold×1.8，而 sleep_threshold 被高速喂食反馈压到
+# 下限 1.0，deep 线 = 1.8，压力恒 5.4 → 永远 deep（实测 8543 次采样均值
+# 5.5453、档位 100% deep）。这违背「压力与数据挂钩」：当前数据惊讶度几乎
+# 恒定在模型读字成本 ln256≈5.545 附近，并没有真正的高压。改为绝对压力带后，
+# 只有数据惊讶度显著高于常态（≥DEEP_ABS_PRESSURE）才深睡，否则浅睡小修小补。
+# 真实硬条件（手术/回滚/溢出）不受任何阈值限制，保证深度处理场景不缺失。
+DEEP_ABS_PRESSURE = 6.0   # 绝对压力 ≥ 6.0（显著高于常态 5.545）→ deep
+REM_ABS_PRESSURE = 5.8    # 绝对压力 ≥ 5.8（中等偏离常态）→ rem
 REM_CYCLE_PERIOD = 8       # 每第 8 个睡眠周期周期性插入一次 REM
 DEBT_GAP_MAX = 0.2         # 两半球训练步数差占比 > 0.2 视为训练债失衡
 MEM_DREAM_CANDIDATE_MIN = 50  # 记忆库条目数超过该值视为"大量可做梦候选"
@@ -124,20 +135,24 @@ MEM_DREAM_CANDIDATE_MIN = 50  # 记忆库条目数超过该值视为"大量可�
 def decide_sleep_mode(d):
     """根据当前 Dolphin 状态判定本次睡眠周期模式。
 
-    优先级：deep 硬条件 → 训练债平衡（light）→ rem 条件 → light 兜底。
+    优先级：真实硬条件 → 数据驱动 deep（绝对高压）→ 训练债平衡（light）
+    → rem 条件 → light 兜底。
     """
-    pressure = d.buffer.pressure()
+    pressure = d.buffer.pressure()   # 绝对压力（数据惊讶度）
     overflow = d.buffer.bytes > d.buffer.cap * 0.85
-    thr = getattr(d.buffer, "sleep_threshold", 4.0)
     ctl = getattr(d, "life_ctl", None)
     state = getattr(ctl, "state", None) if ctl is not None else None
     consec_rollback = getattr(ctl, "consec_rollback", 0) if ctl is not None else 0
     pending_surgery = bool(getattr(ctl, "plan", None) is not None) if ctl is not None else False
     in_surgery_state = state in ("GROW_PLAN", "WITHER_PLAN", "WITHERING")
 
-    # —— deep 硬条件（深度处理场景）——
-    if pressure >= thr * DEEP_PRESSURE_MULT or overflow or in_surgery_state \
+    # —— deep 硬条件（真实深度处理场景，与数据无关，不设上限）——
+    if overflow or in_surgery_state \
             or consec_rollback >= 3 or pending_surgery:
+        return "deep"
+
+    # —— deep 数据驱动：数据惊讶度显著偏高 → 深睡巩固（压力与数据挂钩）——
+    if pressure >= DEEP_ABS_PRESSURE:
         return "deep"
 
     # —— 训练债平衡：差距大且当前 sleeping 是欠训侧 → 优先 light 浅睡快速训练 ——
@@ -150,13 +165,13 @@ def decide_sleep_mode(d):
 
     # —— rem 条件（中等强度记忆巩固）——
     # 周期性 REM 插入：每第 8 个睡眠周期（cycle>0 时 cycle%8==0）插入一次。
-    if pressure >= thr * REM_PRESSURE_MULT \
+    if pressure >= REM_ABS_PRESSURE \
             or (getattr(d, "cycle", 0) > 0
                 and getattr(d, "cycle", 0) % REM_CYCLE_PERIOD == 0) \
             or len(getattr(d.memory, "entries", [])) > MEM_DREAM_CANDIDATE_MIN:
         return "rem"
 
-    # —— light 兜底（日常大多数睡眠是浅睡）——
+    # —— light 兜底（日常大多数睡眠是浅睡：数据在常态范围，小修小补）——
     return "light"
 
 
