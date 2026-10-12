@@ -145,6 +145,9 @@ class Dolphin:
         # 人工只保留这个总开关，禁止干预手术的时机/位置/幅度（律 L11）。
         self.life_ctl = LifeController()
         self.life_enabled = True
+        # 学习停滞检测原料（2026-10-12）：最近 N 周期体检 margin 滚动窗。
+        # 由 run_cycle 在体检报告生成后追加；随档持久化，旧档兼容空列表。
+        self.last_margins = []
 
     def awake(self):
         return self.h[self.awake_idx]
@@ -413,6 +416,8 @@ class Dolphin:
                 # 杏仁核温度自动托管（2026-10-08）：温度/信号/调整周期随档，
                 # 重启后恢复上次的自动托管状态。
                 "amygdala": self.amygdala.to_state(),
+                # 学习停滞检测原料（2026-10-12）：margin 滚动窗随档透传。
+                "last_margins": list(self.last_margins),
                 # 参数自适应控制律（2026-10-06）：三段式下跌状态机随档。
                 "param_adaptive": self.param_adaptive.to_state(),
             }
@@ -498,6 +503,8 @@ class Dolphin:
         self.k_margin = float(ck.get("k_margin", self.k_margin))
         # 训练债平衡（2026-10-11）：两半球累计训练步数，缺省=[0,0] 兼容旧档。
         self.hemi_trained_steps = [int(x) for x in ck.get("hemi_trained_steps", [0, 0])]
+        # 学习停滞检测原料（2026-10-12）：旧档无此字段 → 空列表（兼容升级）。
+        self.last_margins = [float(x) for x in ck.get("last_margins", [])]
         if "feed_cursor" in ck:  # G3：喂食游标透传恢复（语义归 feed.py 解释）
             self.feed_cursor = ck["feed_cursor"]
         if "buffer" in ck:  # v2 起经验缓冲随档恢复，换班季中断零丢失

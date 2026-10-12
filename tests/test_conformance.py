@@ -2914,6 +2914,94 @@ def t_m4_thermostat():
               all(p in ("grow", "wither") for p in plans))
 
 
+def t_stall_grow():
+    """学习停滞强制生长（2026-10-12 用户定案：学不动就会长）。
+
+    _detect_learning_stall 用最近 STALL_WINDOW 周期 margin 均值 < STALL_MARGIN
+    判定整体学不动；_plan_stall_grow 在 ghost 双信号未确认时强制扩容——受
+    供给门/预算/显存/冷却/回滚守卫约束，选址最窄轴位，乘性生长律 e=1.0。
+    """
+    from dolphin.life import (STALL_GROW_EVERY, STALL_MARGIN, STALL_WINDOW,
+                              STATE_GROW_PLAN, LifeController)
+
+    with _probe_fixture("dolphin_stall_") as probe:
+        d = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=4,
+                                    block_size=256),
+                         probe_path=probe, device="cpu")
+        ctl = d.life_ctl
+        v = ctl.vitals_for(d, d.sleeping().name)
+
+        # ===== 场景 1：10 个 0.01 margin（< STALL_MARGIN）→ 检测到停滞 =====
+        d.last_margins = [0.01] * STALL_WINDOW
+        check("STALL 窗口内平均 margin < 阈值 → 检测到学习停滞",
+              ctl._detect_learning_stall(d) is True,
+              f"avg={sum(d.last_margins) / len(d.last_margins)}")
+
+        # ===== 场景 2：10 个 0.06 margin（健康）→ 不判定停滞 =====
+        d.last_margins = [0.06] * STALL_WINDOW
+        check("STALL 健康 margin（均值 ≥ 阈值）→ 不判定停滞",
+              ctl._detect_learning_stall(d) is False,
+              f"avg={sum(d.last_margins) / len(d.last_margins)}")
+
+        # ===== 场景 3：数据不足（仅 3 个）→ 不判定停滞 =====
+        d.last_margins = [0.01] * 3
+        check("STALL 数据不足（< 窗口）→ 不判定停滞",
+              ctl._detect_learning_stall(d) is False,
+              f"len={len(d.last_margins)}")
+
+        # ===== 场景 4：强制生长限频（距上次 < STALL_GROW_EVERY）→ hold =====
+        d.last_margins = [0.01] * STALL_WINDOW
+        ctl.last_stall_grow_cycle = d.cycle  # 当前周期刚强制生长过
+        # 预算放行，避免守卫④提前 hold 干扰限频断言
+        ctl.fresh_since_surgery = 10 ** 7
+        rep = {}
+        out = ctl._plan_stall_grow(d, rep, v, b"")
+        check("STALL 限频：距上次强制生长不足间隔 → hold（不排生长）",
+              out.get("kind") == "hold" and ctl.plan is None
+              and ctl.state != STATE_GROW_PLAN,
+              f"out={out}")
+        ctl.last_stall_grow_cycle = None
+
+        # ===== 场景 5：正常场景 → 返回 grow 计划 =====
+        d.cycle += 1
+        ctl.grown_since_surgery = 0
+        ctl.fresh_since_surgery = 10 ** 7
+        out = ctl._plan_stall_grow(d, rep, v, b"")
+        check("STALL 学不动 → 强制生长计划（kind=grow，state=GROW_PLAN）",
+              out.get("kind") == "grow"
+              and ctl.plan is not None and ctl.plan["kind"] == "grow"
+              and ctl.state == STATE_GROW_PLAN
+              and ctl.plan["source"] == "stall_grow",
+              f"out={out} plan={ctl.plan}")
+        check("STALL 生长计划 axis 合法（mlp/attn_v）且 delta ≥ 8",
+              ctl.plan["axis"] in ("mlp", "attn_v")
+              and ctl.plan["delta"] >= 8,
+              f"axis={ctl.plan['axis']} delta={ctl.plan['delta']}")
+        check("STALL 生长计划已记账（site_last_action 记录 grow 动作）",
+              out["site"] in ctl.site_last_action
+              and ctl.site_last_action[out["site"]][1] == "grow",
+              f"site={out['site']} site_last_action={ctl.site_last_action}")
+
+        # ===== 场景 6：守卫④预算不足 → hold（强制生长不绕过守卫） =====
+        d.cycle += 1
+        ctl.plan = None
+        ctl.state = "NORMAL"
+        ctl.grown_since_surgery = 0
+        ctl.fresh_since_surgery = 0  # 无新鲜证据
+        ctl.last_stall_grow_cycle = None  # 重置限频，让守卫④成为唯一拦截
+        out = ctl._plan_stall_grow(d, rep, v, b"")
+        check("STALL 守卫④预算不足 → hold（强制生长不绕过守卫）",
+              out.get("kind") == "hold" and ctl.plan is None
+              and "预算" in out.get("class", ""),
+              f"out={out}")
+
+        # ===== 场景 7：last_stall_grow_cycle 持久化回环 =====
+        st = ctl.to_state()
+        ctl2 = LifeController().from_state(st)
+        check("STALL last_stall_grow_cycle 随档持久化",
+              ctl2.last_stall_grow_cycle == ctl.last_stall_grow_cycle)
+
+
 # ============ 冷层隔离总闸自检（本身也是断言） ============
 
 
@@ -3256,6 +3344,7 @@ if __name__ == "__main__":
     t_m4_anchor_persistence()
     t_m4_state_machine()
     t_m4_thermostat()
+    t_stall_grow()            # 学习停滞强制生长（2026-10-12）
     t_stdin_chat()        # 无模式 stdin 对话通道（2026-10-07）
     t_stdin_chat_loop()   # stdin 对话通道线程循环（EOF/stop_flag 退出）
     t_amygdala()          # 杏仁核自动温度调节（2026-10-08）

@@ -223,6 +223,9 @@ LAMBDA_G = 0.04
 LAMBDA_MIN = 0.01
 LAMBDA_MAX = 0.08
 GROW_DELTA_CAP_FRAC = 0.10
+STALL_WINDOW = 10      # 【值自成】学习停滞检测窗口：看最近 N 周期 margin
+STALL_MARGIN = 0.02   # 【值自成】停滞阈值：窗口内平均 margin < 此值视为学不动
+STALL_GROW_EVERY = 6  # 【值自成】强制生长最小间隔（周期），防每周期都长
 CONFIRM_M = 2
 H_SHRINK = 0.06
 GAP_BORN = 0.45
@@ -363,6 +366,7 @@ class LifeController:
         self.grown_since_surgery = 0        # 上次结构手术以来生长通道数（守卫④）
         self.last_shrink_cycle = None       # 上次收缩计划周期（限频③）
         self.last_born_again = None         # 上次 born-again 计划周期（连环缩阻尼）
+        self.last_stall_grow_cycle = None   # 上次学习停滞强制生长计划周期（限频）
         self.no_action_streak = 0           # 连续"持有"周期数（死区自校准）
         self.pending_capture = None         # 捕获对账单 {due_cycle, keys, hname}
         self._seen = set()                  # 运行时指纹集（自 seen_hashes 重建）
@@ -395,6 +399,7 @@ class LifeController:
                 "grown_since_surgery": self.grown_since_surgery,
                 "last_shrink_cycle": self.last_shrink_cycle,
                 "last_born_again": self.last_born_again,
+                "last_stall_grow_cycle": self.last_stall_grow_cycle,
                 "no_action_streak": self.no_action_streak,
                 "pending_capture": self.pending_capture,
                 "mem_pressure_hist": self.mem_pressure_hist,
@@ -434,6 +439,7 @@ class LifeController:
         self.grown_since_surgery = int(st.get("grown_since_surgery", 0))
         self.last_shrink_cycle = st.get("last_shrink_cycle")
         self.last_born_again = st.get("last_born_again")
+        self.last_stall_grow_cycle = st.get("last_stall_grow_cycle")
         self.no_action_streak = int(st.get("no_action_streak", 0))
         self.pending_capture = st.get("pending_capture")
         self.mem_pressure_hist = [[int(c), float(r)] for c, r in (st.get("mem_pressure_hist") or [])]
@@ -825,6 +831,13 @@ class LifeController:
         if dorm and self.last_shrink_ok(d.cycle) and (
                 any(self._site_ready(k, d.cycle) for k in shrink_sites) or trend):
             return self._plan_decay(d, report, dorm, shrink_sites, trend)
+        # —— 学习停滞强制生长（2026-10-12 用户定案：学不动就会长）——
+        # 当整体 margin 长期低迷（probe 几乎不改善，模型学不动）时，主动扩容。
+        # 这与 _plan_grow 的「数据需求驱动」互补：学不动不是等轴位热起来，
+        # 而是先长大获得更多容量（人学不会就会成长，成长后才会）。
+        stall = self._detect_learning_stall(d)
+        if stall:
+            return self._plan_stall_grow(d, report, v, stream)
         # —— 生长判决（双信号 AND：ghost 需求 × headroom 过热——不对称④）——
         return self._plan_grow(d, report, v, stream)
 
@@ -1213,6 +1226,73 @@ class LifeController:
                 "delta_ratio": round(ratio, 3), "class": "容量受限",
                 "reason": f"ghost 需求 {ratio:.2f}× 自身基线（门槛 {thr:.2f}）"
                           f" × headroom 过热"}
+
+    def _detect_learning_stall(self, d):
+        """检测整体学习停滞：最近 STALL_WINDOW 个周期的体检改善幅度（margin）
+        平均低于 STALL_MARGIN，且当前不在手术冷却/回滚守卫中。
+
+        返回 True=学不动应强制生长，False=正常。
+        """
+        # 手术冷却/回滚守卫中不干预（复用 _decide 已有的限频逻辑）
+        if self.lr_window > 0 or self.consec_rollback >= ROLLBACK_GUARD:
+            return False
+        if not self.supply_open():
+            return False
+        # 从最近周期报告收集 margin（d.last_margins 由 run_cycle 在体检后追加）
+        margins = getattr(d, "last_margins", []) or []
+        if len(margins) < STALL_WINDOW:
+            return False  # 数据不足不判决
+        recent = margins[-STALL_WINDOW:]
+        return sum(recent) / len(recent) < STALL_MARGIN
+
+    def _plan_stall_grow(self, d, report, v, stream):
+        """学习停滞强制生长：挑一个当前最窄的 MLP 轴位（或轮转），
+        用与 _plan_grow 相同的乘性生长律扩容，但 e 由停滞程度驱动。
+        """
+        # 强制生长最小间隔：距离上次强制生长不足 STALL_GROW_EVERY 周期则 hold
+        cycle = getattr(d, "cycle", 0)
+        if self.last_stall_grow_cycle is not None \
+                and cycle - self.last_stall_grow_cycle < STALL_GROW_EVERY:
+            return self._hold("限频", f"强制生长间隔未满 {STALL_GROW_EVERY} 周期")
+        # 守卫④预算/供给比（与 _plan_grow 相同）
+        budget_units = int(BETA_SUPPLY * self.fresh_since_surgery
+                           / SUPPLY_BYTES_PER_UNIT) - self.grown_since_surgery
+        if budget_units < 8:
+            return self._hold("守卫④预算/供给比",
+                              f"新鲜证据不足 {budget_units} 通道（< 最小有意义步 8）")
+        # 选址：优先最窄的 MLP 轴位（容量最受限处）
+        h = d.sleeping()
+        best = None
+        for li in range(len(h.model.blocks)):
+            for gsite, axis in (("mlp_hidden", "mlp"), ("attn_v", "attn_v")):
+                site_id = f"b{li}.{_AXIS_LEDGER[axis]}"
+                if not self._site_ready(site_id, cycle):
+                    continue
+                W = self._true_width(h, li, axis)
+                if best is None or W < best[0]:
+                    best = (W, li, gsite, axis, site_id)
+        if best is None:
+            return self._hold("限频", "无可用生长轴位（全部冷却/熔断）")
+        W, li, gsite, axis, site_id = best
+        # 乘性生长律：e 用停滞程度驱动（固定取 1.0，表示明确需要更多容量）
+        delta = max(8, round(self.lambda_g_eff() * W * 1.0))
+        delta = min(delta, max(8, round(GROW_DELTA_CAP_FRAC * W)))
+        delta = min(delta, budget_units)
+        if axis == "attn_v":
+            nh = h.model.blocks[li].attn.n_heads
+            delta = max(nh, (delta // nh) * nh)
+        okm, why = self._mem_ok(d, axis, delta)
+        if not okm:
+            return self._hold("显存预算", f"显存预算不过：{why}")
+        self.plan = {"kind": "grow", "axis": axis, "layer": li, "delta": delta,
+                     "seed": cycle, "source": "stall_grow", "site": f"{li}.{gsite}"}
+        self.state = STATE_GROW_PLAN
+        self.last_stall_grow_cycle = cycle
+        self._record_action([site_id], "grow", cycle, report)
+        report["m4_plan"] = ["grow", axis, li, delta]
+        report["m4_stall_grow"] = {"margin_avg": round(sum(getattr(d, "last_margins", [])[-STALL_WINDOW:]) / STALL_WINDOW, 4)}
+        return {"kind": "grow", "axis": axis, "site": site_id, "delta": delta,
+                "class": "学习停滞强制生长", "reason": f"margin 均值低于 {STALL_MARGIN}，学不动先长大"}
 
     def _true_width(self, h, li, axis):
         """P0-2 承袭：宽度按睡脑**真实**脑形计（含移植体），不用基座 cfg。"""
@@ -1952,6 +2032,12 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     report["kd_last"] = round(kd_hist[-1], 4)
     if vit is not None:
         vit.end_cycle(steps)
+
+    # 学习停滞检测原料（2026-10-12）：体检 margin 追加到滚动窗（保留最近 30 个）。
+    # _detect_learning_stall 在下一周期 _decide 中读取该窗口判断整体是否学不动。
+    if report.get("gate_margin") is not None:
+        dolphin.last_margins.append(round(report["gate_margin"], 6))
+        del dolphin.last_margins[:-30]
 
     # —— M4 钩子③：体检后验收（锚/平台期/战役；NORMAL 下与 M0 逐字等价）——
     if m4:
