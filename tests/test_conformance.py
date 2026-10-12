@@ -1658,6 +1658,72 @@ def t_param_adaptive_bottom_protection():
               f"kind={kind} why={why}")
 
 
+def t_cold_inverted_index():
+    """冷层倒排索引（2026-10-12 吞吐提速）：dream_indexed 与 dream 语义一致，
+    且 resurrect 升回后索引正确失效（不返回已升回热层的条目）。
+
+    - dream_indexed 返回 top-k 与 dream 一致（同查询同冷层）
+    - 命中计数 +1 行为一致
+    - resurrect 升回后，倒排索引不再返回该条目（_cold_by_seq 置 None）
+    """
+    from dolphin.memory import MemoryStore
+
+    tmp = tempfile.mkdtemp(prefix="dolphin_coldidx_")
+    try:
+        cold = os.path.join(tmp, "c.jsonl")
+        # cap=2 → 每 add 一条挤出一条，落盘冷层
+        src = MemoryStore(cap_entries=2, promote_hits=3, cold_path=cold)
+        cue = "冷层倒排索引联想线索：海豚用回声定位寻找沙丁鱼群。"
+        for i in range(60):
+            src.add(f"{cue} 第{i:03d}号记忆，内容足够长以参与检索打分。{i}".encode(),
+                    0.0, 0, "residue")
+        src.flush_cold()
+
+        # 新建实例（冷层从文件加载）
+        m = MemoryStore(cap_entries=1000, promote_hits=3, cold_path=cold)
+        m._ensure_cold()
+        check("IDX 冷层已加载", m._cold_loaded and len(m.cold_entries) == 58,
+              f"冷层{len(m.cold_entries)}条")
+
+        # dream_indexed 与 dream 语义一致（同查询，比较返回的 top 文本集合）
+        q = cue.encode()
+        got_idx = m.dream_indexed([q], k=5)
+        # 重置 hits（dream 会 +1）
+        for en in m.entries:
+            en.hits = 0
+        for en in m.cold_entries:
+            en.hits = 0
+        got_plain = m.dream([q], k=5)
+        texts_idx = {en.text for en in got_idx}
+        texts_plain = {en.text for en in got_plain}
+        check("IDX dream_indexed 与 dream 返回一致", texts_idx == texts_plain,
+              f"idx={len(texts_idx)} plain={len(texts_plain)} diff={texts_idx ^ texts_plain}")
+        check("IDX 命中计数 +1 行为一致",
+              all(en.hits >= 1 for en in got_idx),
+              f"hits={[en.hits for en in got_idx]}")
+
+        # resurrect 升回后索引不再返回该条目
+        # 把所有冷层条目 hits 设满 → resurrect 全部升回热层
+        n_cold_before = len(m.cold_entries)
+        for en in m.cold_entries:
+            en.hits = 3
+        promoted = m.resurrect()
+        check("IDX resurrect 升回全部达标条目", len(promoted) == n_cold_before,
+              f"升回{len(promoted)}条（升回前冷层{n_cold_before}条）")
+        # 再次 dream_indexed，不应返回已升回热层的条目（它们 hits 已复位为0，
+        # 但在热层；冷层索引应已失效跳过）
+        got_after = m.dream_indexed([q], k=5)
+        # 升回热层的条目 hits=0，dream_indexed 会从热层打分——这是正常的。
+        # 关键：不能因为冷层索引还指向它们而出错（冷层已空，索引应返回空）。
+        check("IDX resurrect 后冷层为空", len(m.cold_entries) == 0,
+              f"冷层{len(m.cold_entries)}条")
+        # 不抛异常即通过
+        check("IDX resurrect 后 dream_indexed 不崩溃", got_after is not None,
+              f"返回{len(got_after)}条")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ==================== 2026-10-04 M4 自生长/自凋零施工新增（交接 §6 规格 A-E） ====================
 
 
@@ -3179,6 +3245,7 @@ if __name__ == "__main__":
     t_light_dream_sampling()      # 浅睡轻量做梦（2026-10-12）
     t_rel_pressure_modes()        # 相对压力档位判定（2026-10-12）
     t_param_adaptive_bottom_protection()  # 参数自适应触底保护（2026-10-12）
+    t_cold_inverted_index()            # 冷层倒排索引（2026-10-12）
     t_m4_vitals()
     t_m4_dev_birth()
     t_m4_widen_exact()

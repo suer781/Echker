@@ -1795,15 +1795,18 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
         # 浅睡轻量化（2026-10-12）：light 走热层全量 + 冷层随机抽样小批量，
         # 避免浅睡周期背负冷层全量扫描（浅睡轻量快速）；deep/rem 保持全量。
         is_light = mode == "light"
+        # 锁外预扫描（2026-10-12 吞吐提速）：resurrect 是纯 CPU 冷层扫描
+        # （deep 全量/light 抽样），移到 feed_lock 外执行，部署线程在扫描期间
+        # 不被阻塞（恢复「醒着吃、睡着训」完全并行）。resurrect 只修改 memory
+        # 内部状态（hits 复位、冷层升回），由训练线程串行调用，不与部署线程
+        # 争用；部署线程只碰 buffer，不碰 memory 的 resurrect 路径。
+        resurrected = (dolphin.memory.resurrect_light()
+                       if is_light else dolphin.memory.resurrect())
         with lock:
             report["candidates"] = len(buf.items)
             center, width = buf.band()
-            if is_light:
-                for rb in dolphin.memory.resurrect_light():
-                    buf.add(rb, surprise=center)
-            else:
-                for rb in dolphin.memory.resurrect():
-                    buf.add(rb, surprise=center)
+            for rb in resurrected:
+                buf.add(rb, surprise=center)
             queries = [e.data for e in buf.items[-8:]]
             if is_light:
                 dreamed = dolphin.memory.dream_light(queries, k=dream_k)

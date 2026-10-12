@@ -8,6 +8,8 @@
 - 做梦（同上）：dream() 按检索分数自我回忆——喂食模式没有人工对话供给检索
   命中，hits 由做梦代偿，复活通道保持可用。
 """
+import array
+import bisect
 import json
 import os
 import threading
@@ -15,7 +17,7 @@ import time
 
 
 class MemoryEntry:
-    __slots__ = ("text", "score", "hits", "cycle", "kind", "created")
+    __slots__ = ("text", "score", "hits", "cycle", "kind", "created", "cold_seq")
 
     def __init__(self, text: str, score: float, cycle: int, kind: str):
         self.text = text
@@ -24,6 +26,10 @@ class MemoryEntry:
         self.cycle = int(cycle)
         self.kind = kind
         self.created = time.time()
+        # 冷层稳定序号（2026-10-12 倒排索引）：冷层条目在 RAM 中的唯一身份，
+        # 由 _load_cold_locked/_demote 分配，resurrect 升回热层后复位为 -1。
+        # 不参与序列化（to_json/from_json 忽略），仅服务于内存倒排索引。
+        self.cold_seq = -1
 
     def to_json(self):
         return {"text": self.text, "score": self.score, "hits": self.hits,
@@ -41,6 +47,61 @@ def _grams(s: str, n=4):
     return {s[i:i + n] for i in range(max(0, len(s) - n + 1))}
 
 
+_MASK64 = 0xFFFFFFFFFFFFFFFF
+
+
+def _hash64(s: str) -> int:
+    """64 位字符串哈希（倒排索引用）。
+
+    使用 Python 内置 hash()（进程内稳定、跨进程随机种子不同——索引每次进程
+    启动都重建，一致性只要求进程内）。掩码到 64 位无符号，供 array('Q') 存储。
+    """
+    return hash(s) & _MASK64
+
+
+class _ColdInvertedIndex:
+    """冷层 4-gram 倒排索引（紧凑平行数组 + 增量 delta）。
+
+    - hashes: array('Q')，按 64 位 gram 哈希升序排列（主数组）。
+    - seqs:   array('I')，与 hashes 平行的冷层条目稳定序号。
+    - delta:  dict[int, list[int]]，主数组构建后新进入冷层的条目（_demote
+      追加）的增量 posting list——避免每次逐出都触发全量重建。
+    - max_seq: 主数组覆盖的最大 cold_seq，用于构建完成后 catch-up。
+    """
+
+    __slots__ = ("hashes", "seqs", "delta", "max_seq")
+
+    def __init__(self, hashes, seqs, max_seq):
+        self.hashes = hashes
+        self.seqs = seqs
+        self.delta = {}
+        self.max_seq = max_seq
+
+    def add_entry(self, entry):
+        """把新进入冷层的条目追加进 delta（增量更新，不触发全量重建）。"""
+        seq = entry.cold_seq
+        if seq < 0:
+            return
+        seen = set()
+        for g in _grams(entry.text):
+            h = _hash64(g)
+            if h in seen:
+                continue
+            seen.add(h)
+            lst = self.delta.get(h)
+            if lst is None:
+                self.delta[h] = [seq]
+            else:
+                lst.append(seq)
+        if seq > self.max_seq:
+            self.max_seq = seq
+
+
+# 冷层小于等于该条数时同步构建倒排索引（测试确定性、毫秒级）；
+# 生产冷层（数十万条）走后台线程，避免首周期阻塞。
+_SYNC_BUILD_THRESHOLD = 5000
+
+
 class MemoryStore:
     def __init__(self, cap_entries=500, promote_hits=3, cold_path=None):
         self.entries = []                 # 热层
@@ -51,6 +112,15 @@ class MemoryStore:
         self.cold_entries = []            # 冷层影子索引：落盘为准，RAM 仅供检索
         self._cold_loaded = False
         self._cold_lock = threading.Lock()  # serve(主线程检索) 与 训练线程逐出 的冷层互斥
+        # 冷层倒排索引（2026-10-12 吞吐提速）：懒构建，后台线程构建。
+        # 主结构为按 64 位 gram 哈希排序的平行数组（hashes: array('Q')，
+        # seqs: array('I')），配合 _demote 增量 delta 与 resurrect 的
+        # cold_seq 失效标记，避免每次周期全量重建。
+        self._cold_inverted = None          # None=未构建；否则为 _ColdInvertedIndex
+        self._cold_inverted_building = False
+        self._cold_inverted_ready = threading.Event()
+        self._cold_by_seq = []              # cold_seq -> MemoryEntry（resurrect 后置 None）
+        self._cold_next_seq = 0
 
     # ---------- 冷层（G1：逐出降级落盘，跨周期可检索可复活） ----------
 
@@ -93,10 +163,131 @@ class MemoryStore:
                             existing.score = en.score
             self.cold_entries = list(seen.values())
         self._cold_loaded = True
+        # 分配冷层稳定序号并登记 seq -> entry 映射（倒排索引的地址空间）。
+        # 仅首次加载时执行（_cold_loaded 守卫保证只跑一次）。
+        for en in self.cold_entries:
+            en.cold_seq = self._cold_next_seq
+            self._cold_by_seq.append(en)
+            self._cold_next_seq += 1
+        self._maybe_start_index_build()
 
     def _ensure_cold(self):
         with self._cold_lock:
             self._load_cold_locked()
+
+    # ---------- 冷层倒排索引（2026-10-12 吞吐提速） ----------
+
+    def _maybe_start_index_build(self):
+        """冷层加载完成后启动倒排索引构建（幂等）。
+
+        小冷层（≤5000 条）同步构建（测试确定性、毫秒级）；大冷层（生产实况
+        数十万条）放后台线程，构建完成前 dream() 回退全量扫描，不阻塞部署。
+        """
+        if self._cold_inverted is not None or self._cold_inverted_building:
+            return
+        if not self.cold_entries:
+            return
+        if len(self.cold_entries) <= _SYNC_BUILD_THRESHOLD:
+            idx = self._build_cold_inverted()
+            max_seq = idx.max_seq
+            for en in list(self.cold_entries):
+                if en.cold_seq > max_seq:
+                    idx.add_entry(en)
+            self._cold_inverted = idx
+            self._cold_inverted_ready.set()
+            return
+        self._cold_inverted_building = True
+        t = threading.Thread(target=self._build_cold_inverted_bg, daemon=True,
+                               name="cold-inverted-build")
+        t.start()
+
+    def _build_cold_inverted_bg(self):
+        try:
+            idx = self._build_cold_inverted()
+            # 构建期间 _demote 可能追加了新条目：主数组只覆盖快照，
+            # 把快照之后进入冷层的条目补进 delta（增量正确性）。
+            max_seq = idx.max_seq
+            for en in list(self.cold_entries):
+                if en.cold_seq > max_seq:
+                    idx.add_entry(en)
+            self._cold_inverted = idx
+        finally:
+            self._cold_inverted_building = False
+            self._cold_inverted_ready.set()
+
+    def _build_cold_inverted(self):
+        """同步构建冷层倒排索引（测试与后台构建共用）。"""
+        snapshot = list(self.cold_entries)
+        packed = []
+        append = packed.append
+        for en in snapshot:
+            seq = en.cold_seq
+            if seq < 0:
+                continue
+            # 每条目 gram 哈希去重（对应 _grams 的集合语义）。
+            for h in {_hash64(g) for g in _grams(en.text)}:
+                append((h << 32) | seq)
+        packed.sort()
+        hashes = array.array("Q", (v >> 32 for v in packed))
+        seqs = array.array("I", (v & 0xFFFFFFFF for v in packed))
+        max_seq = max((en.cold_seq for en in snapshot), default=-1)
+        del packed
+        return _ColdInvertedIndex(hashes, seqs, max_seq)
+
+    def _ensure_cold_index(self):
+        """同步确保倒排索引已构建（测试用；生产路径由后台线程懒构建）。
+
+        若后台构建已在进行，等待其完成；若后台构建失败（理论上不发生），
+        回退为同步构建兜底。
+        """
+        self._ensure_cold()
+        if self._cold_inverted is None:
+            if self._cold_inverted_building:
+                self._cold_inverted_ready.wait()
+            if self._cold_inverted is None:
+                idx = self._build_cold_inverted()
+                # 同步构建同样要补 delta（与后台构建一致）。
+                max_seq = idx.max_seq
+                for en in list(self.cold_entries):
+                    if en.cold_seq > max_seq:
+                        idx.add_entry(en)
+                self._cold_inverted = idx
+                self._cold_inverted_ready.set()
+        return self._cold_inverted
+
+    def _dream_cold_indexed(self, qs, k):
+        """用倒排索引对冷层做 dream 打分（精确语义：count/len(q) == len(q&g)/len(q)）。
+
+        对每个查询的 4-gram 集合，从倒排索引取候选条目序号（主数组 + delta），
+        累计共享 gram 数，只对超过 5% 阈值的候选打分，排序取 top-k。
+        """
+        idx = self._cold_inverted
+        best = {}  # seq -> (ov, entry)
+        for q in qs:
+            qh = {_hash64(g) for g in q}
+            lq = len(q)
+            if lq <= 0:
+                continue
+            thresh = lq * 0.05
+            counts = {}
+            for h in qh:
+                lo = bisect.bisect_left(idx.hashes, h)
+                hi = bisect.bisect_left(idx.hashes, h + 1)
+                for j in range(lo, hi):
+                    seq = idx.seqs[j]
+                    counts[seq] = counts.get(seq, 0) + 1
+                for seq in idx.delta.get(h, ()):
+                    counts[seq] = counts.get(seq, 0) + 1
+            for seq, cnt in counts.items():
+                if cnt > thresh:
+                    en = self._cold_by_seq[seq] if seq < len(self._cold_by_seq) else None
+                    if en is None or en.hits >= self.promote_hits:
+                        continue
+                    ov = cnt / lq
+                    prev = best.get(seq)
+                    if prev is None or ov > prev[0]:
+                        best[seq] = (ov, en)
+        return list(best.values())
 
     def flush_cold(self):
         """把冷层影子索引（含检索命中计数）写回落盘，供存档时调用——
@@ -165,6 +356,13 @@ class MemoryStore:
             with open(self.cold_path, "a", encoding="utf-8", newline="\n") as f:
                 f.write(json.dumps(entry.to_json(), ensure_ascii=False) + "\n")
             self.cold_entries.append(entry)
+            # 增量更新倒排索引（若已构建）：新条目分配稳定序号并追加到 delta。
+            entry.cold_seq = self._cold_next_seq
+            self._cold_next_seq += 1
+            self._cold_by_seq.append(entry)
+            idx = self._cold_inverted
+            if idx is not None:
+                idx.add_entry(entry)
 
     # ---------- 检索 / 复活 / 做梦 ----------
 
@@ -224,6 +422,11 @@ class MemoryStore:
                 self.cold_entries.remove(en)
                 self.entries.append(en)
                 en.hits = 0
+                # 倒排索引失效标记：seq 槽位置 None，查询时跳过已升回热层的条目。
+                # 主数组/ delta 中的 (hash, seq) 保留（惰性清理），不影响正确性。
+                if 0 <= en.cold_seq < len(self._cold_by_seq):
+                    self._cold_by_seq[en.cold_seq] = None
+                en.cold_seq = -1
                 promoted.append(en)
         while len(self.entries) > self.cap:  # 冷层升回可能超过容量：热层规则不变
             self._evict(protect=promoted[-1] if promoted else None)
@@ -258,6 +461,9 @@ class MemoryStore:
                 self.cold_entries.remove(en)
                 self.entries.append(en)
                 en.hits = 0
+                if 0 <= en.cold_seq < len(self._cold_by_seq):
+                    self._cold_by_seq[en.cold_seq] = None
+                en.cold_seq = -1
                 promoted.append(en)
         while len(self.entries) > self.cap:  # 冷层升回可能超过容量：热层规则不变
             self._evict(protect=promoted[-1] if promoted else None)
@@ -271,16 +477,17 @@ class MemoryStore:
         防旧知识占用新经验的选拔预算（审计 G11：满带权挤压）。
         只抽 hits < promote_hits 的条目：达标者是 resurrect() 的职责，
         两条复活通道不重复注入同一条。返回 MemoryEntry 列表（命中计数 +1）。
+
+        2026-10-12 吞吐提速：冷层改用倒排索引加速（count-based 精确打分）。
+        索引未就绪（后台构建中/未触发）时回退原全量扫描，行为完全一致。
         """
         qs = [_grams(q.decode("utf-8", errors="replace")) for q in (queries or [])]
         qs = [g for g in qs if g]
         if not qs or k <= 0:
             return []
         self._ensure_cold()
-        # 2026-10-04 修复：与 retrieve 同理，训练线程并发修改热/冷层列表，
-        # 取快照保证一致视图（+ 操作虽然创建新列表，但两个取值点之间可能被插入）。
-        pool = [en for en in list(self.entries) + list(self.cold_entries)
-                if en.hits < self.promote_hits]
+        # 热层全量打分（≤cap≈500，毫秒级）。
+        pool = [en for en in list(self.entries) if en.hits < self.promote_hits]
         scored = []
         for en in pool:
             g = _grams(en.text)
@@ -289,6 +496,47 @@ class MemoryStore:
             ov = max(len(q & g) / len(q) for q in qs)
             if ov > 0.05:
                 scored.append((ov, en))
+        # 冷层：索引优先，未就绪则全量扫描（语义一致）。
+        idx = self._cold_inverted
+        if idx is not None:
+            scored.extend(self._dream_cold_indexed(qs, k))
+        else:
+            for en in list(self.cold_entries):
+                if en.hits >= self.promote_hits:
+                    continue
+                g = _grams(en.text)
+                if not g:
+                    continue
+                ov = max(len(q & g) / len(q) for q in qs)
+                if ov > 0.05:
+                    scored.append((ov, en))
+        scored.sort(key=lambda t: (-t[0], t[1].created))
+        top = [en for _, en in scored[:k]]
+        for en in top:
+            en.hits += 1
+        return top
+
+    def dream_indexed(self, queries, k=5):
+        """倒排索引加速版做梦：语义与 dream() 完全一致，但强制使用冷层索引。
+
+        与 dream() 的唯一区别：若索引尚未构建，会同步构建（测试/需要确定性的
+        场景使用；生产路径由 dream() 在索引就绪后自动走加速）。
+        """
+        qs = [_grams(q.decode("utf-8", errors="replace")) for q in (queries or [])]
+        qs = [g for g in qs if g]
+        if not qs or k <= 0:
+            return []
+        self._ensure_cold_index()
+        pool = [en for en in list(self.entries) if en.hits < self.promote_hits]
+        scored = []
+        for en in pool:
+            g = _grams(en.text)
+            if not g:
+                continue
+            ov = max(len(q & g) / len(q) for q in qs)
+            if ov > 0.05:
+                scored.append((ov, en))
+        scored.extend(self._dream_cold_indexed(qs, k))
         scored.sort(key=lambda t: (-t[0], t[1].created))
         top = [en for _, en in scored[:k]]
         for en in top:
