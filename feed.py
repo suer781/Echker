@@ -114,8 +114,7 @@ def _is_log_filename(name):
 # 返回 "deep" / "rem" / "light"。
 # deep：结构手术/连续回滚/缓冲溢出等真实硬条件，或数据惊讶度显著偏高
 #       （绝对压力 ≥ DEEP_ABS_PRESSURE）——深睡巩固真正陌生的知识；
-# rem：数据惊讶度中等偏高（绝对压力 ≥ REM_ABS_PRESSURE）、周期性 REM 插入、
-#       或记忆库有大量可做梦候选；
+# rem：数据惊讶度中等偏高（绝对压力 ≥ REM_ABS_PRESSURE）、周期性 REM 插入；
 # light：日常浅睡（数据惊讶度在常态范围=小修小补），以及训练债差距大需
 #        平衡时优先浅睡快速训练。
 # 为什么用绝对压力带而不用乘法阈值（2026-10-12）：原 deep 判定用
@@ -125,11 +124,13 @@ def _is_log_filename(name):
 # 恒定在模型读字成本 ln256≈5.545 附近，并没有真正的高压。改为绝对压力带后，
 # 只有数据惊讶度显著高于常态（≥DEEP_ABS_PRESSURE）才深睡，否则浅睡小修小补。
 # 真实硬条件（手术/回滚/溢出）不受任何阈值限制，保证深度处理场景不缺失。
+# 2026-10-12 修正：删除「记忆候选 > MEM_DREAM_CANDIDATE_MIN → rem」条件——
+# 热层记忆 cap=500 常年满，该条件恒真，导致 light 永远不出现（浅睡主体缺失）。
+# rem 由「压力 ≥ REM_ABS_PRESSURE」+「每 REM_CYCLE_PERIOD 周期」驱动即可。
 DEEP_ABS_PRESSURE = 6.0   # 绝对压力 ≥ 6.0（显著高于常态 5.545）→ deep
 REM_ABS_PRESSURE = 5.8    # 绝对压力 ≥ 5.8（中等偏离常态）→ rem
 REM_CYCLE_PERIOD = 8       # 每第 8 个睡眠周期周期性插入一次 REM
 DEBT_GAP_MAX = 0.2         # 两半球训练步数差占比 > 0.2 视为训练债失衡
-MEM_DREAM_CANDIDATE_MIN = 50  # 记忆库条目数超过该值视为"大量可做梦候选"
 
 
 def decide_sleep_mode(d):
@@ -167,8 +168,7 @@ def decide_sleep_mode(d):
     # 周期性 REM 插入：每第 8 个睡眠周期（cycle>0 时 cycle%8==0）插入一次。
     if pressure >= REM_ABS_PRESSURE \
             or (getattr(d, "cycle", 0) > 0
-                and getattr(d, "cycle", 0) % REM_CYCLE_PERIOD == 0) \
-            or len(getattr(d.memory, "entries", [])) > MEM_DREAM_CANDIDATE_MIN:
+                and getattr(d, "cycle", 0) % REM_CYCLE_PERIOD == 0):
         return "rem"
 
     # —— light 兜底（日常大多数睡眠是浅睡：数据在常态范围，小修小补）——

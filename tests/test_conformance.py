@@ -1595,6 +1595,22 @@ def t_rel_pressure_modes():
         d.awake_idx = 1                   # sleeping=0 是欠训侧（50）
         mode = decide_sleep_mode(d)
         check("REL 训练债失衡且欠训侧 → light", mode == "light", f"mode={mode}")
+        d.hemi_trained_steps = [0, 0]
+        d.awake_idx = 0
+
+        # —— 场景6：记忆候选不再恒真触发 rem（2026-10-12 修正） ——
+        # 热层记忆满 500、常态压力、非手术、非训练债失衡、非 REM 周期 → light。
+        # 旧条件「len(entries)>50 → rem」在热层 cap=500 常年满时恒真，light 永不出现。
+        _make_buf_with_surprise(d, [5.54 + (i % 5) * 0.001 for i in range(80)])
+        d.memory.entries = []
+        for i in range(500):
+            from dolphin.memory import MemoryEntry
+            en = MemoryEntry(f"记忆候选测试第{i:03d}条，内容足够长。{i}", 0.0, 0, "note")
+            d.memory.entries.append(en)
+        d.cycle = 7  # 非 REM 周期（8 的倍数才是）
+        mode = decide_sleep_mode(d)
+        check("REL 记忆满500 非REM周期 → light（不再恒 rem）",
+              mode == "light", f"mode={mode}")
 
 
 # ==================== 2026-10-04 M4 自生长/自凋零施工新增（交接 §6 规格 A-E） ====================
