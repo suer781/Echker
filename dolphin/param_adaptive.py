@@ -88,8 +88,15 @@ class ParamAdaptive:
                     for _, r in self.mem_ratio_hist[-MEM_PRESSURE_WINDOW:]):
                 return ("mem",
                         f"显存 {mem_ratio:.2f} 连续超预算 {MEM_PRESSURE_HI:.0%}")
-        # 容量压力：gap_bar 越浮动设定点带（空位过多=容量过剩，应触发收缩）
+        # 触底保护（修复假容量压力振荡）：
+        # body_frac 已到下限 → 容量压力信号失真（收缩制造的空位被误读为过剩），
+        # 禁止再触发收缩，让恒温器正常态微调（±8）自然生长恢复。
         ctl = getattr(d, "life_ctl", None)
+        if ctl is not None:
+            body_frac = ctl._body_frac(d, d.sleeping().name)
+            if body_frac <= MIN_BODY_FRAC * 1.05:  # 触底（含 5% 迟滞带）
+                return None, ""  # 容量压力信号失效，跳过收缩
+        # 容量压力：gap_bar 越浮动设定点带（空位过多=容量过剩，应触发收缩）
         if ctl is not None:
             xi_eff = ctl._xi_hi_eff()
             h = ctl.h_eff()

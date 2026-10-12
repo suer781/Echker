@@ -1613,6 +1613,51 @@ def t_rel_pressure_modes():
               mode == "light", f"mode={mode}")
 
 
+def t_param_adaptive_bottom_protection():
+    """参数自适应触底保护（2026-10-12）：body_frac 触底下限 → 容量压力信号
+    失真（收缩制造的空位被误读为过剩）→ 禁止再触发收缩，让恒温器正常态微调
+    （±8）自然生长恢复。
+
+    - 触底（body_frac ≤ MIN_BODY_FRAC×1.05）+ gap_bar=1.0 → (None, "")（不缩）
+    - 触底 + gap_bar=0.1 → (None, "")（正常也不缩）
+    - 未触底 + gap_bar=1.0 → "cap"（不误伤正常场景）
+    """
+    from dolphin.life import MIN_BODY_FRAC
+    from dolphin.param_adaptive import ParamAdaptive
+
+    pa = ParamAdaptive()
+
+    with _probe_fixture("dolphin_pab_") as probe:
+        # —— 场景1/2：触底 + 超高 gap_bar → 不再触发 cap ——
+        d_bottom = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2,
+                                           block_size=256),
+                                probe_path=probe, device="cpu")
+        # 模拟触底：直接写入 shrink 形态（_body_frac 读取
+        # morphology[hname]["shrink"]，见 life.py _body_frac）
+        morph = d_bottom.life_ctl.morph_for(d_bottom, d_bottom.sleeping().name)
+        morph["shrink"] = {"d_model": 2, "n_layers": 1}  # (2/64)*(1/2)=0.0156
+        bf = d_bottom.life_ctl._body_frac(d_bottom, d_bottom.sleeping().name)
+        check("PAB 触底模拟 body_frac ≤ 下限", bf <= MIN_BODY_FRAC * 1.05,
+              f"body_frac={bf:.4f} 下限={MIN_BODY_FRAC}")
+        kind, why = pa.detect_pressure(d_bottom, gap_bar=1.0, mem_ratio=None)
+        check("PAB 触底+高gap_bar 不触发 cap", kind is None,
+              f"kind={kind} why={why}")
+        kind, why = pa.detect_pressure(d_bottom, gap_bar=0.1, mem_ratio=None)
+        check("PAB 触底+正常gap_bar 不触发 cap", kind is None,
+              f"kind={kind} why={why}")
+
+        # —— 场景3：未触底 + 高 gap_bar → 仍触发 cap ——
+        d_normal = make_dolphin(cfg=Config(d_model=64, n_layers=2, n_heads=2,
+                                           block_size=256),
+                                probe_path=probe, device="cpu")
+        bf2 = d_normal.life_ctl._body_frac(d_normal, d_normal.sleeping().name)
+        check("PAB 未触底 body_frac 远高于下限", bf2 > MIN_BODY_FRAC * 1.05,
+              f"body_frac={bf2:.4f}")
+        kind, why = pa.detect_pressure(d_normal, gap_bar=1.0, mem_ratio=None)
+        check("PAB 未触底+高gap_bar 仍触发 cap", kind == "cap",
+              f"kind={kind} why={why}")
+
+
 # ==================== 2026-10-04 M4 自生长/自凋零施工新增（交接 §6 规格 A-E） ====================
 
 
@@ -3133,6 +3178,7 @@ if __name__ == "__main__":
     t_light_resurrect_sampling()  # 浅睡轻量复活（2026-10-12）
     t_light_dream_sampling()      # 浅睡轻量做梦（2026-10-12）
     t_rel_pressure_modes()        # 相对压力档位判定（2026-10-12）
+    t_param_adaptive_bottom_protection()  # 参数自适应触底保护（2026-10-12）
     t_m4_vitals()
     t_m4_dev_birth()
     t_m4_widen_exact()
