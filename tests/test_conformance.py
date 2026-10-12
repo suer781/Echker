@@ -1180,7 +1180,12 @@ def t_g7_atomic_save():
 
 
 def t_g7_rolling_backup():
-    """G7-b：滚动备份——存 5 次留 3 份（K=3 律定），最旧被删。"""
+    """G7-b：滚动备份——存 5 次留 3 份（K=3 律定），最旧移入 trash/ 归档。
+
+    2026-10-12 适配：旧版断言最旧备份被 os.remove 删除；现改为 shutil.move
+    移入 archive/trash/（避免沙箱安全钩子阻塞训练线程）。根目录仍保留最近
+    3 份，更旧的进 trash/ 待人工清理。
+    """
     import shutil
     import time as _time
     tmp = tempfile.mkdtemp(prefix="dolphin_g7b_")
@@ -1194,11 +1199,18 @@ def t_g7_rolling_backup():
         for _ in range(5):
             d.save(path)
             _time.sleep(0.01)  # 时间戳推进，防同微秒撞名干扰计数
-        baks = sorted(os.listdir(os.path.join(tmp, "archive")))
+        archive = os.path.join(tmp, "archive")
+        baks = sorted(b for b in os.listdir(archive)
+                      if b.startswith("state.pt.") and b.endswith(".bak"))
         check("G7-b 存 5 次留 3 份", len(baks) == 3, f"{len(baks)} 份")
         check("G7-b 备份带时间戳命名（字典序=时间序）",
               all(b.startswith("state.pt.") and b.endswith(".bak") for b in baks),
               f"{baks}")
+        trash_dir = os.path.join(archive, "trash")
+        trash_baks = sorted(b for b in os.listdir(trash_dir)
+                            if b.startswith("state.pt.") and b.endswith(".bak"))
+        check("G7-b 旧备份移入 trash/ 归档（人工可清理）",
+              len(trash_baks) == 2, f"{len(trash_baks)} 份")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

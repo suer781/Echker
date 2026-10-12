@@ -311,13 +311,21 @@ class Dolphin:
     # ---------- 持久化（全部走 weights_only 安全反序列化；G7 护航骨） ----------
 
     BACKUP_KEEP = 3  # 律定（G7）：滚动备份份数——断电损坏唯一存档时的兜底深度
+    TRASH_WARN_COUNT = 100  # trash/ 归档上限（软阈值）：超出只告警不删除，留人工清理
 
     def _rotate_backup(self, path):
         """滚动备份（G7）：每次成功存档后把新档复制进同目录 archive/（带时间戳），
-        超出 K 份删最旧。存档瞬间断电最多损失本次，K 份历史快照兜底——
-        对策"唯一存档损坏全归零"。备份失败只报警，不拦存档主体。"""
+        超出 K 份把最旧移入 archive/trash/ 归档（人工可清理）。存档瞬间断电最多
+        损失本次，K 份历史快照兜底——对策"唯一存档损坏全归零"。备份失败只报警，
+        不拦存档主体。
+
+        注意（2026-10-12 根治）：旧实现用 os.remove 批量删除最旧备份，在受沙箱
+        安全钩子保护的环境（WorkBuddy）里会触发 [safe-delete] 批量删除确认并阻塞
+        等待人工确认 → 无人值守训练线程死锁。现改为 shutil.move 移入 trash/，
+        永不执行批量 os.remove；trash 累计过多只告警，由人工清理。"""
         d = os.path.dirname(os.path.abspath(path))
         archive = os.path.join(d, "archive")
+        trash_dir = os.path.join(archive, "trash")
         try:
             os.makedirs(archive, exist_ok=True)
             base = os.path.basename(path)
@@ -328,10 +336,20 @@ class Dolphin:
             shutil.copyfile(path, dst)
             baks = sorted(glob.glob(os.path.join(archive, f"{base}.*.bak")))
             for old in baks[:-self.BACKUP_KEEP]:  # 文件名字典序=时间序
-                try:  # 并发存档时另一线程可能已删除同一旧档，忽略
-                    os.remove(old)
+                try:  # 并发存档时另一线程可能已移动同一旧档，忽略
+                    os.makedirs(trash_dir, exist_ok=True)
+                    shutil.move(old, trash_dir)
                 except FileNotFoundError:
                     pass
+                except OSError as e:  # 移动失败只告警，不拦存档主体
+                    print(f"[Dolphin] 旧备份归档失败（不拦存档）：{e!r}",
+                          file=sys.stderr)
+            # trash/ 软上限：只告警不删除——无人值守代码绝不批量 os.remove
+            trash_count = len(glob.glob(os.path.join(trash_dir, f"{base}.*.bak")))
+            if trash_count > self.TRASH_WARN_COUNT:
+                print(f"[Dolphin] 备份 trash/ 已积累 {trash_count} 份（超过 "
+                      f"{self.TRASH_WARN_COUNT}），请人工清理 {trash_dir}。",
+                      file=sys.stderr)
         except OSError as e:
             print(f"[Dolphin] 滚动备份失败（不拦存档）：{e!r}", file=sys.stderr)
 
