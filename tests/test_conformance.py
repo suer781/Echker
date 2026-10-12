@@ -1458,6 +1458,84 @@ def t_g10_resurrect_cold_load():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ==================== 2026-10-12 浅睡轻量化（light 免冷层全量扫描） ====================
+
+def t_light_resurrect_sampling():
+    """浅睡轻量复活：只扫热层 + 冷层随机抽样，不背冷层全量。
+
+    核心断言：冷层 200 条全达标时，resurrect_light(cold_sample=32) 只升回
+    ≤ 32 条（抽样上限），而 resurrect() 会升回全部 200 条——证明浅睡路径
+    不会 O(n) 全扫冷层。同时验证热层仍全量检查、冷层已加载（L9 不失聪）。
+    """
+    from dolphin.memory import MemoryStore
+    tmp = tempfile.mkdtemp(prefix="dolphin_light_res_")
+    try:
+        cold = os.path.join(tmp, "c.jsonl")
+        # cap=4：每 add 一条挤出一条，add 204 条 → 冷层 200 条
+        src = MemoryStore(cap_entries=4, promote_hits=3, cold_path=cold)
+        for i in range(204):
+            src.add(f"浅睡复活抽样第{i:03d}号，内容足够长以便去重。{i}".encode(),
+                    0.0, 0, "residue")
+        for e in src.cold_entries:
+            e.hits = 3  # 全部达标
+        src.flush_cold()
+        check("LIGHT-R 夹具前置：200 条冷层已落盘且全部达标",
+              len(src.cold_entries) == 200,
+              f"冷层{len(src.cold_entries)}条")
+
+        m = MemoryStore(cap_entries=1000, promote_hits=3, cold_path=cold)
+        m._ensure_cold()
+        check("LIGHT-R 冷层已加载（重启不失聪）",
+              m._cold_loaded and len(m.cold_entries) == 200,
+              f"loaded={m._cold_loaded} 冷层{len(m.cold_entries)}")
+        got = m.resurrect_light(cold_sample=32)
+        check("LIGHT-R 浅睡复活只升回抽样上限（≤32，非全量200）",
+              0 < len(got) <= 32, f"升回{len(got)}条")
+        check("LIGHT-R 升回条目已在热层、hits 已复位",
+              all(e.hits == 0 for e in m.entries if e.text in {g.decode() for g in got}),
+              f"热层{len(m.entries)}")
+        check("LIGHT-R 冷层剩余条目仍可检索（未误删）",
+              len(m.cold_entries) >= 200 - 32,
+              f"冷层剩{len(m.cold_entries)}条")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t_light_dream_sampling():
+    """浅睡轻量做梦：热层全量打分 + 冷层随机抽样，命中计数正常。
+
+    核心断言：冷层 200 条与查询高度重叠时，dream_light(cold_sample=32) 注入
+    量封顶 k=5 且命中计数 +1；同时验证不会因抽样而返回空（热层仍全量参与）。
+    """
+    from dolphin.memory import MemoryStore
+    tmp = tempfile.mkdtemp(prefix="dolphin_light_dr_")
+    try:
+        cold = os.path.join(tmp, "c.jsonl")
+        src = MemoryStore(cap_entries=4, promote_hits=3, cold_path=cold)
+        cue = "浅睡做梦联想线索：海豚用回声定位寻找沙丁鱼群。"
+        for i in range(204):
+            src.add(f"{cue} 第{i:03d}号记忆，内容足够长以参与检索打分。{i}".encode(),
+                    0.0, 0, "residue")
+        # 注意：冷层条目保持 hits=0（未达标），dream_light 只抽 hits<promote_hits
+        # 的候选——若像 resurrect 测试那样全设 3，候选池为空（实现语义正确）。
+        src.flush_cold()
+
+        m = MemoryStore(cap_entries=1000, promote_hits=3, cold_path=cold)
+        m._ensure_cold()
+        hits_before = {e.text: e.hits for e in m.entries}
+        got = m.dream_light([cue.encode()], k=5, cold_sample=32)
+        check("LIGHT-D 浅睡做梦注入量封顶 k=5",
+              len(got) <= 5, f"注入{len(got)}条")
+        check("LIGHT-D 注入条目命中计数 +1",
+              all(e.hits == hits_before.get(e.text, 0) + 1 for e in got),
+              f"命中{ [e.hits for e in got] }")
+        check("LIGHT-D 冷层已加载且热层无条目时仍能从冷层抽样注入",
+              m._cold_loaded and len(got) == 5,
+              f"loaded={m._cold_loaded} 热层{len(m.entries)} 注入{len(got)}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ==================== 2026-10-04 M4 自生长/自凋零施工新增（交接 §6 规格 A-E） ====================
 
 
@@ -2975,6 +3053,8 @@ if __name__ == "__main__":
     t_g9_threshold_clamp()
     t_g10_resurrect_all()
     t_g10_resurrect_cold_load()
+    t_light_resurrect_sampling()  # 浅睡轻量复活（2026-10-12）
+    t_light_dream_sampling()      # 浅睡轻量做梦（2026-10-12）
     t_m4_vitals()
     t_m4_dev_birth()
     t_m4_widen_exact()

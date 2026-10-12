@@ -1792,13 +1792,23 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     if feeding:
         # ① 锁内快照（毫秒级）：复活 + 做梦 + 选拔 + 摘除（原 trainer_cycle 语义；
         #    带通在摘除前对完整缓冲取定）
+        # 浅睡轻量化（2026-10-12）：light 走热层全量 + 冷层随机抽样小批量，
+        # 避免浅睡周期背负冷层全量扫描（浅睡轻量快速）；deep/rem 保持全量。
+        is_light = mode == "light"
         with lock:
             report["candidates"] = len(buf.items)
             center, width = buf.band()
-            for rb in dolphin.memory.resurrect():
-                buf.add(rb, surprise=center)
+            if is_light:
+                for rb in dolphin.memory.resurrect_light():
+                    buf.add(rb, surprise=center)
+            else:
+                for rb in dolphin.memory.resurrect():
+                    buf.add(rb, surprise=center)
             queries = [e.data for e in buf.items[-8:]]
-            dreamed = dolphin.memory.dream(queries, k=dream_k)
+            if is_light:
+                dreamed = dolphin.memory.dream_light(queries, k=dream_k)
+            else:
+                dreamed = dolphin.memory.dream(queries, k=dream_k)
             for en in dreamed:
                 buf.add(en.text.encode("utf-8", errors="replace"), surprise=center)
             report["dreamed"] = len(dreamed)

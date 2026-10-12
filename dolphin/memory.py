@@ -229,6 +229,40 @@ class MemoryStore:
             self._evict(protect=promoted[-1] if promoted else None)
         return out
 
+    def resurrect_light(self, cold_sample=32):
+        """浅睡轻量复活（2026-10-12）：只扫热层 + 冷层随机小批量抽样。
+
+        语义与 resurrect() 一致——命中达阈值的条目升回热层、hits 复位、
+        冷层升回触发热层容量保护——但冷层只随机抽样 cold_sample 条参与检查，
+        避免浅睡周期背负 24.9 万条冷层的 O(n) 全量扫描（浅睡轻量快速）。
+        热层永远全量检查（≤cap≈500，毫秒级）。抽样每次调用种子不同，
+        保证跨周期覆盖面（不同冷层条目轮流获得复活机会）。
+        仍调用 _ensure_cold()：冷层已加载、跨重启不失聪（L9 不破）。
+        """
+        out = []
+        self._ensure_cold()
+        for en in self.entries:
+            if en.hits >= self.promote_hits:
+                out.append(en.text.encode("utf-8", errors="replace"))
+                en.hits = 0
+        # 冷层随机抽样（浅睡不背全量）：抽样后再遍历，避免复制整表。
+        cold_pool = self.cold_entries
+        if len(cold_pool) > cold_sample:
+            import random as _random
+            sample_idx = set(_random.sample(range(len(cold_pool)), cold_sample))
+            cold_pool = [cold_pool[i] for i in sorted(sample_idx)]
+        promoted = []
+        for en in list(cold_pool):  # 副本：语义与 resurrect() 一致
+            if en.hits >= self.promote_hits:
+                out.append(en.text.encode("utf-8", errors="replace"))
+                self.cold_entries.remove(en)
+                self.entries.append(en)
+                en.hits = 0
+                promoted.append(en)
+        while len(self.entries) > self.cap:  # 冷层升回可能超过容量：热层规则不变
+            self._evict(protect=promoted[-1] if promoted else None)
+        return out
+
     def dream(self, queries, k=5):
         """做梦（G1）：按检索分数从记忆库抽样旧经验，供周期头部注入缓冲。
 
@@ -247,6 +281,42 @@ class MemoryStore:
         # 取快照保证一致视图（+ 操作虽然创建新列表，但两个取值点之间可能被插入）。
         pool = [en for en in list(self.entries) + list(self.cold_entries)
                 if en.hits < self.promote_hits]
+        scored = []
+        for en in pool:
+            g = _grams(en.text)
+            if not g:
+                continue
+            ov = max(len(q & g) / len(q) for q in qs)
+            if ov > 0.05:
+                scored.append((ov, en))
+        scored.sort(key=lambda t: (-t[0], t[1].created))
+        top = [en for _, en in scored[:k]]
+        for en in top:
+            en.hits += 1
+        return top
+
+    def dream_light(self, queries, k=5, cold_sample=32):
+        """浅睡轻量做梦（2026-10-12）：热层全量打分 + 冷层随机小批量抽样。
+
+        语义与 dream() 一致——按 4-gram 检索分数从记忆库抽样旧经验、只抽
+        hits < promote_hits 的条目、命中计数 +1、注入量封顶 k——但冷层只随机
+        抽样 cold_sample 条参与打分，避免浅睡周期背负冷层全量 O(n) 扫描。
+        热层永远全量打分（≤cap≈500，毫秒级）。抽样每次调用种子不同，
+        保证跨周期覆盖面。仍 _ensure_cold()：冷层已加载、跨重启不失聪。
+        """
+        qs = [_grams(q.decode("utf-8", errors="replace")) for q in (queries or [])]
+        qs = [g for g in qs if g]
+        if not qs or k <= 0:
+            return []
+        self._ensure_cold()
+        # 热层全量 + 冷层随机抽样（浅睡不背全量）。
+        pool = [en for en in list(self.entries) if en.hits < self.promote_hits]
+        cold_pool = self.cold_entries
+        if len(cold_pool) > cold_sample:
+            import random as _random
+            sample_idx = set(_random.sample(range(len(cold_pool)), cold_sample))
+            cold_pool = [cold_pool[i] for i in sorted(sample_idx)]
+        pool += [en for en in cold_pool if en.hits < self.promote_hits]
         scored = []
         for en in pool:
             g = _grams(en.text)
