@@ -2105,6 +2105,16 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
 
     # 值自成：学习率反馈（Plasticity 唯一控制器）+ 手术 LR 窗口 / 退役阶梯退火（不再触发）
     mean_surp = sum(e.surprise for _, e in sel) / len(sel)
+    # 金发姑娘能力基线（律 L4）：能力随本轮入选经验的平均惊讶度慢速 EMA 漂移。
+    # 放在 post_exam 之后（本处已在其后）、mean_surp 算出后——只统计"中间带放行、
+    # 且实际入选训练"的经验，跳过的太熟 / 挂起的太怪不参与能力校准。
+    dolphin.ability = 0.99 * dolphin.ability + 0.01 * mean_surp
+    report["ability"] = round(dolphin.ability, 4)
+    report["mean_surp"] = mean_surp  # 全精度：供 ability EMA 精确校验（观测展示取 ability 已舍入）
+    report["goldilocks"] = {
+        "skipped_too_easy": int(getattr(dolphin, "skipped_too_easy", 0)),
+        "suspended_too_hard": int(getattr(dolphin, "suspended_too_hard", 0)),
+    }
     if feeding:
         _threshold_feedback(dolphin)
         lr_center, lr_width = center, width  # 带通在快照时取定（trainer_cycle 语义）
@@ -2168,10 +2178,13 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
             outcome = "✓ 换班" if report.get("trained_swapped") else "✗ 作废回滚"
         else:
             outcome = "✓ 换班" if report.get("swapped") else "✗ 作废回滚"
+        gl = report.get("goldilocks") or {}
         print(f"[睡眠 {report['cycle']}] 选拔 {report['selected']} / 滞留 {report['residue']}"
               f"  体检 {report.get('probe_old')} → {report.get('probe_new')}"
               f"  lr={new_lr:.2e}"
               f"  体 {body.get('d_model', '?')}/{'%.2f' % body.get('util_gap', 0)}"
               f"  {outcome}"
-              f"{'  刀:' + str(act.get('kind')) if act.get('kind', 'hold') != 'hold' else ''}")
+              f"{'  刀:' + str(act.get('kind')) if act.get('kind', 'hold') != 'hold' else ''}"
+              f"  金发姑娘 能力={report.get('ability')} 跳过={gl.get('skipped_too_easy')}"
+              f" 挂起={gl.get('suspended_too_hard')}")
     return report

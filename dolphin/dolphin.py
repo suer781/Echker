@@ -20,6 +20,7 @@ from .adapt import Plasticity
 from .amygdala import Amygdala
 from .autotune import Autotune
 from .experience import Experience, ExperienceBuffer
+from .goldilocks import PRIOR_ABILITY, gate as goldilocks_gate
 from .life import LifeController
 from .memory import MemoryEntry, MemoryStore
 from .param_adaptive import ParamAdaptive
@@ -148,6 +149,13 @@ class Dolphin:
         # 学习停滞检测原料（2026-10-12）：最近 N 周期体检 margin 滚动窗。
         # 由 run_cycle 在体检报告生成后追加；随档持久化，旧档兼容空列表。
         self.last_margins = []
+        # 金发姑娘价值门控（律 L4）：能力基线 ability = 系统当前的"惊讶度先验"，
+        # 初始 = 随机模型的先验惊讶度 ln256（≈5.545）。随睡眠周期末用入选经验的
+        # mean surprise 慢速 EMA 更新（见 life.run_cycle）。随档持久化。
+        self.ability = PRIOR_ABILITY
+        # 门控观测计数：太熟跳过 / 太怪挂起的累计条数，随档持久化，写进日志观测。
+        self.skipped_too_easy = 0
+        self.suspended_too_hard = 0
 
     def awake(self):
         return self.h[self.awake_idx]
@@ -271,6 +279,14 @@ class Dolphin:
     def learn(self, text: str, source="dataset"):
         """部署期喂养：算惊讶度入缓冲，不生成回复（与 serve 相对）。
 
+        金发姑娘价值门控（律 L4）：惊讶度算出后、入缓冲前按相对能力基线
+        ability 的偏离 delta 做三态判决——
+          delta < -LO  → 太熟（已会）  → 跳过，不进缓冲（skipped_too_easy+1）
+          delta > +HI  → 太怪（学不会）→ 挂起，进记忆库冷层（suspended_too_hard+1）
+          其余          → 中间带        → 放行进缓冲
+        跳过/挂起的条目仍计 learn_total（部署侧经验流入口径不变，守护模式的
+        恢复检测不受门控影响），但不计 _since_sleep（未进入缓冲、不积累睡眠压力）。
+
         双线程约束：mean_nll 是部署计算，锁外做（部署永不排队等锁）；
         只有缓冲交换持 feed_lock，与训练线程的快照/换班互斥。
         learn_busy 供训练线程在动睡脑前等待在途读取清零——
@@ -283,6 +299,16 @@ class Dolphin:
         finally:
             self._busy_dec()
         with self.feed_lock:
+            state, delta = goldilocks_gate(surprise, self.ability)
+            if state == "skip":
+                self.skipped_too_easy += 1
+                self.learn_total += 1  # G3：部署侧经验流入总量（守护模式的恢复信号）
+                return None
+            if state == "suspend":
+                self.memory.add_cold(data, surprise, self.cycle, kind="suspended")
+                self.suspended_too_hard += 1
+                self.learn_total += 1
+                return None
             eid = self.buffer.add(data, surprise)
             self._since_sleep += 1
             self.learn_total += 1  # G3：部署侧经验流入总量（守护模式的恢复信号）
@@ -420,6 +446,10 @@ class Dolphin:
                 "last_margins": list(self.last_margins),
                 # 参数自适应控制律（2026-10-06）：三段式下跌状态机随档。
                 "param_adaptive": self.param_adaptive.to_state(),
+                # 金发姑娘价值门控（律 L4）：能力基线 + 门控观测计数随档透传。
+                "ability": self.ability,
+                "skipped_too_easy": self.skipped_too_easy,
+                "suspended_too_hard": self.suspended_too_hard,
             }
         # G7 原子写：先写同目录临时文件再 os.replace——任何瞬间断电，目标文件
         # 要么是旧版要么是新版，绝不出现写了一半的存档。
@@ -505,6 +535,11 @@ class Dolphin:
         self.hemi_trained_steps = [int(x) for x in ck.get("hemi_trained_steps", [0, 0])]
         # 学习停滞检测原料（2026-10-12）：旧档无此字段 → 空列表（兼容升级）。
         self.last_margins = [float(x) for x in ck.get("last_margins", [])]
+        # 金发姑娘价值门控（律 L4）：能力基线 + 观测计数随档恢复。
+        # 旧档无这些字段 → 用初值（ability=ln256、计数=0）兼容升级。
+        self.ability = float(ck.get("ability", PRIOR_ABILITY))
+        self.skipped_too_easy = int(ck.get("skipped_too_easy", 0))
+        self.suspended_too_hard = int(ck.get("suspended_too_hard", 0))
         if "feed_cursor" in ck:  # G3：喂食游标透传恢复（语义归 feed.py 解释）
             self.feed_cursor = ck["feed_cursor"]
         if "buffer" in ck:  # v2 起经验缓冲随档恢复，换班季中断零丢失

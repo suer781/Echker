@@ -23,6 +23,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dolphin.dolphin import Dolphin
 from dolphin.experience import ExperienceBuffer
+from dolphin.goldilocks import (
+    GOLDILOCKS_HI,
+    GOLDILOCKS_LO,
+    PRIOR_ABILITY,
+    classify_delta,
+)
 from dolphin.memory import MemoryStore
 from dolphin.model import ByteTransformer, Config
 from dolphin.sleep import varied_replay
@@ -381,6 +387,103 @@ def t_l4_band():
     rank = {e.surprise: r for r, (s, e) in enumerate(sel)}
     check("L4 带通压制两尾", rank[0.1] > rank[3.0] and rank[10.0] > rank[3.0],
           f"太熟排名{rank[0.1]} 太怪排名{rank[10.0]}（正常带应为前两名）")
+
+
+def t_goldilocks_gate():
+    """L4 金发姑娘硬门控补全：太熟跳过、太怪挂起、中间带放行。
+
+    能力基线 ability（律 L4 的"当前能力"）初始 = ln256（随机模型先验惊讶度）。
+    喂食入口按相对偏离 delta=(surprise-ability)/ability 三态判决，带为
+    [ability×(1−LO), ability×(1+HI)]（以基线为中心、略偏难）。冷启动安全：
+    新鲜模型的 surprise≈ln256≈ability → delta≈0 落在带内，数据照常放行。
+    """
+    # ① 判决函数边界（带 = [-LO, +HI] 闭区间）
+    check("金发姑娘 delta<-LO 太熟",
+          classify_delta(-GOLDILOCKS_LO - 1e-6) == "skip")
+    check("金发姑娘 delta>+HI 太怪",
+          classify_delta(GOLDILOCKS_HI + 1e-6) == "suspend")
+    check("金发姑娘 中间带含边界",
+          classify_delta(0.0) == "pass"
+          and classify_delta(-GOLDILOCKS_LO) == "pass"
+          and classify_delta(GOLDILOCKS_HI) == "pass")
+
+    cfg = Config(d_model=64, n_layers=2, n_heads=2, block_size=256)
+    with _probe_fixture("dolphin_goldilocks_") as probe:
+        d = make_dolphin(cfg=cfg, probe_path=probe, device="cpu")
+
+        # ② 太熟跳过：ability 抬高 → 新鲜模型 surprise≈5.55 ≪ 0.95×10 → skip
+        d.ability = 10.0
+        eid_skip = d.learn("金发姑娘太熟跳过记录，内容足够长。", source="test")
+        check("太熟跳过 不进 buffer", len(d.buffer.items) == 0 and eid_skip is None)
+        check("太熟跳过 计数 +1",
+              d.skipped_too_easy == 1 and d.suspended_too_hard == 0)
+
+        # ③ 太怪挂起：ability 压低 → surprise≈5.55 ≫ 1.20×3 → suspend 进冷层
+        d.ability = 3.0
+        suspend_text = "金发姑娘太怪挂起记录，内容足够长。"
+        eid_susp = d.learn(suspend_text, source="test")
+        check("太怪挂起 不进 buffer", len(d.buffer.items) == 0 and eid_susp is None)
+        check("太怪挂起 计数 +1", d.suspended_too_hard == 1)
+        cold = [e for e in d.memory.cold_entries if e.kind == "suspended"]
+        check("太怪挂起 进冷层 kind=suspended",
+              len(cold) == 1 and cold[0].text == suspend_text,
+              f"cold_suspended={len(cold)}")
+
+        # ④ 中间带放行：ability=先验 → surprise≈先验 → delta≈0 → pass 进 buffer
+        d.ability = PRIOR_ABILITY
+        eid_pass = d.learn("金发姑娘中间带放行记录，内容足够长。", source="test")
+        check("中间带放行 进 buffer",
+              len(d.buffer.items) == 1 and eid_pass is not None)
+        check("中间带放行 计数不变",
+              d.skipped_too_easy == 1 and d.suspended_too_hard == 1)
+
+    # ⑤ ability EMA：真实睡眠周期后 ability = 0.99×旧 + 0.01×本轮入选平均惊讶度
+    with _probe_fixture("dolphin_goldilocks_ema_") as probe:
+        d2 = make_dolphin(cfg=cfg, probe_path=probe, device="cpu")
+        before = d2.ability
+        for i in range(12):
+            d2.learn(
+                f"金发姑娘能力校准记录第{i}条，内容足够长以稳定通过选拔训练，避免样本过短早退。{i}",
+                source="test")
+        r = d2.maybe_sleep(force=True, steps=3)
+        check("ability EMA 周期已跑（有 mean_surp）",
+              r is not None and "mean_surp" in r,
+              f"note={r.get('note') if r else None}")
+        if r is not None and "mean_surp" in r:
+            expected = 0.99 * before + 0.01 * r["mean_surp"]
+            check("ability EMA 更新正确", abs(d2.ability - expected) < 1e-9,
+                  f"ability={d2.ability:.4f} expected={expected:.4f}")
+
+    # ⑥ 存档兼容：新档带 ability/计数往返；旧档（无字段）用默认值
+    with _probe_fixture("dolphin_goldilocks_save_") as probe:
+        d3 = make_dolphin(cfg=cfg, probe_path=probe, device="cpu")
+        d3.ability = 7.7
+        d3.skipped_too_easy = 42
+        d3.suspended_too_hard = 7
+        path = os.path.join(tempfile.gettempdir(), "dolphin_goldilocks_test.pt")
+        d3.save(path)
+        d4 = make_dolphin(cfg=cfg, probe_path=probe, device="cpu")
+        d4.load(path)
+        check("存档 ability 往返", abs(d4.ability - 7.7) < 1e-9)
+        check("存档 计数往返",
+              d4.skipped_too_easy == 42 and d4.suspended_too_hard == 7)
+        os.remove(path)
+
+        # 旧档（无金发姑娘字段）→ 默认 PRIOR_ABILITY / 0
+        d5 = make_dolphin(cfg=cfg, probe_path=probe, device="cpu")
+        path2 = os.path.join(tempfile.gettempdir(), "dolphin_goldilocks_old.pt")
+        d5.save(path2)
+        ck = torch.load(path2, map_location="cpu", weights_only=True)
+        for k in ("ability", "skipped_too_easy", "suspended_too_hard"):
+            ck.pop(k, None)
+        torch.save(ck, path2)
+        d6 = make_dolphin(cfg=cfg, probe_path=probe, device="cpu")
+        d6.load(path2)
+        check("存档 旧档 ability=默认",
+              abs(d6.ability - PRIOR_ABILITY) < 1e-9)
+        check("存档 旧档 计数=0",
+              d6.skipped_too_easy == 0 and d6.suspended_too_hard == 0)
+        os.remove(path2)
 
 
 def t_l6_variation():
@@ -3302,6 +3405,7 @@ if __name__ == "__main__":
     print("== 律符合度常备测试 ==")
     t_l1_bytes()
     t_l4_band()
+    t_goldilocks_gate()  # L4 金发姑娘硬门控补全（2026-10-13）
     t_l6_variation()
     t_l7_decay()
     t_l9_no_evaporation()

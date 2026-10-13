@@ -339,30 +339,53 @@ class MemoryStore:
         created 作为审计链起点——落盘行数与唯一记忆数一致，且历史可追溯。"""
         with self._cold_lock:
             self._load_cold_locked()
-            d = os.path.dirname(self.cold_path)
-            if d:
-                os.makedirs(d, exist_ok=True)
-            existing = next((x for x in self.cold_entries if x.text == entry.text), None)
-            if existing is not None:
-                # 同 text 已在冷层：合并命中计数与分数，保留最早 created。
-                # hits 取 max（合并两次逐出之间的检索进度）。
-                existing.hits = max(existing.hits, entry.hits)
-                existing.score = min(existing.score, entry.score)
-                existing.cycle = max(existing.cycle, entry.cycle)
-                if entry.created < existing.created:
-                    existing.created = entry.created
-                # 不需要追加文件行；flush_cold 时统一按合并后的状态重写。
-                return
-            with open(self.cold_path, "a", encoding="utf-8", newline="\n") as f:
-                f.write(json.dumps(entry.to_json(), ensure_ascii=False) + "\n")
-            self.cold_entries.append(entry)
-            # 增量更新倒排索引（若已构建）：新条目分配稳定序号并追加到 delta。
-            entry.cold_seq = self._cold_next_seq
-            self._cold_next_seq += 1
-            self._cold_by_seq.append(entry)
-            idx = self._cold_inverted
-            if idx is not None:
-                idx.add_entry(entry)
+            self._append_cold_locked(entry)
+
+    def _append_cold_locked(self, entry):
+        """在 _cold_lock 内把条目写进冷层（调用方须已持锁且已 _load_cold_locked）。
+
+        去重合并 + append 落盘 + 倒排索引增量，语义即原 _demote 的核心：
+        同 text 已在冷层则合并 hits/score 并保留最早 created，不追加新行；
+        否则追加文件行、登记 cold_seq 并增量更新倒排索引。
+        """
+        d = os.path.dirname(self.cold_path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        existing = next((x for x in self.cold_entries if x.text == entry.text), None)
+        if existing is not None:
+            # 同 text 已在冷层：合并命中计数与分数，保留最早 created。
+            # hits 取 max（合并两次逐出之间的检索进度）。
+            existing.hits = max(existing.hits, entry.hits)
+            existing.score = min(existing.score, entry.score)
+            existing.cycle = max(existing.cycle, entry.cycle)
+            if entry.created < existing.created:
+                existing.created = entry.created
+            # 不需要追加文件行；flush_cold 时统一按合并后的状态重写。
+            return
+        with open(self.cold_path, "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(entry.to_json(), ensure_ascii=False) + "\n")
+        self.cold_entries.append(entry)
+        # 增量更新倒排索引（若已构建）：新条目分配稳定序号并追加到 delta。
+        entry.cold_seq = self._cold_next_seq
+        self._cold_next_seq += 1
+        self._cold_by_seq.append(entry)
+        idx = self._cold_inverted
+        if idx is not None:
+            idx.add_entry(entry)
+
+    def add_cold(self, data: bytes, score: float, cycle: int, kind="suspended"):
+        """金发姑娘挂起（律 L4）：太怪数据不进热层，直接进冷层。
+
+        与 add() 的区别：add() 走热层 append + cap 逐出（_evict/_demote），
+        逐出才会降级冷层；add_cold 跳过热层，直接复用 _append_cold_locked
+        落冷层——挂起数据永不占热层容量、永不触发热层逐出，也不影响现有
+        cap=500 逐出逻辑。语义与 _demote 一致（同 text 去重合并）。
+        """
+        text = data.decode("utf-8", errors="replace")
+        entry = MemoryEntry(text, score, cycle, kind)
+        with self._cold_lock:
+            self._load_cold_locked()
+            self._append_cold_locked(entry)
 
     # ---------- 检索 / 复活 / 做梦 ----------
 
