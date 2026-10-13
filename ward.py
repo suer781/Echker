@@ -97,6 +97,32 @@ def _state_age():
     return time.time() - os.path.getmtime(FED_STATE)
 
 
+def _oldest_feed_pid():
+    """返回最早启动（CreationDate 最小）的 feed.py 进程 PID。
+
+    用于多进程冲突时保留主训练进程、清理重复实例（2026-10-13）。
+    """
+    ps_cmd = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.Name -match 'python' -and $_.CommandLine -match 'feed\\.py' "
+        "-and $_.ProcessId -ne $PID } | "
+        "Select-Object ProcessId, CreationDate | "
+        "Sort-Object CreationDate | Select-Object -First 1 -ExpandProperty ProcessId"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, timeout=30)
+        out = proc.stdout.decode("utf-8", errors="replace").strip()
+        if out and out.isdigit():
+            return int(out)
+    except Exception:
+        pass
+    # 回退：_feed_pids() 的第一个（无法排序时）
+    pids = _feed_pids()
+    return pids[0] if pids else None
+
+
 def _relaunch_feed():
     """拉起 python feed.py --resume（独立新进程，不阻塞看门狗）。
 
@@ -161,6 +187,27 @@ def watch_loop(args):
         age_s = int(age)
         stale = age_s > args.stale_after
         if alive:
+            # 多进程检测（2026-10-13）：多个 feed.py 同时运行会争用同一份
+            # 存档/缓冲/日志（双实例会互相覆盖、死锁、产生 NaN）。保留
+            # 最早启动的那个，杀掉其余重复进程。
+            if len(pids) > 1:
+                try:
+                    keeper = _oldest_feed_pid()
+                except Exception:
+                    keeper = pids[0]
+                doomed = [p for p in pids if p != keeper]
+                _watch_log(f"⚠ 检测到 {len(pids)} 个 feed.py 进程！"
+                           f"保留最早启动的 PID {keeper}，清理重复进程 {doomed}")
+                if not getattr(args, "dry_run", False):
+                    for pid in doomed:
+                        try:
+                            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                                           capture_output=True, timeout=20)
+                            _watch_log(f"已清理重复 feed.py 进程 PID {pid}")
+                        except Exception as e:
+                            _watch_log(f"清理 PID {pid} 失败：{e!r}")
+                else:
+                    _watch_log("dry-run：本应清理重复进程（已跳过）")
             _watch_log(f"检查：feed.py 运行中（PID {pids}），存档年龄 {age_s}s"
                        f"{'（陈旧）' if stale else '（新鲜）'}")
         else:
