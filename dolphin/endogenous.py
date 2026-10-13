@@ -28,10 +28,12 @@ from collections import deque
 import torch
 import torch.nn.functional as F
 
-# 律定（域本身是律，值自成）
-_ALPHA = 0.5        # 遗忘 f 的合成权重
-_BETA = 0.5         # 发散 d 的合成权重
-_GAMMA = 1.0        # 坍缩 c 的合成权重
+# 律定（域本身是律，值自成）。以下三个合成权重是 autotune 管理的被调量
+# （律定域：alpha/beta ∈ [0.1,0.9]，gamma ∈ [0.5,1.5]），此处保留初值作为
+# 默认/旧档兼容（autotune 未接入时仍按 0.5/0.5/1.0 合成）。
+_ALPHA = 0.5        # 遗忘 f 的合成权重（autotune 被调量，初值）
+_BETA = 0.5         # 发散 d 的合成权重（autotune 被调量，初值）
+_GAMMA = 1.0        # 坍缩 c 的合成权重（autotune 被调量，初值）
 _HISTORY_LEN = 200  # 滚动历史长度（归一化基线窗口）
 _HARD_D_MULT = 10.0  # d 硬阈值：‖θ‖ 比值超过自身基线 10× → 硬拦截
 _MEM_OLD_CAP = 32    # 遗忘检测用的「较旧记忆」抽样上限
@@ -167,8 +169,18 @@ class Endogenous:
             base = default
         return x / base
 
-    def update(self, g, f, d, c):
-        """喂入一轮四信号，返回 {h, hard_block, g_norm, f_norm, d_norm, c_norm}。"""
+    def update(self, g, f, d, c, alpha=_ALPHA, beta=_BETA, gamma=_GAMMA):
+        """喂入一轮四信号，返回 {h, hard_block, g_norm, f_norm, d_norm, c_norm}。
+
+        alpha/beta/gamma 是合成权重（遗忘/发散/坍缩惩罚），由 autotune 慢速
+        自调（律定域内值自成），缺省取模块初值（兼容旧档/测试直调）。
+        """
+        if alpha is None:
+            alpha = _ALPHA
+        if beta is None:
+            beta = _BETA
+        if gamma is None:
+            gamma = _GAMMA
         g, f, d, c = float(g), float(f), float(d), float(c)
         # 非有限信号（除 d）按无信号处理，避免污染合成；d 非有限走硬拦截。
         if not math.isfinite(g):
@@ -189,8 +201,8 @@ class Endogenous:
         if hard:
             h = 0.0
         else:
-            h = _clamp(g_norm - _ALPHA * f_norm - _BETA * (d_norm - 1.0)
-                       - _GAMMA * c_norm, 0.0, 1.0)
+            h = _clamp(g_norm - alpha * f_norm - beta * (d_norm - 1.0)
+                       - gamma * c_norm, 0.0, 1.0)
         # 滚动历史：d 非有限时以基线值补位（不污染归一化）
         self.history["g"].append(g)
         self.history["f"].append(f)

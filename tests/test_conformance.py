@@ -3502,6 +3502,120 @@ def t_endogenous_h():
           f"h={r3['h']} hard={r3['hard_block']}")
 
 
+def t_autotune_goldilocks():
+    """金发姑娘阈值接入 autotune（2026-10-13）：手动设跳过/挂起率信号 →
+    触发慢速调整 → 值在律定域内且方向正确。
+
+    总纲「律固定，值自成」：GOLDILOCKS_LO/HI 不再是写死常量，而是 autotune
+    管理的被调量（域：lo∈[0.02,0.10]，hi∈[0.10,0.50]），由 skip_rate/
+    suspend_rate 世界信号反馈自调。
+    """
+    from dolphin.autotune import AUTOTUNE_EVERY, Autotune, _DOMAINS
+
+    lo_dom, hi_dom = _DOMAINS["goldilocks_lo"], _DOMAINS["goldilocks_hi"]
+
+    # ① 跳过率偏高 → goldilocks_lo 上调（放宽「太熟」判定，少跳过）
+    au = Autotune()
+    au.signals["goldilocks_skip_rate"] = 0.8
+    au.signals["goldilocks_suspend_rate"] = 0.0
+    adj = au.adjust(None, {})
+    lo = au.tunables["goldilocks_lo"]
+    check("autotune 跳过率高 → lo 上调", lo > 0.05, f"lo={lo:.4f}")
+    check("autotune lo 在律定域内", lo_dom[0] <= lo <= lo_dom[1], f"lo={lo:.4f}")
+    check("autotune 调整记录含 goldilocks_lo",
+          "goldilocks_lo" in adj and adj["goldilocks_lo"][0] == "up",
+          f"adj={adj.get('goldilocks_lo')}")
+
+    # ② 挂起率偏高 → goldilocks_hi 上调（放宽「太怪」判定）
+    au2 = Autotune()
+    au2.signals["goldilocks_skip_rate"] = 0.0
+    au2.signals["goldilocks_suspend_rate"] = 0.6
+    adj2 = au2.adjust(None, {})
+    hi = au2.tunables["goldilocks_hi"]
+    check("autotune 挂起率高 → hi 上调", hi > 0.20, f"hi={hi:.4f}")
+    check("autotune hi 在律定域内", hi_dom[0] <= hi <= hi_dom[1], f"hi={hi:.4f}")
+    check("autotune 调整记录含 goldilocks_hi",
+          "goldilocks_hi" in adj2 and adj2["goldilocks_hi"][0] == "up",
+          f"adj={adj2.get('goldilocks_hi')}")
+
+    # ③ 跳过率偏低 → goldilocks_lo 下调（收紧「已会」判定）
+    au3 = Autotune()
+    au3.signals["goldilocks_skip_rate"] = 0.01
+    au3.signals["goldilocks_suspend_rate"] = 0.0
+    adj3 = au3.adjust(None, {})
+    lo3 = au3.tunables["goldilocks_lo"]
+    check("autotune 跳过率低 → lo 下调", lo3 < 0.05, f"lo={lo3:.4f}")
+    check("autotune lo 下调仍在律定域内", lo_dom[0] <= lo3 <= lo_dom[1], f"lo={lo3:.4f}")
+
+    # ④ 挂起率偏低 → goldilocks_hi 下调
+    au4 = Autotune()
+    au4.signals["goldilocks_skip_rate"] = 0.0
+    au4.signals["goldilocks_suspend_rate"] = 0.01
+    adj4 = au4.adjust(None, {})
+    hi4 = au4.tunables["goldilocks_hi"]
+    check("autotune 挂起率低 → hi 下调", hi4 < 0.20, f"hi={hi4:.4f}")
+    check("autotune hi 下调仍在律定域内", hi_dom[0] <= hi4 <= hi_dom[1], f"hi={hi4:.4f}")
+
+    # ⑤ 存档往返：新被调量随档持久化，旧档缺失 → 初值兼容
+    au5 = Autotune()
+    au5.signals["goldilocks_skip_rate"] = 0.8
+    au5.adjust(None, {})
+    st = au5.to_state()
+    au6 = Autotune()
+    au6.from_state(st)
+    check("autotune goldilocks_lo 存档往返",
+          abs(au6.tunables["goldilocks_lo"] - au5.tunables["goldilocks_lo"]) < 1e-9)
+    check("autotune goldilocks_hi 存档往返",
+          abs(au6.tunables["goldilocks_hi"] - au5.tunables["goldilocks_hi"]) < 1e-9)
+    check("autotune 信号随档往返",
+          abs(au6.signals["goldilocks_skip_rate"] - au5.signals["goldilocks_skip_rate"]) < 1e-9)
+
+    # ⑥ 旧档（无新字段）→ from_state 用初值
+    au7 = Autotune()
+    au7.from_state({"signals": {}, "tunables": {"note_k": 5}, "cycle_count": 0})
+    check("autotune 旧档 goldilocks_lo 用初值", abs(au7.tunables["goldilocks_lo"] - 0.05) < 1e-9)
+    check("autotune 旧档 goldilocks_hi 用初值", abs(au7.tunables["goldilocks_hi"] - 0.20) < 1e-9)
+
+
+def t_autotune_endo():
+    """内生健康度合成权重接入 autotune（2026-10-13）：endo_alpha/beta/gamma
+    是 autotune 管理的被调量，值在律定域内、h 长期为 0 时下调（避免永久卡死）、
+    存档往返。
+    """
+    from dolphin.autotune import Autotune, _DOMAINS
+
+    for key, dom in (("endo_alpha", _DOMAINS["endo_alpha"]),
+                     ("endo_beta", _DOMAINS["endo_beta"]),
+                     ("endo_gamma", _DOMAINS["endo_gamma"])):
+        # ① h 长期为 0（硬拦截率高）→ 权重下调，且在律定域内
+        au = Autotune()
+        au.signals["endo_zero_rate"] = 0.9
+        adj = au.adjust(None, {})
+        v = au.tunables[key]
+        check(f"autotune h长期为0 → {key} 下调", v < {"endo_alpha": 0.5, "endo_beta": 0.5, "endo_gamma": 1.0}[key],
+              f"{key}={v:.4f}")
+        check(f"autotune {key} 在律定域内", dom[0] <= v <= dom[1], f"{key}={v:.4f}")
+        check(f"autotune 调整记录含 {key}", key in adj and adj[key][0] == "down",
+              f"adj={adj.get(key)}")
+
+        # ② 存档往返
+        au2 = Autotune()
+        au2.signals["endo_zero_rate"] = 0.9
+        au2.adjust(None, {})
+        st = au2.to_state()
+        au3 = Autotune()
+        au3.from_state(st)
+        check(f"autotune {key} 存档往返",
+              abs(au3.tunables[key] - au2.tunables[key]) < 1e-9)
+
+    # ③ 旧档（无新字段）→ from_state 用初值
+    au4 = Autotune()
+    au4.from_state({"signals": {}, "tunables": {}, "cycle_count": 0})
+    check("autotune 旧档 endo_alpha 用初值", abs(au4.tunables["endo_alpha"] - 0.5) < 1e-9)
+    check("autotune 旧档 endo_beta 用初值", abs(au4.tunables["endo_beta"] - 0.5) < 1e-9)
+    check("autotune 旧档 endo_gamma 用初值", abs(au4.tunables["endo_gamma"] - 1.0) < 1e-9)
+
+
 if __name__ == "__main__":
     print("== 律符合度常备测试 ==")
     t_l1_bytes()
@@ -3555,6 +3669,8 @@ if __name__ == "__main__":
     t_amygdala()          # 杏仁核自动温度调节（2026-10-08）
     t_amygdala_tone()     # 杏仁核语气感知/显著性/情绪标签（2026-10-13）
     t_endogenous_h()      # 内生健康度 h 影子模式（2026-10-13）
+    t_autotune_goldilocks()  # 金发姑娘阈值接入 autotune（2026-10-13）
+    t_autotune_endo()        # 内生健康度权重接入 autotune（2026-10-13）
     t_cold_quarantine()   # 隔离机制自检（先跑：此时污染若已发生，下面那条会一并变红）
     t_cold_untouched()    # 收尾红线：必须最后跑
     n_ok = sum(PASS)

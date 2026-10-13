@@ -2043,7 +2043,14 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
         sel_data = [e.data for _, e in sel]
         mem_old = select_old_memory(dolphin.memory, dolphin.cycle)
         sig = compute_signals(awake.model, sleeping.model, sel_data, mem_old, dev)
-        res = endo.update(sig["g"], sig["f"], sig["d"], sig["c"])
+        # 内生合成权重由 autotune 慢速自调（律定域内值自成）；旧档/测试无该
+        # 属性时回落模块初值（endogenous.update 的缺省参数 0.5/0.5/1.0）。
+        res = endo.update(
+            sig["g"], sig["f"], sig["d"], sig["c"],
+            alpha=getattr(dolphin, "endo_alpha", None),
+            beta=getattr(dolphin, "endo_beta", None),
+            gamma=getattr(dolphin, "endo_gamma", None),
+        )
         report["m4_endogenous_h"] = round(res["h"], 4)
         report["m4_endogenous_signals"] = {
             "g": round(sig["g"], 4), "f": round(sig["f"], 4),

@@ -161,6 +161,15 @@ class Dolphin:
         # 门控观测计数：太熟跳过 / 太怪挂起的累计条数，随档持久化，写进日志观测。
         self.skipped_too_easy = 0
         self.suspended_too_hard = 0
+        # 金发姑娘带通阈值（2026-10-13）：由 autotune 慢速自调（域内值自成），
+        # 初值 0.05/0.20 与模块常量一致；learn() 从 autotune 读取当前值。
+        self.goldilocks_lo = 0.05
+        self.goldilocks_hi = 0.20
+        # 内生健康度合成权重（2026-10-13）：由 autotune 慢速自调（域内值自成），
+        # 初值 0.5/0.5/1.0 与旧模块常量一致；life.run_cycle 读取当前值传入。
+        self.endo_alpha = 0.5
+        self.endo_beta = 0.5
+        self.endo_gamma = 1.0
 
     def awake(self):
         return self.h[self.awake_idx]
@@ -304,7 +313,15 @@ class Dolphin:
         finally:
             self._busy_dec()
         with self.feed_lock:
-            state, delta = goldilocks_gate(surprise, self.ability)
+            # 金发姑娘带通阈值由 autotune 慢速自调（律定域内值自成）。旧档/
+            # 测试没有 autotune 或该量时回落模块常量初值（goldilocks.py 默认参数）。
+            lo = self.goldilocks_lo
+            hi = self.goldilocks_hi
+            au = getattr(self, "autotune", None)
+            if au is not None:
+                lo = au.get("goldilocks_lo", lo)
+                hi = au.get("goldilocks_hi", hi)
+            state, delta = goldilocks_gate(surprise, self.ability, lo=lo, hi=hi)
             if state == "skip":
                 self.skipped_too_easy += 1
                 self.learn_total += 1  # G3：部署侧经验流入总量（守护模式的恢复信号）
@@ -492,6 +509,14 @@ class Dolphin:
             self.life_ctl.from_state(ck["life"])
         if ck.get("autotune"):
             self.autotune.from_state(ck["autotune"])
+            # 2026-10-13：把 autotune 管理的被调量同步回 Dolphin 属性，确保
+            # 重启后 learn()/life.run_cycle 读到的是随档持久化的当前值，而非初值。
+            # 旧档没有这些量时 autotune 保持初值，同步后仍与模块常量一致。
+            self.goldilocks_lo = float(self.autotune.get("goldilocks_lo", self.goldilocks_lo))
+            self.goldilocks_hi = float(self.autotune.get("goldilocks_hi", self.goldilocks_hi))
+            self.endo_alpha = float(self.autotune.get("endo_alpha", self.endo_alpha))
+            self.endo_beta = float(self.autotune.get("endo_beta", self.endo_beta))
+            self.endo_gamma = float(self.autotune.get("endo_gamma", self.endo_gamma))
         if ck.get("amygdala"):  # 2026-10-08：杏仁核状态随档恢复（旧档无此字段则保持初值）
             self.amygdala.from_state(ck["amygdala"])
         if ck.get("endogenous"):  # 2026-10-13：内生健康度滚动历史随档恢复（旧档无则保持初值）

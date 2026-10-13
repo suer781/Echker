@@ -40,6 +40,16 @@ _DOMAINS = {
     # 判决带传导系数（2026-10-11）：K_MARGIN 真正接入反馈回路——域 [1.0,3.0]，
     # 域本身是律（1.0=1SE 判决下限，3.0≈单侧 99.9% 上限，越界会破坏门控语义）。
     "k_margin": (1.0, 3.0),
+    # 金发姑娘带通阈值（2026-10-13）：太熟/太怪的相对偏离阈值域。
+    # 域本身是律：LO 下限 2%（基本不过滤）上限 10%（全跳过）；HI 下限 10%
+    # （大量挂起）上限 50%（几乎不挂起）。域内值由跳过率/挂起率反馈自调。
+    "goldilocks_lo": (0.02, 0.10),
+    "goldilocks_hi": (0.10, 0.50),
+    # 内生健康度合成权重（2026-10-13）：遗忘/发散惩罚权重域 [0.1,0.9]，
+    # 坍缩惩罚权重域 [0.5,1.5]。初值 0.5/0.5/1.0 与旧模块常量一致。
+    "endo_alpha": (0.1, 0.9),
+    "endo_beta": (0.1, 0.9),
+    "endo_gamma": (0.5, 1.5),
 }
 
 # 每多少个睡眠周期调整一次（慢环；测试周期数远小于此，永不触发）
@@ -62,6 +72,9 @@ class Autotune:
             "kd_ratio": 0.5,                # kd_loss/(ce_loss+kd_loss) EMA
             "sleep_interval_ema": 15.0,      # 实际睡眠间隔（周期）EMA
             "rollback_rate": 0.0,           # 连续周期回滚率 EMA
+            "goldilocks_skip_rate": 0.0,    # 金发姑娘太熟跳过率 EMA（[0,1]）
+            "goldilocks_suspend_rate": 0.0,  # 金发姑娘太怪挂起率 EMA（[0,1]）
+            "endo_zero_rate": 0.0,           # 内生健康度 h 硬拦截为 0 的占比 EMA
         }
         self.tunables = {
             "note_k": 5, "dream_k": 5, "promote_hits": 3,
@@ -71,6 +84,13 @@ class Autotune:
             "sleep_steps_light": 16, "sleep_steps_rem": 40,
             # 判决带传导系数（2026-10-11）：初值 2.0 = probe.K_MARGIN（域内）。
             "k_margin": 2.0,
+            # 金发姑娘带通阈值（2026-10-13）：初值 0.05/0.20 与模块常量一致。
+            "goldilocks_lo": 0.05,
+            "goldilocks_hi": 0.20,
+            # 内生健康度合成权重（2026-10-13）：初值 0.5/0.5/1.0 与旧常量一致。
+            "endo_alpha": 0.5,
+            "endo_beta": 0.5,
+            "endo_gamma": 1.0,
         }
         self.cycle_count = 0   # 已运行周期数（Autotune 内部计数）
         self.last_adjust = {} # 上次调整记录（报告用）
@@ -79,6 +99,12 @@ class Autotune:
         # （light 浅睡不参与惩罚/调节）。adjust 时消费后清空。不随档持久化
         # （短期调节缓存，丢失无害，重启后从空窗口重新累积）。
         self.gate_history = []
+        # 金发姑娘计数增量跟踪（2026-10-13）：记录上次消费的 skipped/suspended
+        # 累计计数，用于在 update_signals 中计算本周期增量。不随档持久化。
+        # None = 尚未初始化（on_cycle 首次遇到 Dolphin 时以当前计数为基准，
+        # 避免把重启前历史累计当成增量）。
+        self._last_skipped = None
+        self._last_suspended = None
 
     # ---------- 持久化 ----------
 
@@ -100,6 +126,12 @@ class Autotune:
         self.cycle_count = int(st.get("cycle_count", 0))
         self.last_adjust = st.get("last_adjust") or {}
         return self
+
+    # ---------- 被调量读取（调用点消费） ----------
+
+    def get(self, key, default=None):
+        """读取被调量的当前值。旧档/测试没有该量时返回 default。"""
+        return self.tunables.get(key, default)
 
     # ---------- 信号更新（每周期调用） ----------
 
@@ -151,6 +183,32 @@ class Autotune:
             m, e = report.get("gate_margin"), report.get("gate_eps")
             if m is not None and e is not None and e > 0:
                 self.gate_history.append((bool(report["passed"]), float(m), float(e)))
+        # 金发姑娘带通反馈（2026-10-13）：由 learn() 的 skipped/suspended 累计
+        # 计数增量（dolphin.py 属性随档已有）驱动，用 EMA 平滑成 [0,1] 速率。
+        # 每个睡眠周期只消费一次增量，避免同一批数据被重复计数。
+        if d is not None:
+            sk = int(getattr(d, "skipped_too_easy", 0))
+            su = int(getattr(d, "suspended_too_hard", 0))
+            if self._last_skipped is None:  # 首次：以当前计数为基准，不算增量
+                self._last_skipped = sk
+                self._last_suspended = su
+            sk_inc = max(0, sk - self._last_skipped)
+            su_inc = max(0, su - self._last_suspended)
+            total_inc = sk_inc + su_inc
+            if total_inc > 0:
+                s["goldilocks_skip_rate"] = 0.9 * s["goldilocks_skip_rate"] + 0.1 * (sk_inc / total_inc)
+                s["goldilocks_suspend_rate"] = 0.9 * s["goldilocks_suspend_rate"] + 0.1 * (su_inc / total_inc)
+            else:
+                # 无新门控样本：信号自然衰减，防止旧速率卡死。
+                s["goldilocks_skip_rate"] *= 0.9
+                s["goldilocks_suspend_rate"] *= 0.9
+            self._last_skipped = sk
+            self._last_suspended = su
+        # 内生健康度硬拦截率（2026-10-13）：h 为 0（硬拦截）的周期占比。
+        h = report.get("m4_endogenous_h")
+        if h is not None:
+            zero = 1.0 if float(h) <= 0.0 else 0.0
+            s["endo_zero_rate"] = 0.9 * s["endo_zero_rate"] + 0.1 * zero
 
     # ---------- 慢速调整（每 AUTOTUNE_EVERY 周期一次） ----------
 
@@ -306,6 +364,42 @@ class Autotune:
         # 消费门控历史（每 AUTOTUNE_EVERY 周期一次）
         self.gate_history = []
 
+        # 金发姑娘带通阈值（2026-10-13）：
+        # - 跳过率偏高（>0.5 一半数据被当太熟）→ 调大 goldilocks_lo（放宽「太熟」
+        #   判定，少跳过）；跳过率偏低（<0.05 几乎没跳过）→ 调小 goldilocks_lo
+        #   （收紧「已会」判定）。目标：跳过率稳定在 ~0.2-0.3。
+        # - 挂起率偏高（>0.3 三成数据太怪）→ 调大 goldilocks_hi（放宽「太怪」
+        #   判定）；挂起率偏低（<0.05）→ 调小 goldilocks_hi。目标：挂起率稳定
+        #   在 ~0.1-0.2。
+        if s["goldilocks_skip_rate"] > 0.5:
+            v = nudge("goldilocks_lo", _STEP, *_DOMAINS["goldilocks_lo"])
+            if v: adj["goldilocks_lo"] = ("up", round(v, 4),
+                                    f"skip_rate={s['goldilocks_skip_rate']:.2f}")
+        elif s["goldilocks_skip_rate"] < 0.05:
+            v = nudge("goldilocks_lo", -_STEP, *_DOMAINS["goldilocks_lo"])
+            if v: adj["goldilocks_lo"] = ("down", round(v, 4),
+                                          f"skip_rate={s['goldilocks_skip_rate']:.2f}")
+        if s["goldilocks_suspend_rate"] > 0.3:
+            v = nudge("goldilocks_hi", _STEP, *_DOMAINS["goldilocks_hi"])
+            if v: adj["goldilocks_hi"] = ("up", round(v, 4),
+                                        f"suspend_rate={s['goldilocks_suspend_rate']:.2f}")
+        elif s["goldilocks_suspend_rate"] < 0.05:
+            v = nudge("goldilocks_hi", -_STEP, *_DOMAINS["goldilocks_hi"])
+            if v: adj["goldilocks_hi"] = ("down", round(v, 4),
+                                          f"suspend_rate={s['goldilocks_suspend_rate']:.2f}")
+
+        # 内生健康度合成权重（2026-10-13）：最简单的一条规则——h 长期为 0
+        # （硬拦截/惩罚过重钳位到 0）时降低惩罚权重，避免「永久卡死」。硬拦截
+        # （d NaN 或 >10×基线）直接返回 h=0 不走权重合成，因此降权重不会绕过
+        # 物理保护，只缓解「惩罚过重导致 h 长期钳位 0」的僵局。
+        if s["endo_zero_rate"] > 0.6:
+            for key, dom in (("endo_alpha", "endo_alpha"),
+                             ("endo_beta", "endo_beta"),
+                             ("endo_gamma", "endo_gamma")):
+                v = nudge(key, -_STEP, *_DOMAINS[dom])
+                if v: adj[key] = ("down", round(v, 4),
+                                   f"h_zero_rate={s['endo_zero_rate']:.2f}")
+
         self.last_adjust = adj
         # 把调整后的值同步到 Dolphin 对象（dolphin.py 使用这些属性）。
         # d 可能为 None（单元测试/直调场景）：此时只维护 tunables 状态。
@@ -327,6 +421,15 @@ class Autotune:
             d.sleep_steps_rem = int(round(t["sleep_steps_rem"]))
             # 判决带传导系数（2026-10-11）：同步回 Dolphin 属性，Dolphin.gate 消费。
             d.k_margin = round(t["k_margin"], 4)
+            # 金发姑娘带通阈值（2026-10-13）：同步回 Dolphin 属性，learn() 的
+            # goldilocks_gate 调用点会读取（见 dolphin.py learn()）。
+            d.goldilocks_lo = round(t["goldilocks_lo"], 4)
+            d.goldilocks_hi = round(t["goldilocks_hi"], 4)
+            # 内生健康度合成权重（2026-10-13）：同步回 Dolphin 属性，
+            # life.run_cycle 的 Endogenous.update 调用点会读取。
+            d.endo_alpha = round(t["endo_alpha"], 4)
+            d.endo_beta = round(t["endo_beta"], 4)
+            d.endo_gamma = round(t["endo_gamma"], 4)
         return adj
 
     # ---------- 周期入口（由 run_cycle 调用） ----------

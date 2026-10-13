@@ -27,23 +27,29 @@ GOLDILOCKS_HI = 0.20   # 惊喜度比基线高 20% = 太怪（学不会）→ �
 PRIOR_ABILITY = math.log(256)  # ≈5.545
 
 
-def classify_delta(delta):
+def classify_delta(delta, lo=GOLDILOCKS_LO, hi=GOLDILOCKS_HI):
     """按相对偏离 delta 判金发姑娘三态。
 
     返回 "skip"（太熟跳过）/ "suspend"（太怪挂起）/ "pass"（中间带放行）。
+
+    lo/hi 是带通阈值（太熟/太怪的相对偏离边界），默认取模块常量初值；
+    生产路径由 Dolphin 从 autotune 读取当前值传入（律定域内值自成）。
     """
-    if delta < -GOLDILOCKS_LO:
+    if delta < -lo:
         return "skip"
-    if delta > GOLDILOCKS_HI:
+    if delta > hi:
         return "suspend"
     return "pass"
 
 
-def gate(surprise, ability):
+def gate(surprise, ability, lo=GOLDILOCKS_LO, hi=GOLDILOCKS_HI):
     """金发姑娘硬门控：返回 (状态, delta)。状态 ∈ {"skip","suspend","pass"}。
 
     ability 是当前能力基线（非负；随睡眠周期慢速 EMA 更新）。surprise 是
     单条经验经当前醒脑算出的惊讶度（mean_nll）。
+
+    lo/hi 是带通阈值，默认取模块常量初值；生产路径由 Dolphin 从 autotune
+    读取当前值传入（律定域内值自成，见 dolphin.py learn()）。
     """
     delta = (surprise - ability) / ability
-    return classify_delta(delta), delta
+    return classify_delta(delta, lo=lo, hi=hi), delta
