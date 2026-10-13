@@ -3401,6 +3401,107 @@ def t_amygdala():
           f"orig={a_save.to_state()} load={a_load.to_state()}")
 
 
+def t_amygdala_tone():
+    """杏仁核语气感知/显著性/情绪标签（2026-10-13）：纯 surprise 驱动，无硬编码词。
+
+    read_tone 对高 surprise（用户说了预期之外的话）返回负 tone，对低 surprise
+    （预期内/满意）返回正 tone；tone 与文本内容无关（同一 surprise 不同文本
+    返回相同值，证明不读词表）；salience 用幅度度量显著（高幅度 > 低幅度）；
+    emotion_tag 打分落在 [0,1]。
+    """
+    from dolphin.amygdala import Amygdala
+
+    a = Amygdala()
+    a.read_tone("任意文本甲", 5.0)  # 预热基线
+    t_high = a.read_tone("完全不同的文本乙", 9.0)
+    t_low = a.read_tone("又一句无关的话", 2.0)
+    check("amygdala tone 高 surprise → 负信号", t_high < 0, f"t_high={t_high:.4f}")
+    check("amygdala tone 低 surprise → 正信号", t_low > 0, f"t_low={t_low:.4f}")
+    check("amygdala tone 落在 [-1,1]", -1.0 <= t_high <= 1.0 and -1.0 <= t_low <= 1.0)
+
+    # 纯 surprise 驱动：同一 surprise 下不同文本返回相同 tone（不读词表）
+    a2, a3 = Amygdala(), Amygdala()
+    a2.read_tone("预热种子", 5.0)
+    a3.read_tone("另一段预热种子", 5.0)
+    t1 = a2.read_tone("文本内容A：完全不同", 7.0)
+    t2 = a3.read_tone("文本内容B：也不一样", 7.0)
+    check("amygdala tone 与文本内容无关（纯 surprise）", abs(t1 - t2) < 1e-12,
+          f"t1={t1} t2={t2}")
+
+    # 显著性：surprise 幅度越大越显著（正/负显著都算幅度）
+    a4 = Amygdala()
+    a4.read_tone("预热", 5.0)
+    s_high = a4.salience(9.0)
+    s_low = a4.salience(2.0)
+    check("amygdala salience 高幅度 > 低幅度", s_high > s_low,
+          f"s_high={s_high:.4f} s_low={s_low:.4f}")
+    check("amygdala salience 落在 [0,1]", 0.0 <= s_high <= 1.0 and 0.0 <= s_low <= 1.0)
+
+    # 情绪标签打分：落在 [0,1] 的显著性分
+    tag = a4.emotion_tag(9.0)
+    check("amygdala emotion_tag 分数在 [0,1]", 0.0 <= tag <= 1.0, f"tag={tag:.4f}")
+
+
+def t_endogenous_h():
+    """内生健康度 h（2026-10-13）：四信号计算、h 合成、NaN 硬拦截、归一化。
+
+    compute_signals 对同源模型返回 g≈0/f=0（无旧记忆）/d≈1/c≈0；weight_norm_ratio
+    对 2× 权重返回 d≈2；Endogenous.update 相对自身历史中位基线归一化后合成 h
+    （连续喂同值 → 中位基线=该值 → g_norm/f_norm=1 → h=0.5）；NaN d 与 d>10×
+    基线触发硬拦截 h=0。
+    """
+    from dolphin.endogenous import Endogenous, compute_signals, weight_norm_ratio
+    from dolphin.model import ByteTransformer, Config
+
+    # a) 同源模型：g≈0、f=0（无旧记忆）、d≈1、c≈0
+    cfg = Config(d_model=32, n_layers=1, n_heads=2, block_size=64)
+    awake = ByteTransformer(cfg)
+    sleeping = ByteTransformer(cfg)
+    sleeping.load_state_dict(awake.state_dict())
+    data = [("内生信号验证数据，长度足够越过最短评分窗口，用于学习增益与熵差计算。" * 2).encode()]
+    sig = compute_signals(awake, sleeping, data, [], "cpu")
+    check("endogenous 同源模型 g≈0", abs(sig["g"]) < 1e-4, f"g={sig['g']:.6f}")
+    check("endogenous 同源模型 d≈1", abs(sig["d"] - 1.0) < 1e-6, f"d={sig['d']:.6f}")
+    check("endogenous 同源模型 c≈0", abs(sig["c"]) < 1e-4, f"c={sig['c']:.6f}")
+    check("endogenous 无旧记忆 f=0", sig["f"] == 0.0)
+    data2 = [("旧记忆验证数据，用于遗忘信号计算。" * 2).encode()]
+    sig2 = compute_signals(awake, sleeping, data, data2, "cpu")
+    check("endogenous 同源模型遗忘 f≈0", abs(sig2["f"]) < 1e-4, f"f={sig2['f']:.6f}")
+
+    # b) 发散 d：sleeping 权重 ×2 → 范数比 ≈2，无 NaN
+    with torch.no_grad():
+        for p in sleeping.parameters():
+            p.mul_(2.0)
+    d2, nan2 = weight_norm_ratio(sleeping, awake)
+    check("endogenous 权重范数比 d≈2 且无 NaN", abs(d2 - 2.0) < 1e-4 and not nan2,
+          f"d={d2:.6f} nan={nan2}")
+
+    # c) 归一化 + h 合成：连续喂同值 → 中位基线=该值 → g_norm/f_norm=1 → h=0.5
+    en = Endogenous()
+    for _ in range(5):
+        en.update(g=2.0, f=1.0, d=1.0, c=0.0)
+    r = en.update(g=2.0, f=1.0, d=1.0, c=0.0)
+    check("endogenous 中位基线归一化 g_norm=1.0", abs(r["g_norm"] - 1.0) < 1e-6,
+          f"g_norm={r['g_norm']:.6f}")
+    check("endogenous 中位基线归一化 f_norm=1.0", abs(r["f_norm"] - 1.0) < 1e-6,
+          f"f_norm={r['f_norm']:.6f}")
+    check("endogenous h 合成 = 0.5", abs(r["h"] - 0.5) < 1e-6, f"h={r['h']:.6f}")
+
+    # d) NaN 硬拦截 → h=0
+    en2 = Endogenous()
+    r2 = en2.update(g=1.0, f=0.0, d=float("nan"), c=0.0)
+    check("endogenous NaN 硬拦截 h=0", r2["h"] == 0.0 and r2["hard_block"],
+          f"h={r2['h']} hard={r2['hard_block']}")
+
+    # e) d > 10× 基线硬拦截 → h=0
+    en3 = Endogenous()
+    for _ in range(5):
+        en3.update(g=1.0, f=0.0, d=1.0, c=0.0)  # d 中位基线=1.0
+    r3 = en3.update(g=1.0, f=0.0, d=12.0, c=0.0)
+    check("endogenous d>10×基线 硬拦截 h=0", r3["h"] == 0.0 and r3["hard_block"],
+          f"h={r3['h']} hard={r3['hard_block']}")
+
+
 if __name__ == "__main__":
     print("== 律符合度常备测试 ==")
     t_l1_bytes()
@@ -3452,6 +3553,8 @@ if __name__ == "__main__":
     t_stdin_chat()        # 无模式 stdin 对话通道（2026-10-07）
     t_stdin_chat_loop()   # stdin 对话通道线程循环（EOF/stop_flag 退出）
     t_amygdala()          # 杏仁核自动温度调节（2026-10-08）
+    t_amygdala_tone()     # 杏仁核语气感知/显著性/情绪标签（2026-10-13）
+    t_endogenous_h()      # 内生健康度 h 影子模式（2026-10-13）
     t_cold_quarantine()   # 隔离机制自检（先跑：此时污染若已发生，下面那条会一并变红）
     t_cold_untouched()    # 收尾红线：必须最后跑
     n_ok = sum(PASS)

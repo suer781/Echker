@@ -19,6 +19,7 @@ import torch
 from .adapt import Plasticity
 from .amygdala import Amygdala
 from .autotune import Autotune
+from .endogenous import Endogenous
 from .experience import Experience, ExperienceBuffer
 from .goldilocks import PRIOR_ABILITY, gate as goldilocks_gate
 from .life import LifeController
@@ -114,6 +115,10 @@ class Dolphin:
         # （保守稳定），威胁低→高温（创造丰富）。慢环（AMYGDALA_EVERY=20 周期
         # 一次）确保短测试永不触发。随档持久化。
         self.amygdala = Amygdala()
+        # 内生健康度 h（影子模式，2026-10-13）：四内生信号 g/f/d/c 的滚动
+        # 归一化 + 合成。只在 run_cycle 体检后并行计算并写日志，不替换
+        # gate()/post_exam 判决。随档持久化（save/load 用 ck.get 兼容旧档）。
+        self.endogenous = Endogenous()
         # 参数自适应控制器（2026-10-06 用户定案）：独立于恒温器判决主路径的
         # 排计划控制器。默认开启（param_adaptive_enabled=True，生产默认启用"完全
         # 自学习"）；测试用 make_dolphin 工厂显式设 False 做隔离。
@@ -442,6 +447,8 @@ class Dolphin:
                 # 杏仁核温度自动托管（2026-10-08）：温度/信号/调整周期随档，
                 # 重启后恢复上次的自动托管状态。
                 "amygdala": self.amygdala.to_state(),
+                # 内生健康度（2026-10-13）：四信号滚动历史随档透传（影子模式）。
+                "endogenous": self.endogenous.to_state(),
                 # 学习停滞检测原料（2026-10-12）：margin 滚动窗随档透传。
                 "last_margins": list(self.last_margins),
                 # 参数自适应控制律（2026-10-06）：三段式下跌状态机随档。
@@ -487,6 +494,8 @@ class Dolphin:
             self.autotune.from_state(ck["autotune"])
         if ck.get("amygdala"):  # 2026-10-08：杏仁核状态随档恢复（旧档无此字段则保持初值）
             self.amygdala.from_state(ck["amygdala"])
+        if ck.get("endogenous"):  # 2026-10-13：内生健康度滚动历史随档恢复（旧档无则保持初值）
+            self.endogenous.from_state(ck["endogenous"])
         if ck.get("param_adaptive"):
             self.param_adaptive.from_state(ck["param_adaptive"])
         from .surgery import apply_morphology

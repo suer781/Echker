@@ -179,6 +179,7 @@ import time
 import torch
 import torch.nn.functional as F
 
+from .endogenous import compute_signals, select_old_memory  # 内生健康度（影子模式，2026-10-13）
 from .sleep import varied_replay  # 律 L6 唯一实现，复用不复制
 from .surgery import (MEM_BUDGET, born_again_student, break_symmetry_dmodel,
                       delta_params_attn_v, delta_params_dmodel, delta_params_mlp,
@@ -2032,6 +2033,27 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     report["kd_last"] = round(kd_hist[-1], 4)
     if vit is not None:
         vit.end_cycle(steps)
+
+    # —— M4 内生健康度（影子模式，2026-10-13）：体检后并行计算 h，只观测不改判决 ——
+    # 在此点 sleeping=本轮刚训练完的新脑、awake=冻结服务脑，post_exam 尚未换班/回滚，
+    # 正是 g/f/d/c 四内生信号的测量窗口。红线：不改 gate()/post_exam 判决、不退役探测集。
+    # 挂 M4 总开关（life_enabled=False → 纯 M0 语义，律 L11 安全阀，报告无 m4_ 键）。
+    endo = getattr(dolphin, "endogenous", None)
+    if m4 and endo is not None:
+        sel_data = [e.data for _, e in sel]
+        mem_old = select_old_memory(dolphin.memory, dolphin.cycle)
+        sig = compute_signals(awake.model, sleeping.model, sel_data, mem_old, dev)
+        res = endo.update(sig["g"], sig["f"], sig["d"], sig["c"])
+        report["m4_endogenous_h"] = round(res["h"], 4)
+        report["m4_endogenous_signals"] = {
+            "g": round(sig["g"], 4), "f": round(sig["f"], 4),
+            "d": round(sig["d"], 4), "c": round(sig["c"], 4),
+        }
+        if verbose:
+            print(f"[睡眠 {report['cycle']}] 内生健康度 h={res['h']:.4f}"
+                  f" g={sig['g']:.4f} f={sig['f']:.4f}"
+                  f" d={sig['d']:.4f} c={sig['c']:.4f}"
+                  + ("  [硬拦截]" if res["hard_block"] else ""))
 
     # 学习停滞检测原料（2026-10-12）：体检 margin 追加到滚动窗（保留最近 30 个）。
     # _detect_learning_stall 在下一周期 _decide 中读取该窗口判断整体是否学不动。

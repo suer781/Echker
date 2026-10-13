@@ -38,6 +38,12 @@ _DOMAIN_P = (0.5, 1.0)
 _STEP = 0.05
 # 威胁等级的中性阈值：高于此判定为"高威胁"（降温收紧），低于则"低威胁"（升温放松）
 _THREAT_MID = 0.5
+# 语气/显著性（2026-10-13）：全部由 surprise（=mean_nll）内生派生，不硬编码任何词。
+# surprise 相对自身滚动基线的相对偏离，经 _TONE_GAIN/_SALIENCE_GAIN 缩放后钳位。
+_TONE_GAIN = 1.0        # 相对偏离为 1（即 surprise=2×基线或 0）时语气饱和到 ±1
+_SALIENCE_GAIN = 1.0    # 相对偏离幅度为 1 时显著性饱和到 1
+_TONE_EMA = 0.1         # 语气基线的 EMA 系数（慢漂移，防单条抖动）
+_SURPRISE_EPS = 1e-6    # 浮点守卫：基线为 0 时避免除零
 
 
 def _clamp(v, lo, hi):
@@ -67,6 +73,10 @@ class Amygdala:
         }
         self.last_adjust_cycle = None  # 上次实际调整的睡眠周期号（None=尚未调整）
         self.last_adjust = {}          # 上次调整记录（报告/存档用）
+        # 语气感知的 surprise 滚动基线（None=尚未观测）。read_tone 用它把当前
+        # surprise 映射为连续语气信号 tone ∈ [-1,1]（负=纠正/困惑，正=满意）。
+        # 纯 surprise 驱动：user_text 内容不被解码、不参与任何词表匹配。
+        self.surprise_ema = None
 
     # ---------- 威胁等级计算 ----------
 
@@ -142,6 +152,52 @@ class Amygdala:
             s["note_hit_rate"] = 0.9 * s["note_hit_rate"] + 0.1 * (note_hits / note_total)
         else:
             s["note_hit_rate"] = 0.9 * s["note_hit_rate"]  # 无笔记：信号自然衰减
+
+    # ---------- 语气感知 / 显著性 / 情绪标签（2026-10-13，纯 surprise 驱动） ----------
+
+    def _surprise_base(self, surprise):
+        """当前语气基线：已观测则取 EMA，否则以首条 surprise 自定基线。"""
+        return self.surprise_ema if self.surprise_ema is not None else float(surprise)
+
+    def read_tone(self, user_text, surprise):
+        """感知用户语气，返回连续语气信号 tone ∈ [-1, +1]（负=纠正/困惑，正=满意）。
+
+        纯 surprise 驱动，不硬编码任何词表：surprise = mean_nll(user_text) 越高，
+        用户越说了模型预期之外的话（纠正/困惑/新信息）→ tone 越负（需重点学）；
+        surprise 越低 → 用户说了模型预期的（满意/敷衍）→ tone 越正（已掌握）。
+
+        user_text 仅保留接口兼容（未来可做多模态融合），内容不被解码、
+        不参与任何词匹配——信号完全由 surprise 相对自身滚动基线导出。
+        调用后更新滚动基线（慢 EMA，防单条抖动）。
+        """
+        surprise = float(surprise)
+        base = self._surprise_base(surprise)
+        tone = _clamp((base - surprise) / max(abs(base), _SURPRISE_EPS) / _TONE_GAIN,
+                      -1.0, 1.0)
+        self.surprise_ema = surprise if self.surprise_ema is None \
+            else (1 - _TONE_EMA) * self.surprise_ema + _TONE_EMA * surprise
+        return tone
+
+    def salience(self, surprise):
+        """显著性检测：这个刺激多值得注意（正的显著和负的显著都算）。
+
+        用 surprise 相对自身基线的**幅度**度量，返回 [0,1]。不再只关注负向
+        威胁——用户既可能给纠正（负向显著），也可能给新信息（正向显著），
+        两者幅度都大 = 都值得注意。
+        """
+        surprise = float(surprise)
+        base = self._surprise_base(surprise)
+        return _clamp(abs(surprise - base) / max(abs(base), _SURPRISE_EPS)
+                      / _SALIENCE_GAIN, 0.0, 1.0)
+
+    def emotion_tag(self, surprise):
+        """情绪显著性打分：给经验打「情绪显著性」分（用 surprise 幅度），供记忆库
+        优先保留/复活。本次只实现打分方法，是否接入记忆库后续。
+
+        返回 [0,1] 标量（越大越显著）。与 salience 同源，独立成方法以便后续
+        扩展为含效价（valence）的完整情绪标签而不改调用点。
+        """
+        return self.salience(surprise)
 
     # ---------- 慢速调整（每 AMYGDALA_EVERY 周期一次） ----------
 
@@ -233,6 +289,7 @@ class Amygdala:
             "signals": self.signals,
             "last_adjust_cycle": self.last_adjust_cycle,
             "last_adjust": self.last_adjust,
+            "surprise_ema": self.surprise_ema,
         }
 
     def from_state(self, st):
@@ -249,4 +306,7 @@ class Amygdala:
         lac = st.get("last_adjust_cycle")
         self.last_adjust_cycle = int(lac) if lac is not None else None
         self.last_adjust = st.get("last_adjust") or {}
+        # 语气基线（2026-10-13）：旧档无此字段 → None（下次 read_tone 自定基线）。
+        sema = st.get("surprise_ema")
+        self.surprise_ema = float(sema) if sema is not None else None
         return self
