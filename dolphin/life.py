@@ -49,7 +49,7 @@
     "权重通道先尽力"由生长的多重 AND 门槛与限频承担）。
 
 **监督审计 R 级修复（2026-10-05）**：
-  - R1 设定点带"稳态即越带"：XI_HI=0.20 低于 57M（当时部署身体，系统无参数上限）
+  - R1 设定点带"稳态即越带"：XI_HI=0.20 低于大模型（历史部署身体，系统无参数上限）
     真实身体实测稳态 gap̄ ≈0.45（16 个可动刀位全部 > 0.20）且带不可自校准 → born_sustained
     12 周期强制收缩在健康系统几乎必触发。带改浮动：max(XI_HI, gap̄ 滞后滚动
     p90)（_xi_hi_eff / _site_xi_eff）；滞后窗（XI_LAG=BORN_PERSIST）保证
@@ -120,7 +120,7 @@ ROLLBACK；NORMAL → WITHER_PLAN → WITHERING（学生保留标志：体检失
   —— 连续结构恒温器（研究报告 §3；2026-10-05 实测定标）——
   XI_HI=0.20             【值自成·带下限】过剩设定点带的冷启动下限（研究报告：
                          健康周转余量 5–20% 类比）。实际带 = max(XI_HI,
-                         gap̄ 滞后滚动 p90)（_xi_hi_eff；R1 修复：57M（历史部署身体）
+                         gap̄ 滞后滚动 p90)（_xi_hi_eff；R1 修复：大模型（历史部署身体）
                          真实身体稳态 gap̄≈0.45 ≫ 0.20，带不可自校准则稳态即
                          越带——带随系统自身稳态分布上浮，定标工件
                          定标/gapbar_定标结果.json）
@@ -179,7 +179,6 @@ import time
 import torch
 import torch.nn.functional as F
 
-from .endogenous import compute_signals, select_old_memory  # 内生健康度（影子模式，2026-10-13）
 from .sleep import varied_replay  # 律 L6 唯一实现，复用不复制
 from .surgery import (MEM_BUDGET, born_again_student, break_symmetry_dmodel,
                       delta_params_attn_v, delta_params_dmodel, delta_params_mlp,
@@ -508,7 +507,7 @@ class LifeController:
     def _xi_hi_eff(self):
         """过剩设定点带（值自成；监督审计 R1 修复）：max(XI_HI, gap̄ 滞后滚动 p90)。
 
-        为什么带要浮：XI_HI=0.20 下限取自"健康周转余量 5–20%"类比，而 57M（历史
+        为什么带要浮：XI_HI=0.20 下限取自"健康周转余量 5–20%"类比，而大模型（历史
         部署身体）真实身体实测稳态 gap̄≈0.45（定标/gapbar_定标结果.json：两半球
         0.448–0.468，16 个可动刀位全部 > 0.20）——带低于稳态且不可自校准
         ⇒ 稳态即越带 ⇒ born_sustained 12 周期强制收缩在健康系统上必触发。带改
@@ -636,7 +635,7 @@ class LifeController:
         战役中（非 NORMAL）只做观察与记账，不做新判决。每周期至多一次结构
         动作（判决在 NORMAL 且无 pending 计划时发生）。
 
-        observe_only=True（三档睡眠的 light/rem）：只做观察、记账与 body 报告，
+        observe_only=True（四档睡眠的 light）：只做观察、记账与 body 报告，
         不执行结构手术/判决动作——恒温器只观测不动刀。
         """
         self.supply_account(d, sel)
@@ -882,6 +881,10 @@ class LifeController:
         if not self.last_shrink_ok(d.cycle):
             return self._hold("硬件压力（限频）",
                               f"显存压力 {ratio:.2f} 但收缩冷却中")
+        # F-02：nrem 浅睡禁止 born-again 重手术（spec S6），硬件压力收缩同样不排。
+        if getattr(d, "_last_sleep_mode", "deep") == "nrem":
+            return self._hold("硬件压力（nrem禁born_again）",
+                              f"显存压力 {ratio:.2f} 但 nrem 浅睡不做重手术（spec S6）")
         # 触发 born-again 收缩，目标由显存决定
         body_frac = self._body_frac(d, d.sleeping().name)
         # 目标体型：使显存回落到预算的 MEM_PRESSURE_TARGET 比例
@@ -1069,6 +1072,11 @@ class LifeController:
         """born-again 计划：目标 T 从 gap̄ 导出（T=1−SHRINK_COEF·gap̄，废除写死
         0.7）；连环缩阻尼（3 周期内再缩 → 系数减半）；成熟刹车容量下限非零
         （累计收缩占比 < MIN_BODY_FRAC → 刹车或拒绝——防无限萎缩，守卫⑥）。"""
+        # F-02：nrem（N2 浅睡）只做轻量容量调整，禁止 born-again 重手术（spec S6）。
+        if getattr(d, "_last_sleep_mode", "deep") == "nrem":
+            return self._hold("nrem禁born_again",
+                              "nrem 浅睡不做 born-again 重手术（spec S6）",
+                              escalated=escalated)
         coef = SHRINK_COEF * (0.5 if self.last_born_again is not None
                               and d.cycle - self.last_born_again < 3 else 1.0)
         T = max(0.5, min(0.85, 1.0 - coef * gap_bar))
@@ -1512,9 +1520,10 @@ class LifeController:
             report["m4_decay"] = self._decay_generation(d, h, v)
         # ③ 连续结构恒温器（活性路径唯一判决者；2026-10-05 取代平台期阶梯——
         #    阶梯触发链数学不可达，见模块 docstring 诊断节）
-        #    三档模式：deep 全量判决/手术；light/rem 只观察不动刀（observe_only）。
+        #    四档模式（S6）：deep/nrem/rem 全量判决/手术（rem 允许生长判决）；
+        #    light 只观察不动刀（observe_only）。
         self.thermo_cycle(d, report, v, stream, sel,
-                          observe_only=(mode in ("light", "rem")))
+                          observe_only=(mode == "light"))
         # （平台期阶梯 `_schedule` 已退役：方法体仅为 tests 固定的历史件保留，
         #   活性路径零调用——退役身份，不许再挂回。）
 
@@ -1814,15 +1823,71 @@ class LifeController:
 # 睡眠周期：唯一实现（M0 全语义 + feeding 线程安全语义 + M4 钩子）
 # ---------------------------------------------------------------------------
 
+def compute_sleep_program(dolphin):
+    """睡眠编制计算（下丘脑调度映射）：压力越高→深度睡眠占比越多、睡眠时长越长。
+    系数为初值（经 autotune 慢调，F-07 参数化）；必须满足单调性约束（deep 占比
+    随 p 单调不减、total_steps 随 p 单调不减）。四档占比非负且和≈1（容差 1e-6）。"""
+    p = max(dolphin.hemi_pressure) / 50.0
+    p = max(0.0, min(1.0, p))
+    debt_ratio = min(1.0, sum(dolphin.debt_ledger.debts) / 1000.0)
+    # F-07：编制系数从 autotune 读取（律定域内值自成），缺省回落初值。
+    au = getattr(dolphin, "autotune", None)
+    rem_base = au.get("sleep_prog_rem_base", 0.2) if au else 0.2
+    rem_debt = au.get("sleep_prog_rem_debt", 0.1) if au else 0.1
+    nrem_scale = au.get("sleep_prog_nrem_scale", 0.5) if au else 0.5
+    total_base = au.get("sleep_prog_total_base", 120) if au else 120
+    deep = p
+    rem = rem_base + rem_debt * debt_ratio
+    nrem = nrem_scale * (1.0 - p)
+    light = max(0.0, 1.0 - deep - rem - nrem)
+    # 归一化（P2 修复）：高压力下 deep+rem+nrem 可能 >1（light 被钳位为 0 后
+    # 四者和 >1，轮盘概率失真）。若三者已超 1，按比例缩放使三者之和为 1，
+    # light=0；否则 light 自然补足余量，四者和恒为 1。
+    total = deep + rem + nrem
+    if total > 1.0:
+        deep, rem, nrem = deep / total, rem / total, nrem / total
+        light = 0.0
+    total_steps = int(total_base * (1.0 + p))
+    return {"deep": deep, "rem": rem, "nrem": nrem,
+            "light": light, "total_steps": total_steps}
+
+
+def _callosum_kl(dolphin, chunks=8, eps=1e-10):
+    """胼胝体通道健康度（S5 防分裂观测）：两半球对 probe 卷面前 chunks 块
+    输入的输出 softmax 分布 KL 散度均值。形状分叉时返回 None（无法比较）。"""
+    probe = getattr(dolphin, "probe_chunks", None) or []
+    if not probe:
+        return None
+    h0, h1 = dolphin.h[0], dolphin.h[1]
+    kls = []
+    with torch.no_grad():
+        for c in probe[:chunks]:
+            if len(c) < 2:
+                continue
+            x = torch.tensor(list(c), dtype=torch.long, device=dolphin.device).unsqueeze(0)
+            logits0, _ = h0.model(x)
+            logits1, _ = h1.model(x)
+            if logits0.shape != logits1.shape:
+                return None
+            p0 = F.softmax(logits0, dim=-1)
+            p1 = F.softmax(logits1, dim=-1)
+            kl = (p0 * (torch.log(p0 + eps) - torch.log(p1 + eps))).sum(dim=-1).mean()
+            kls.append(kl.item())
+    return sum(kls) / len(kls) if kls else None
+
+
 def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feeding=False,
               mode="deep"):
     """睡眠周期全流程。
 
     feeding=False：与 sleep.run_cycle 逐字同语义（M0 等价性，tests 固定）；
-    feeding=True：先换班、后训练的双半球流水线（swap-first sleep mode）——
-    睡眠周期开始立即换班（上一轮就绪的睡脑立即上岗服务），旧醒脑下台成为
-    本轮训练对象；训练在后台继续（做梦注入、摘除式快照、learn_busy 等待、
-    内部阈值反馈保持），训练完体检通过再换班让训练成果上岗，失败则回滚。
+    feeding=True：双半球流水线（swap-first sleep mode + S5 蒸馏方向交替）。
+    偶数相位（_teacher_flip=False）沿用 swap-first：睡眠周期开始立即换班（上一轮
+    就绪的睡脑立即上岗服务），旧醒脑下台成为本轮训练对象；奇数相位
+    （_teacher_flip=True）跳过 swap-first、直接以当前睡脑为训练对象。训练在后台
+    继续（做梦注入、摘除式快照、learn_busy 等待、内部阈值反馈保持），训练完体检
+    通过再换班让训练成果上岗，失败则回滚。每周期结束翻转 _teacher_flip，使连续
+    周期训练对象/教师交替（互为师生）。
     任何时刻服务侧的醒脑都是「最近一次通过体检的半球」（律 L8 门控律不破）。
     M4 钩子仅在 d.life_enabled 且 life_ctl 在场时生效；NORMAL 空账本下全部
     为无训练副作用的观察者（等价性测试固定）。
@@ -1832,31 +1897,33 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     从 Dolphin 属性读取 autotune 调好的值（sleep_steps/kd_alpha/kd_T），实现
     "律固定、值自成"的完全自学习闭环——不再回落人工默认值/命令行参数。
 
-    三档睡眠模式（2026-10-11）：mode ∈ {"deep", "light", "rem"}。
-    - deep：现有完整行为（默认值，与 M0/M4 逐键一致——M4-E 等价性测试固定）。
+    四档睡眠模式（2026-10-13）：mode ∈ {"deep", "light", "nrem", "rem"}。
+    - deep：全量训练 + ReDo 回收/软衰减 + 恒温器全判决（默认值，与 M0/M4
+      逐键一致——M4-E 等价性测试固定）。
     - light：低强度快速巩固——独立步数域 [8,40]、KD 降频（每 4 步一次 KD）、
       照常体检/换班、跳过 ReDo 回收、快通道笔记只记 top-1、恒温器只报告 body
-      不执行手术/判决、param_adaptive 不介入。
+      不执行手术/判决（observe_only）、param_adaptive 不介入。
+    - nrem：N2 浅睡（新增）——独立步数域 [40,120]、KD 正常、恒温器允许判决
+      （observe_only=False，与 deep 同）；职责=轻训练+较大块调整理想容量。
     - rem：中等强度记忆巩固——独立步数域 [20,80]、KD 正常但 kd_alpha×0.8、
-      增强做梦注入（dream_k 取当前域上限或 +2）、照常体检/换班、恒温器只观察
-      不动刀、ReDo 正常、笔记正常。
+      增强做梦注入（dream_k 取当前域上限或 +2）、恒温器允许生长判决
+      （observe_only=False）、ReDo 正常、笔记正常。
+
+    蒸馏方向（S5 互为师生）：KD 恒为「睡脑←醒脑」——当前醒脑是教师。
+    换班后角色互换，蒸馏方向随换班交替（互为师生），记录于 report["teacher"]。
+    注（F-06）：由于 _teacher_flip 是二态机，连续周期教师呈**首单发后成对重复**
+    （A→B→B→A→A→B→B…），即首个周期单发，其后每个教师连续出现两周期。
+
+    S4/S5/S6/S7 扩展（仅 feeding=True 生产路径生效；feeding=False 保持 M0 语义）：
+    - S4：睡侧压力 > 醒侧 ×1.5（律定 50% 压力差）时临时中断默认轮换
+      （pressure_interrupt），跳过 swap-first 并提前结算债务（debt_settle）。
+    - S5：换班记账（debt_ledger.debts）、债务加权步数、训练后还债、
+      换班后输出胼胝体通道健康度（callosum_kl）。
+    - S6：周期开头调用 compute_sleep_program 做睡眠编制，按占比轮盘选本轮
+      mode，total_steps 作为步数上限（report["sleep_program"]）。
+    - S7：杏仁核对 sel 重打分（salience 加权重排），高显著未入选经验入 note。
     """
     report = {"cycle": dolphin.cycle, "mode": mode}
-    # M2 值自成覆盖：显式传参优先（测试兼容），否则按 mode 读 Dolphin 属性。
-    if steps is None:
-        if mode == "light":
-            steps = getattr(dolphin, "sleep_steps_light", 16)
-        elif mode == "rem":
-            steps = getattr(dolphin, "sleep_steps_rem", 40)
-        else:
-            steps = getattr(dolphin, "sleep_steps", 40)
-    if kd_alpha is None:
-        kd_alpha = getattr(dolphin, "kd_alpha", 0.5)
-    if kd_T is None:
-        kd_T = getattr(dolphin, "kd_T", 2.0)
-    # rem：KD 正常但 kd_alpha × 0.8（中等强度蒸馏继承）。
-    if mode == "rem":
-        kd_alpha = kd_alpha * 0.8
     ctl = getattr(dolphin, "life_ctl", None)
     m4 = bool(ctl) and bool(getattr(dolphin, "life_enabled", True))
     # G8 fail-fast：探测集缺失时抛 GateDisabled 拒绝开睡（唯一入口不变）
@@ -1864,6 +1931,97 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     buf, rng, dev = dolphin.buffer, dolphin.rng, dolphin.device
     awake, sleeping = dolphin.awake(), dolphin.sleeping()
     lock = dolphin.feed_lock
+
+    # —— S6 睡眠编制与轮盘调度（仅 feeding 生产双半球流水线）——
+    # 下丘脑调度映射：压力越高→深度睡眠占比越多、睡眠时长越长。按占比轮盘
+    # 选择本轮 mode。feeding=False（M0 单线程路径）不自动选档，mode 保持调用方
+    # 显式传入（M0 语义等价）。
+    if feeding:
+        dolphin.update_hemi_pressure()
+        prog = compute_sleep_program(dolphin)
+        # —— S6 硬条件优先 deep（验收 #5 修复）——
+        # 手术计划待执行 / 连续回滚达 ROLLBACK_GUARD / 缓冲溢出时，轮盘不得覆盖
+        # deep（light observe_only 会推迟结构手术，溢出时浅睡也无法及时消化）。
+        forced_deep = False
+        _ctl = getattr(dolphin, "life_ctl", None)
+        if _ctl is not None and _ctl.plan is not None:
+            forced_deep = True
+        elif _ctl is not None and _ctl.consec_rollback >= ROLLBACK_GUARD:
+            forced_deep = True
+        elif dolphin.buffer.bytes > dolphin.buffer.cap * 0.9:
+            forced_deep = True
+        if forced_deep:
+            mode = "deep"
+            prog["forced_deep"] = True
+        else:
+            _r = rng.random()
+            _acc = 0.0
+            for _m in ("light", "nrem", "rem", "deep"):
+                _acc += prog[_m]
+                if _r <= _acc:
+                    mode = _m
+                    break
+        report["sleep_program"] = prog
+        report["mode"] = mode
+
+        # —— 记忆库自适应冷层遍历预算（S12：模型规格自适应 × 四层睡眠组合）——
+        # 模型越大 → scale 越接近 1.0（充分遍历冷层）；模型越小 → scale 越接近
+        # 0.1（避免记忆处理过载导致上下文溢出）。多层组合睡眠：一个周期内的
+        # 记忆处理规模 = 各档位占比加权组合（超浅的热层快速通道 + 浅度的极小
+        # 冷层 + RAM 的相关增量 + 深度的深度遍历），与 sleep_program 占比一致。
+        dolphin.memory._ensure_cold()  # 冷层已加载，cold_len 才是真实规模
+        scale = dolphin.memory_scale()
+        cold_len = len(dolphin.memory.cold_entries)
+
+        def _per_mode_sample(kind, scale, cold_len):
+            """每档睡眠的冷层遍历预算：
+            - 超浅度(light)：0 = 跳过全量冷层遍历，仅热层快速通道
+            - 普通浅度(nrem)：极小部分冷层（64×scale，下限 8）
+            - RAM回放(rem)：自适应小幅遍历（128×scale，下限 8）
+            - 深度(deep)：自适应（冷层总量×(0.2+0.8×scale)）
+            """
+            if kind == "light":
+                return 0
+            if kind == "nrem":
+                return max(8, int(64 * scale))
+            if kind == "rem":
+                return max(8, int(128 * scale))
+            if kind == "deep":
+                return int(cold_len * (0.2 + 0.8 * scale))
+            return 0
+
+        prog = report.get("sleep_program") or {}
+        fracs = {k: v for k, v in prog.items() if k in ("light", "nrem", "rem", "deep")
+                 and isinstance(v, (int, float)) and v > 0}
+        if fracs:
+            total_frac = sum(fracs.values())
+            cold_sample = int(sum(f * _per_mode_sample(k, scale, cold_len) for k, f in fracs.items()) / total_frac)
+        else:
+            cold_sample = _per_mode_sample(mode, scale, cold_len)
+        cold_sample = max(0, min(cold_sample, max(0, cold_len)))
+        report["memory_scale"] = round(scale, 4)
+        report["memory_cold_sample"] = cold_sample
+
+    # 记录当前睡眠档位（F-02：恒温器据此对 nrem 施加手术限制）
+    dolphin._last_sleep_mode = mode
+
+    # M2 值自成覆盖：显式传参优先（测试兼容），否则按 mode 读 Dolphin 属性。
+    if steps is None:
+        if mode == "light":
+            steps = getattr(dolphin, "sleep_steps_light", 16)
+        elif mode == "rem":
+            steps = getattr(dolphin, "sleep_steps_rem", 40)
+        elif mode == "nrem":
+            steps = getattr(dolphin, "sleep_steps_nrem", 80)
+        else:
+            steps = getattr(dolphin, "sleep_steps", 120)
+    if kd_alpha is None:
+        kd_alpha = getattr(dolphin, "kd_alpha", 0.5)
+    if kd_T is None:
+        kd_T = getattr(dolphin, "kd_T", 2.0)
+    # rem：KD 正常但 kd_alpha × 0.8（中等强度蒸馏继承）。
+    if mode == "rem":
+        kd_alpha = kd_alpha * 0.8
     # rem 增强做梦注入（2026-10-11）：dream_k 取当前域上限（8）或当前值+2，
     # 取较小者——增强但不超过 autotune 物理域上限。
     dream_k = getattr(dolphin, "dream_k", 5)
@@ -1871,40 +2029,61 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
         dream_k = min(8, dream_k + 2)
 
     if feeding:
+        # S5 蒸馏方向交替（2026-10-13 修复）：每周期开始时读取持久化翻转标志。
+        # False=swap-first 相位（维持既有行为：训练对象=旧醒脑，教师=当前醒脑）；
+        # True=跳过 swap-first、直接以当前睡脑为训练对象（教师仍=当前醒脑）。
+        flip = getattr(dolphin, "_teacher_flip", False)
         # ① 锁内快照（毫秒级）：复活 + 做梦 + 选拔 + 摘除（原 trainer_cycle 语义；
         #    带通在摘除前对完整缓冲取定）
-        # 浅睡轻量化（2026-10-12）：light 走热层全量 + 冷层随机抽样小批量，
-        # 避免浅睡周期背负冷层全量扫描（浅睡轻量快速）；deep/rem 保持全量。
-        is_light = mode == "light"
+        # 记忆库自适应抽样（S12）：feeding 生产路径所有档位统一走抽样版——
+        # 冷层遍历量由 cold_sample 自适应控制（light=0 仅热层快速通道；nrem/rem
+        # 极小部分冷层；deep 深度遍历），不再有 light 抽样 / deep-rem 全量的二选一。
         # 锁外预扫描（2026-10-12 吞吐提速）：resurrect 是纯 CPU 冷层扫描
-        # （deep 全量/light 抽样），移到 feed_lock 外执行，部署线程在扫描期间
-        # 不被阻塞（恢复「醒着吃、睡着训」完全并行）。resurrect 只修改 memory
-        # 内部状态（hits 复位、冷层升回），由训练线程串行调用，不与部署线程
-        # 争用；部署线程只碰 buffer，不碰 memory 的 resurrect 路径。
-        resurrected = (dolphin.memory.resurrect_light()
-                       if is_light else dolphin.memory.resurrect())
+        # （全档抽样），移到 feed_lock 外执行，部署线程在扫描期间不被阻塞
+        # （恢复「醒着吃、睡着训」完全并行）。resurrect 只修改 memory 内部状态
+        # （hits 复位、冷层升回），由训练线程串行调用，不与部署线程争用；
+        # 部署线程只碰 buffer，不碰 memory 的 resurrect 路径。
+        resurrected = (dolphin.memory.resurrect_light(cold_sample=cold_sample)
+                       if feeding else dolphin.memory.resurrect())
         with lock:
             report["candidates"] = len(buf.items)
             center, width = buf.band()
             for rb in resurrected:
                 buf.add(rb, surprise=center)
             queries = [e.data for e in buf.items[-8:]]
-            if is_light:
-                dreamed = dolphin.memory.dream_light(queries, k=dream_k)
-            else:
-                dreamed = dolphin.memory.dream(queries, k=dream_k)
+            dreamed = (dolphin.memory.dream_light(queries, k=dream_k, cold_sample=cold_sample)
+                        if feeding else dolphin.memory.dream(queries, k=dream_k))
             for en in dreamed:
                 buf.add(en.text.encode("utf-8", errors="replace"), surprise=center)
             report["dreamed"] = len(dreamed)
             sel, rest = buf.select(dolphin.budget)
             report["selected"], report["residue"] = len(sel), len(rest)
             buf.clear()  # 摘除：名单已处置，缓冲即刻腾空（主线程喂数不丢）
-            # —— 先换班（swap-first，2026-10-12）：睡眠周期开始立即换班 ——
-            # 当前 sleeping（上一轮就绪/已体检验证过的睡脑）→ 立即上岗服务；
-            # 当前 awake（旧醒脑）→ 下台成为本轮训练对象（后台继续训练）。
-            # 这样服务侧无需等待训练完成；训练成果体检通过后再换班上岗。
-            dolphin.swap()
-            report["swap_first"] = True
+            # —— S4 双半球压力比较与临时中断换班 ——
+            # 律定阈值（50% 压力差，用户指定）：睡侧压力 > 醒侧 ×1.5 时，打破
+            # 固定轮换节奏（需求侧优先），跳过 swap-first，直接以当前高压力方
+            # 为睡脑训练，并提前结算债务（debt_ledger.settle()）。
+            awake_p = dolphin.hemi_pressure[dolphin.awake_idx]
+            sleep_p = dolphin.hemi_pressure[1 - dolphin.awake_idx]
+            interrupt = sleep_p > awake_p * 1.5
+            if interrupt:
+                report["pressure_interrupt"] = True
+                report["hemi_pressure"] = list(dolphin.hemi_pressure)
+                report["debt_settle"] = dolphin.debt_ledger.settle()
+                report["swap_first"] = False
+            elif flip:
+                # S5 交替相位（2026-10-13 修复）：跳过 swap-first，不先换班——
+                # 直接以当前 sleeping（上次换班上位的半球）为本轮训练对象，
+                # 服务侧保持上一轮通过体检的醒脑继续服务；训练成果待本轮
+                # 体检通过后再换班上岗（照常二次 swap）。
+                report["swap_first"] = False
+            else:
+                # 先换班（swap-first，2026-10-12）：睡眠周期开始立即换班
+                # 当前 sleeping（上一轮就绪/已体检验证过的睡脑）→ 立即上岗服务；
+                # 当前 awake（旧醒脑）→ 下台成为本轮训练对象（后台继续训练）。
+                # 这样服务侧无需等待训练完成；训练成果体检通过后再换班上岗。
+                dolphin.swap()
+                report["swap_first"] = True
         # 重新获取半球引用：新 awake = 上一轮就绪睡脑（立即上岗），
         # 新 sleeping = 旧醒脑（下台，本轮后台训练对象）。
         awake, sleeping = dolphin.awake(), dolphin.sleeping()
@@ -1917,9 +2096,23 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
         sel, rest = buf.select(dolphin.budget)
         report["selected"], report["residue"] = len(sel), len(rest)
 
-    # L9 周期层：落选/未选拔经验一律降级进记忆库（空选拔周期 rest 不得蒸发）
-    for s, e in rest:
-        dolphin.memory.add(e.data, s, dolphin.cycle, "residue")
+    # L9 周期层：落选/未选拔经验一律降级进记忆库（空选拔周期 rest 不得蒸发）。
+    # S7（feeding 生产路径）：高显著（sal > THRESH）且未入选预算的经验以 note
+    # 种类优先保留（杏仁核记忆优先化）；其余仍按 residue 降级。feeding=False
+    # （M0 单线程路径）保持原语义。
+    am7 = getattr(dolphin, "amygdala", None) if feeding else None
+    au7 = getattr(dolphin, "autotune", None) if feeding else None
+    if am7 is not None and au7 is not None:
+        gain7 = au7.get("salience_gain", 1.0)
+        thresh7 = au7.get("salience_thresh", 0.7)
+        for s, e in rest:
+            if am7.salience_score(e.surprise, gain=gain7) > thresh7:
+                dolphin.memory.add(e.data, s, dolphin.cycle, "note")
+            else:
+                dolphin.memory.add(e.data, s, dolphin.cycle, "residue")
+    else:
+        for s, e in rest:
+            dolphin.memory.add(e.data, s, dolphin.cycle, "residue")
 
     if not sel:
         if feeding:
@@ -1929,6 +2122,26 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
         dolphin.cycle += 1
         report["note"] = "无可训经验（滞留已全部入记忆库）"
         return report
+
+    # S7 杏仁核显著性加权（feeding 生产路径；M0 单线程路径保持原选拔顺序）：
+    # 对 sel 每条经验用 salience_score（岛叶内省信号）重打分
+    # score *= (1 + BOOST*salience) 后重排——情绪唤醒增强显著记忆的选拔优先级。
+    if feeding:
+        am = getattr(dolphin, "amygdala", None)
+        au = getattr(dolphin, "autotune", None)
+        if am is not None and sel:
+            boost = au.get("salience_boost", 0.5) if au else 0.5
+            thresh = au.get("salience_thresh", 0.7) if au else 0.7
+            gain = au.get("salience_gain", 1.0) if au else 1.0
+            re_scored = []
+            for (score, e) in sel:
+                s = am.salience_score(e.surprise, gain=gain)
+                re_scored.append((score * (1 + boost * s), e, s))
+            re_scored.sort(key=lambda t: -t[0])
+            sel = [(sc, e) for sc, e, _ in re_scored]
+            report["salience_top"] = round(max(s for _, _, s in re_scored), 4)
+            # 入选者已保留（预算内名单），无需额外处理；高显著未入选者已在
+            # 上方 rest 处理处以 note 种类入记忆库。
 
     # 律 L6：变异重放，拼成一条字节流
     donors = [e.data for _, e in sel]
@@ -1968,6 +2181,15 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
         sd_s, sd_a = sleeping.model.state_dict(), awake.model.state_dict()
         if sd_s.keys() != sd_a.keys() or any(sd_s[k].shape != sd_a[k].shape for k in sd_s):
             _pre_train_sd = {k: t.detach().cpu().clone() for k, t in sd_s.items()}
+
+    # S5 还债训练量（仅 feeding 生产路径）：按旧半球（当前睡脑侧）债务加权
+    # 步数——债务越高，本轮训练越多步（BETA_REPAY 初值 0.05，autotune 慢调）；
+    # 并 cap 到睡眠编制上限 prog["total_steps"]（S6：压力越高总时长越长，
+    # 但实际 steps 受编制封顶，杜绝压力高时步数无限上涨）。
+    if feeding:
+        debt = dolphin.debt_ledger.debts[1 - dolphin.awake_idx]
+        beta = dolphin.autotune.get("debt_beta_repay", 0.05) if dolphin.autotune else 0.05
+        steps = min(steps + int(debt * beta), prog["total_steps"])
 
     # 训练：律 L5——蒸馏锚定真实数据。硬标签=真实字节，软标签=醒脑对同批真实字节
     sleeping.model.train()
@@ -2034,34 +2256,6 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     if vit is not None:
         vit.end_cycle(steps)
 
-    # —— M4 内生健康度（影子模式，2026-10-13）：体检后并行计算 h，只观测不改判决 ——
-    # 在此点 sleeping=本轮刚训练完的新脑、awake=冻结服务脑，post_exam 尚未换班/回滚，
-    # 正是 g/f/d/c 四内生信号的测量窗口。红线：不改 gate()/post_exam 判决、不退役探测集。
-    # 挂 M4 总开关（life_enabled=False → 纯 M0 语义，律 L11 安全阀，报告无 m4_ 键）。
-    endo = getattr(dolphin, "endogenous", None)
-    if m4 and endo is not None:
-        sel_data = [e.data for _, e in sel]
-        mem_old = select_old_memory(dolphin.memory, dolphin.cycle)
-        sig = compute_signals(awake.model, sleeping.model, sel_data, mem_old, dev)
-        # 内生合成权重由 autotune 慢速自调（律定域内值自成）；旧档/测试无该
-        # 属性时回落模块初值（endogenous.update 的缺省参数 0.5/0.5/1.0）。
-        res = endo.update(
-            sig["g"], sig["f"], sig["d"], sig["c"],
-            alpha=getattr(dolphin, "endo_alpha", None),
-            beta=getattr(dolphin, "endo_beta", None),
-            gamma=getattr(dolphin, "endo_gamma", None),
-        )
-        report["m4_endogenous_h"] = round(res["h"], 4)
-        report["m4_endogenous_signals"] = {
-            "g": round(sig["g"], 4), "f": round(sig["f"], 4),
-            "d": round(sig["d"], 4), "c": round(sig["c"], 4),
-        }
-        if verbose:
-            print(f"[睡眠 {report['cycle']}] 内生健康度 h={res['h']:.4f}"
-                  f" g={sig['g']:.4f} f={sig['f']:.4f}"
-                  f" d={sig['d']:.4f} c={sig['c']:.4f}"
-                  + ("  [硬拦截]" if res["hard_block"] else ""))
-
     # 学习停滞检测原料（2026-10-12）：体检 margin 追加到滚动窗（保留最近 30 个）。
     # _detect_learning_stall 在下一周期 _decide 中读取该窗口判断整体是否学不动。
     if report.get("gate_margin") is not None:
@@ -2074,6 +2268,12 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     else:
         directive = "swap" if passed else "rollback"
 
+    # S5 还债（仅 feeding 生产路径；体检后、换班前）：训练完成即偿还部分债务
+    # （GAMMA_REPAY 初值 0.5——每轮还一半左右，防滚雪球）。
+    if feeding:
+        gamma = dolphin.autotune.get("debt_gamma_repay", 0.5) if dolphin.autotune else 0.5
+        dolphin.debt_ledger.debts[1 - dolphin.awake_idx] *= (1 - gamma)
+
     if directive == "swap":
         if feeding:
             # 训练成果通过体检 → 第二次换班：训练后的新 sleeping 上岗，
@@ -2083,6 +2283,22 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
                 dolphin.swap()  # awake_idx 只在锁内翻（一次赋值）
             report["swapped"] = True
             report["trained_swapped"] = True
+            # —— S5 换班记账（胼胝体债务，仅 feeding 生产路径）——
+            # 新上岗半球（=原睡脑=当前 awake_idx）记"未消化旧数据"债：
+            # 本轮入选经验字节当量 × ALPHA_LOSS（初值 0.4，autotune 慢调）。
+            # 旧半球（=1-awake_idx）记"服务期新数据"债：_since_sleep 为交互数、
+            # 每条近似 16 字节（初值近似，可后续自调）。
+            alpha = dolphin.autotune.get("debt_alpha_loss", 0.4) if dolphin.autotune else 0.4
+            dolphin.debt_ledger.debts[dolphin.awake_idx] += sum(len(e.data) for _, e in sel) * alpha
+            dolphin.debt_ledger.debts[1 - dolphin.awake_idx] += float(dolphin._since_sleep) * 16.0
+            # 互为蒸馏方向记录：当前教师=醒脑（训练时的 awake）；换班后角色
+            # 互换，蒸馏方向随换班交替（互为师生）。
+            report["teacher"] = awake.name
+            # 防分裂观测（胼胝体通道健康度）：换班后两半球对 probe 卷面前 8
+            # 块输入的输出 softmax 分布 KL 散度均值。
+            kl = _callosum_kl(dolphin)
+            report["callosum_kl"] = kl
+            dolphin.debt_ledger.callosum_kl = kl
         else:
             dolphin.swap()  # 换班：睡脑转为醒脑，旧醒脑转为睡脑
             report["swapped"] = True
@@ -2100,10 +2316,11 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
         dolphin.budget = min(0.60, dolphin.budget * 1.05)  # 值自成：通过 → 预算放宽
     elif directive == "rollback":
         if feeding:
-            # 先换班已发生（swap_first）：服务侧保持第一次 swap 上岗的半球
-            # （上一轮就绪成果），此处回滚训练后的新 sleeping 权重——训练
-            # 成果未上岗，但周期内确实发生过上岗切换 → swapped=True。
-            report["swapped"] = True
+            # swap-first 已发生（flip=False 相位）：服务侧保持第一次 swap 上岗
+            # 的半球（上一轮就绪成果），此处回滚训练后的新 sleeping 权重——
+            # 训练成果未上岗，但周期内确实发生过上岗切换 → swapped=True。
+            # flip=True 相位跳过了 swap-first：无任何上岗切换 → swapped=False。
+            report["swapped"] = bool(report.get("swap_first"))
             report["trained_swapped"] = False
         else:
             report["swapped"] = False
@@ -2125,8 +2342,9 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
             dolphin.budget = max(0.25, dolphin.budget * 0.90)
     else:  # keep：WITHERING 战役学生保留（规格 C），不回滚权重
         if feeding:
-            # 先换班已发生：服务侧保持第一次 swap 上岗的半球，学生保留续训。
-            report["swapped"] = True
+            # swap-first 已发生（flip=False 相位）：服务侧保持第一次 swap 上岗
+            # 的半球，学生保留续训。flip=True 相位无 swap-first → swapped=False。
+            report["swapped"] = bool(report.get("swap_first"))
             report["trained_swapped"] = False
         else:
             report["swapped"] = False
@@ -2201,8 +2419,9 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     if verbose:
         body = report.get("body") or {}
         act = body.get("action", {})
-        # swap-first（feeding=True）：swapped 恒 True（周期内先换班已发生）；
-        # 训练成果是否上岗由 trained_swapped 区分。feeding=False 保持原语义。
+        # swap-first（feeding=True）：flip=False 相位周期内先换班已发生；
+        # flip=True 相位跳过 swap-first、仅训练后换班。训练成果是否上岗
+        # 由 trained_swapped 区分。feeding=False 保持原语义。
         if "trained_swapped" in report:
             outcome = "✓ 换班" if report.get("trained_swapped") else "✗ 作废回滚"
         else:
@@ -2216,4 +2435,10 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
               f"{'  刀:' + str(act.get('kind')) if act.get('kind', 'hold') != 'hold' else ''}"
               f"  金发姑娘 能力={report.get('ability')} 跳过={gl.get('skipped_too_easy')}"
               f" 挂起={gl.get('suspended_too_hard')}")
+    # S5 蒸馏方向交替（2026-10-13 修复）：feeding 生产路径每个完整周期结束
+    # 翻转一次标志，实现连续周期训练对象/教师交替（互为师生，防止双半球分裂）。
+    # feeding=False（M0 单线程路径）不参与交替，标志保持不变（M0 语义完全不变）。
+    # 早退路径（空选拔/样本过短）未发生训练与换班，同样不翻转，避免破坏交替相位。
+    if feeding:
+        dolphin._teacher_flip = not dolphin._teacher_flip
     return report

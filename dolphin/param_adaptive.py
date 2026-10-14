@@ -106,7 +106,7 @@ class ParamAdaptive:
 
     # ---------- 计划排程 ----------
 
-    def _schedule_shrink(self, d, report, ratio):
+    def _schedule_shrink(self, d, report, ratio, mem_ratio=None):
         """排一个 born-again 收缩计划（复用 life_ctl 的手术计划机制）。
 
         H1/H2：与恒温器主路径 _plan_born_again 一致，排程前做 MIN_BODY_FRAC
@@ -114,11 +114,31 @@ class ParamAdaptive:
         body_frac 时截断到该下限，并在报告中标注"容量下限拦截"；同时把
         target 钳位到 surgery.shrink_config 的合法域 [0.1, 0.95]，确保
         _execute_wither → born_again_student 永不抛 ValueError。
+
+        S9 理想容量三档下调（律定档位，用户指定）：按显存占用分档设定目标——
+        显存占用 >0.90（可用<10%）→ 理想容量 30%；>0.95（可用<5%）→ 理想
+        参数 10%；其余（无显存压力）→ 正常理想容量 = 真实参数 × 157.1%。
+        容量压力路径（无显存信息）沿用传入的 ratio（PARAM_STAGE_RATIOS）。
         """
         ctl = d.life_ctl
         cycle = getattr(d, "cycle", 0)
         body_frac = ctl._body_frac(d, d.sleeping().name)
-        target = float(ratio)
+        # 在函数开头读取当前显存占用：优先用入参（调用方已算好），否则现算。
+        if mem_ratio is None:
+            mem_ratio = self._mem_pressure_ratio(d)
+        # 律定档位（用户指定）：可用内存<10%（占用>0.90）→ 理想容量 30%；
+        # <5%（占用>0.95）→ 理想参数 10%。
+        if mem_ratio is not None:
+            if mem_ratio > 0.95:
+                target = 0.10
+            elif mem_ratio > 0.90:
+                target = 0.30
+            else:
+                # 正常理想容量档（真实参数 ×157.1%，≥1.0）：当前无显存压力，
+                # 不需要收缩。本函数只服务「收缩」场景，正常档不排程（验收 #10 修复）。
+                return None
+        else:
+            target = float(ratio)  # 无显存信息时沿用传入 ratio（容量压力路径）
         capped = False
         if body_frac * target < MIN_BODY_FRAC:
             target = max(target, MIN_BODY_FRAC / body_frac)
@@ -228,7 +248,7 @@ class ParamAdaptive:
         if pressure_kind is not None:
             self.param_regime = 1
             self.last_param_reset = getattr(d, "cycle", 0)
-            self._schedule_shrink(d, report, PARAM_STAGE_RATIOS[0])
+            self._schedule_shrink(d, report, PARAM_STAGE_RATIOS[0], mem_ratio)
             return
         # 3) 正常微调（最小步长 ±8 单元）
         self._micro_tune(d, report, gaps, gap_bar)

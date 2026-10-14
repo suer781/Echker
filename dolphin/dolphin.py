@@ -2,6 +2,8 @@
 
 两个 hemisphere 初始化时权重同源；一次只有一个在训练（睡脑），
 另一个权重冻结负责服务（醒脑）。交换只发生在体检通过后的换班瞬间。
+
+惊讶值链路：mean_nll → goldilocks_gate → band_w → score。
 """
 import glob
 import hashlib
@@ -19,7 +21,7 @@ import torch
 from .adapt import Plasticity
 from .amygdala import Amygdala
 from .autotune import Autotune
-from .endogenous import Endogenous
+from .debt import DebtLedger
 from .experience import Experience, ExperienceBuffer
 from .goldilocks import PRIOR_ABILITY, gate as goldilocks_gate
 from .life import LifeController
@@ -72,6 +74,13 @@ class Dolphin:
         self.awake_idx = 0
         self.buffer = ExperienceBuffer()
         self.memory = MemoryStore()
+        self.debt_ledger = DebtLedger()          # 双半球债务账本（胼胝体通道）
+        self.hemi_pressure = [0.0, 0.0]          # 每半球睡眠压力（值自成，随档持久化）
+        # S5 蒸馏方向交替标志（2026-10-13 修复）：feeding 生产路径连续周期
+        # 互为师生（防止双半球分裂）。False=swap-first 相位（训练对象=旧醒脑，
+        # 教师=当前醒脑）；True=跳过 swap-first、直接以当前睡脑为训练对象。
+        # 每周期结束翻转；随档持久化，旧档缺省 False（兼容）。
+        self._teacher_flip = False
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.probe_path = probe_path or os.path.join(root, "probes", "probe.txt")
         self.probe_chunks = []
@@ -102,6 +111,7 @@ class Dolphin:
         # autotune.adjust() 会按与 sleep_steps 相同的调节律同步回这些属性。
         self.sleep_steps_light = 16
         self.sleep_steps_rem = 40
+        self.sleep_steps_nrem = 80
         # 判决带传导系数（2026-10-11）：K_MARGIN 真正接入 autotune 慢速反馈——
         # 默认 2.0 与 probe.K_MARGIN 一致，autotune 按体检通过率/边缘信号在
         # [1.0,3.0] 域内慢速自调，Dolphin.gate 传此值给 gate_decision。
@@ -115,10 +125,6 @@ class Dolphin:
         # （保守稳定），威胁低→高温（创造丰富）。慢环（AMYGDALA_EVERY=20 周期
         # 一次）确保短测试永不触发。随档持久化。
         self.amygdala = Amygdala()
-        # 内生健康度 h（影子模式，2026-10-13）：四内生信号 g/f/d/c 的滚动
-        # 归一化 + 合成。只在 run_cycle 体检后并行计算并写日志，不替换
-        # gate()/post_exam 判决。随档持久化（save/load 用 ck.get 兼容旧档）。
-        self.endogenous = Endogenous()
         # 参数自适应控制器（2026-10-06 用户定案）：独立于恒温器判决主路径的
         # 排计划控制器。默认开启（param_adaptive_enabled=True，生产默认启用"完全
         # 自学习"）；测试用 make_dolphin 工厂显式设 False 做隔离。
@@ -146,6 +152,10 @@ class Dolphin:
         # 由 feed.py 全权维护，本类只做透传存取（职责分离）。
         self.learn_total = 0
         self.feed_cursor = None
+        # 模型自评估日志（2026-10-14）：替代用户手动打分，后台自动评估。
+        # 每次交互后记录 {eid, reward, dim}，reward 与原手动打分格式兼容，
+        # dim 含三维度判断依据，便于后续校验与优化。随档持久化，旧档兼容空列表。
+        self.self_eval_log = []
         # M4 生命节律（律 L11）：自生长/自凋零控制器 + 人工总开关安全阀。
         # life_enabled=False 时 life.run_cycle 的全部 M4 钩子失效（纯 M0 语义）；
         # 人工只保留这个总开关，禁止干预手术的时机/位置/幅度（律 L11）。
@@ -165,11 +175,6 @@ class Dolphin:
         # 初值 0.05/0.20 与模块常量一致；learn() 从 autotune 读取当前值。
         self.goldilocks_lo = 0.05
         self.goldilocks_hi = 0.20
-        # 内生健康度合成权重（2026-10-13）：由 autotune 慢速自调（域内值自成），
-        # 初值 0.5/0.5/1.0 与旧模块常量一致；life.run_cycle 读取当前值传入。
-        self.endo_alpha = 0.5
-        self.endo_beta = 0.5
-        self.endo_gamma = 1.0
 
     def awake(self):
         return self.h[self.awake_idx]
@@ -179,6 +184,15 @@ class Dolphin:
 
     def swap(self):
         self.awake_idx = 1 - self.awake_idx
+
+    def memory_scale(self):
+        """记忆处理规模系数（对数尺度，值自适应的依据）。
+        小模型（≈1e5 参数）→0.1；大模型（≈1e8 参数）→1.0。
+        小模型避免记忆处理过载导致上下文溢出，大模型充分利用处理能力。"""
+        import math
+        n = sum(p.numel() for p in self.awake().model.parameters())
+        s = (math.log10(max(float(n), 1e5)) - 5.0) / 3.0
+        return max(0.1, min(1.0, s))
 
     def _busy_inc(self):
         """learn_busy 原子自增（审计②-3）：serve 与 learn 并发时防止丢失更新。
@@ -290,6 +304,102 @@ class Dolphin:
     def feedback(self, eid, reward):
         return self.buffer.feedback(eid, reward)
 
+    def self_evaluate(self, text, resp, eid, max_new=64):
+        """模型自评估打分（2026-10-14，替代用户手动打分，后台无感执行）。
+
+        基于三个维度自主判断本次交互是否达成用户预期目标：
+          - relevance  需求匹配度：用户诉求（输入）与最终输出字节 4-gram 重叠度
+                        （输出越紧扣输入，匹配度越高）。
+          - completeness 问题解决完整性：输出非空、长度相对输入合理、未过早截断。
+          - accuracy   响应准确性：模型对输出自身的置信度（mean NLL 相对能力基线，
+                        NLL 越低于基线越准）。
+
+        合成总分映射到与原用户手动打分完全兼容的三档 reward（-1.0 / 0.0 / +1.0），
+        并通过原有 feedback(eid, reward) 写入经验缓冲（数据结构不变，不影响后续
+        统计与分析流程）。判断依据记录到 self.self_eval_log（随档持久化）。
+        整个过程后台执行，无感知替换用户手动打分环节。
+        """
+        text_b = text.encode("utf-8", errors="replace") if isinstance(text, str) else bytes(text)
+        resp_b = resp if isinstance(resp, bytes) else resp.encode("utf-8", errors="replace")
+        if not resp_b:
+            dim = {"relevance": 0.0, "completeness": 0.0, "accuracy": 0.0,
+                   "total": 0.0, "reason": "空响应"}
+            self.feedback(eid, -1.0)
+            self.self_eval_log.append({"eid": eid, "reward": -1.0, "dim": dim})
+            return -1.0
+
+        # —— F-04 修复：乱码/不可读输出直接差评（防自评估正向强化噪声）——
+        # 模型处于未学会说话阶段时，输出可能是任意字节（非法 UTF-8 被替换为
+        # U+FFFD，或大量控制字符）。这类输出没有信息价值，绝不能给正奖励。
+        decoded_resp = resp_b.decode("utf-8", errors="replace")
+        repl_ratio = decoded_resp.count("\ufffd") / max(1, len(decoded_resp))
+        printable_ratio = sum(1 for ch in decoded_resp
+                               if ch.isprintable() and ch != "\ufffd") / max(1, len(decoded_resp))
+        if repl_ratio > 0.3 or printable_ratio < 0.5:
+            dim = {"relevance": 0.0, "completeness": 0.0, "accuracy": 0.0,
+                   "total": 0.0, "reason": "输出为乱码/不可读"}
+            self.feedback(eid, -1.0)
+            self.self_eval_log.append({"eid": eid, "reward": -1.0, "dim": dim})
+            return -1.0
+
+        # —— 需求匹配度：输入/输出 4-gram 重叠 ——
+        def _grams(s, n=4):
+            return {s[i:i + n] for i in range(max(0, len(s) - n + 1))}
+        try:
+            gin = _grams(text_b.decode("utf-8", "replace"))
+            gout = _grams(resp_b.decode("utf-8", "replace"))
+            overlap = len(gin & gout) / max(1, len(gin))
+        except Exception:
+            overlap = 0.0
+        relevance = max(0.0, min(1.0, overlap * 4.0))  # 20% 重叠视为满配
+
+        # —— 响应准确性：模型对输出自身的 mean NLL（越低越准）——
+        try:
+            out_nll = self.awake().model.mean_nll(resp_b, self.device)
+        except Exception:
+            out_nll = float(getattr(self, "ability", 0.0) or 5.545)
+        ability = float(getattr(self, "ability", 0.0)) or 5.545
+        # NLL 低于/接近基线 → 高分；高出基线越多 → 越低分
+        accuracy = max(0.0, min(1.0, 1.0 - max(0.0, (out_nll - ability)) / ability * 1.5))
+
+        # —— 问题解决完整性：非空 + 长度相对输入合理 + 未过早截断 ——
+        truncated = len(resp_b) >= max_new * 0.95
+        len_min = max(4, min(16, len(text_b) // 4))
+        len_ok = len(resp_b) >= len_min
+        completeness = 0.0
+        if len_ok:
+            completeness = 0.7 + 0.3 * (0.0 if truncated else 1.0)
+
+        total = 0.4 * relevance + 0.3 * completeness + 0.3 * accuracy
+        # —— F-04 修复：零重叠（答非所问）时总分封顶到中性档，禁止正奖励 ——
+        # 输入有实质内容（非空）但输出与输入没有任何 4-gram 共享时，即使输出
+        # 可读，也不能判定为"达成用户预期"。封顶到 0.54（<0.55 的正奖励线）。
+        # 注：输入短于 4 字符时 4-gram 天然为空（overlap=0），同样封顶，避免
+        # 短输入被 completeness+accuracy 推成正奖励。
+        if text_b and overlap <= 0.0:
+            total = min(total, 0.54)
+        if total >= 0.55:
+            reward = 1.0
+        elif total < 0.30:
+            reward = -1.0
+        else:
+            reward = 0.0
+        dim = {
+            "relevance": round(relevance, 4),
+            "completeness": round(completeness, 4),
+            "accuracy": round(accuracy, 4),
+            "total": round(total, 4),
+            "overlap": round(overlap, 4),
+            "out_nll": round(out_nll, 4),
+            "truncated": truncated,
+            "resp_len": len(resp_b),
+        }
+        self.feedback(eid, reward)
+        self.self_eval_log.append({"eid": eid, "reward": reward, "dim": dim})
+        if len(self.self_eval_log) > 2000:  # 防日志无限膨胀
+            del self.self_eval_log[: len(self.self_eval_log) - 2000]
+        return reward
+
     def learn(self, text: str, source="dataset"):
         """部署期喂养：算惊讶度入缓冲，不生成回复（与 serve 相对）。
 
@@ -306,7 +416,7 @@ class Dolphin:
         learn_busy 供训练线程在动睡脑前等待在途读取清零——
         刚换下的醒脑可能还有 learn 在读，梯度训练前必须等它读完。
         """
-        data = text.encode("utf-8")
+        data = text.encode("utf-8") if isinstance(text, str) else bytes(text)
         self._busy_inc()
         try:
             surprise = self.awake().model.mean_nll(data, self.device)
@@ -338,6 +448,27 @@ class Dolphin:
 
     # ---------- 睡眠触发（值自成：压力阈值 + 间隔反馈） ----------
 
+    def update_hemi_pressure(self):
+        """多因素睡眠压力 + 对方训练进度换算（下丘脑稳态调节映射）。
+        权重/系数为【初值】，经 autotune 慢调（律定域内值自成）。
+        输出压力钳位到律定域 [0, 50]（与 sleep_threshold 上限 THRESHOLD_HI 对齐），
+        防止 _since_sleep 极大时压力爆炸导致 maybe_sleep 恒真（验收 #4 修复）。"""
+        au = getattr(self, "autotune", None)
+        w1 = au.get("pressure_w1", 0.5) if au else 0.5
+        w2 = au.get("pressure_w2", 0.3) if au else 0.3
+        w3 = au.get("pressure_w3", 0.2) if au else 0.2
+        k = au.get("pressure_k", 0.3) if au else 0.3
+        buf_p = self.buffer.pressure()
+        debt = self.debt_ledger.debts
+        trained = self.hemi_trained_steps
+        total_t = max(1, trained[0] + trained[1])
+        for i in range(2):
+            opp_progress = trained[1 - i] / total_t
+            raw = buf_p * w1 + debt[i] * w2 + float(self._since_sleep) * w3
+            self.hemi_pressure[i] = raw * (1.0 - k * opp_progress)
+            # 律定域钳位 [0, 50]：与 sleep_threshold 上限对齐，压力信号有界。
+            self.hemi_pressure[i] = max(0.0, min(50.0, self.hemi_pressure[i]))
+
     def maybe_sleep(self, force=False, **kw):
         """单线程睡眠路径（M0 兼容）。M4 起派发到 life.run_cycle（唯一睡眠周期
         实现；sleep.py 冻结为历史件，M0 等价性由 tests 固定）。
@@ -346,8 +477,11 @@ class Dolphin:
         快照流程）——双线程部署请走 feed.py 的 SleepTrainer。
         """
         p = self.buffer.pressure()
+        self.update_hemi_pressure()
         overflow = self.buffer.bytes > self.buffer.cap * 0.9
-        if not (force or p >= self.buffer.sleep_threshold or overflow):
+        if not (force or p >= self.buffer.sleep_threshold
+                or max(self.hemi_pressure) >= self.buffer.sleep_threshold
+                or overflow):
             return None
         from .life import run_cycle
         report = run_cycle(self, **kw)
@@ -445,10 +579,19 @@ class Dolphin:
                 # 三档睡眠（2026-10-11）：light/rem 独立自适应步数域随档透传。
                 "sleep_steps_light": self.sleep_steps_light,
                 "sleep_steps_rem": self.sleep_steps_rem,
+                # S6 四档睡眠（2026-10-13）：nrem 步数域随档透传（与 light/rem 同律）。
+                "sleep_steps_nrem": self.sleep_steps_nrem,
                 # 判决带传导系数（2026-10-11）：随档透传，autotune 慢速自调。
                 "k_margin": self.k_margin,
                 # 训练债平衡（2026-10-11）：两半球累计训练步数随档透传。
                 "hemi_trained_steps": list(self.hemi_trained_steps),
+                # S3/S5（2026-10-13）：双半球睡眠压力 + 债务账本（胼胝体通道）随档透传。
+                "hemi_pressure": list(self.hemi_pressure),
+                "debt": self.debt_ledger.to_state(),
+                "self_eval_log": list(self.self_eval_log),
+                # S5 蒸馏方向交替标志（2026-10-13）：feeding 生产路径连续周期
+                # 互为师生；随档透传，旧档缺省 False（兼容）。
+                "_teacher_flip": bool(self._teacher_flip),
                 # G7：created 入档——记忆逐出优先级 (score, created) 跨重启不漂移
                 "memory": [(e.text, e.score, e.hits, e.cycle, e.kind, e.created)
                            for e in self.memory.entries],
@@ -464,8 +607,6 @@ class Dolphin:
                 # 杏仁核温度自动托管（2026-10-08）：温度/信号/调整周期随档，
                 # 重启后恢复上次的自动托管状态。
                 "amygdala": self.amygdala.to_state(),
-                # 内生健康度（2026-10-13）：四信号滚动历史随档透传（影子模式）。
-                "endogenous": self.endogenous.to_state(),
                 # 学习停滞检测原料（2026-10-12）：margin 滚动窗随档透传。
                 "last_margins": list(self.last_margins),
                 # 参数自适应控制律（2026-10-06）：三段式下跌状态机随档。
@@ -514,13 +655,8 @@ class Dolphin:
             # 旧档没有这些量时 autotune 保持初值，同步后仍与模块常量一致。
             self.goldilocks_lo = float(self.autotune.get("goldilocks_lo", self.goldilocks_lo))
             self.goldilocks_hi = float(self.autotune.get("goldilocks_hi", self.goldilocks_hi))
-            self.endo_alpha = float(self.autotune.get("endo_alpha", self.endo_alpha))
-            self.endo_beta = float(self.autotune.get("endo_beta", self.endo_beta))
-            self.endo_gamma = float(self.autotune.get("endo_gamma", self.endo_gamma))
         if ck.get("amygdala"):  # 2026-10-08：杏仁核状态随档恢复（旧档无此字段则保持初值）
             self.amygdala.from_state(ck["amygdala"])
-        if ck.get("endogenous"):  # 2026-10-13：内生健康度滚动历史随档恢复（旧档无则保持初值）
-            self.endogenous.from_state(ck["endogenous"])
         if ck.get("param_adaptive"):
             self.param_adaptive.from_state(ck["param_adaptive"])
         from .surgery import apply_morphology
@@ -563,10 +699,19 @@ class Dolphin:
         # 三档睡眠（2026-10-11）：light/rem 独立步数域，缺省=初值兼容旧档。
         self.sleep_steps_light = int(ck.get("sleep_steps_light", self.sleep_steps_light))
         self.sleep_steps_rem = int(ck.get("sleep_steps_rem", self.sleep_steps_rem))
+        # S6 四档睡眠（2026-10-13）：nrem 步数域随档恢复，缺省=初值 80 兼容旧档。
+        self.sleep_steps_nrem = int(ck.get("sleep_steps_nrem", 80))
         # 判决带传导系数（2026-10-11）：缺省=初值 2.0，兼容旧档。
         self.k_margin = float(ck.get("k_margin", self.k_margin))
         # 训练债平衡（2026-10-11）：两半球累计训练步数，缺省=[0,0] 兼容旧档。
         self.hemi_trained_steps = [int(x) for x in ck.get("hemi_trained_steps", [0, 0])]
+        # S3/S5（2026-10-13）：双半球睡眠压力 + 债务账本随档恢复（旧档无此字段
+        # → 保持初值/空账本，缺省兼容）。
+        self.hemi_pressure = [float(x) for x in ck.get("hemi_pressure", [0.0, 0.0])]
+        self.debt_ledger.from_state(ck.get("debt"))
+        self.self_eval_log = list(ck.get("self_eval_log", []))
+        # S5 蒸馏方向交替标志（2026-10-13）：随档恢复；旧档无此字段 → False。
+        self._teacher_flip = bool(ck.get("_teacher_flip", False))
         # 学习停滞检测原料（2026-10-12）：旧档无此字段 → 空列表（兼容升级）。
         self.last_margins = [float(x) for x in ck.get("last_margins", [])]
         # 金发姑娘价值门控（律 L4）：能力基线 + 观测计数随档恢复。

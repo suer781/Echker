@@ -205,10 +205,6 @@ class SiteLedger:
         top = sum(vals[-kp:]) / kp
         return (med - tail) / med, top / med
 
-    def median_share(self):
-        sh = self.shares()
-        return sorted(sh.values())[len(sh) // 2] if sh else 0.0
-
     # —— 手术后身份重映射 ——
 
     def remap_split(self, k):
@@ -423,9 +419,6 @@ class Vitals:
             n_all += v.C
         frac = n_dorm / n_all if n_all else 0.0
         return rep, frac
-
-    def site_names(self):
-        return sorted(self.sites)
 
     def remap_split(self, k):
         """复制分裂（轴③ d_model 平铺）的全账本委托：每个 site 逐通道账本 → k 份，

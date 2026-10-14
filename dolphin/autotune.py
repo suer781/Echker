@@ -32,7 +32,7 @@ _DOMAINS = {
     "kd_alpha": (0.3, 0.7),    # KD 权重：太低不继承，太高过度依赖教师
     "kd_T": (1.5, 3.0),        # 蒸馏温度：太低分布尖，太高软化过度
     "target_interval": (8, 40),  # 期望睡眠间隔（交互数）
-    "sleep_steps": (40, 240),  # 每周期训练步数
+    "sleep_steps": (120, 400),  # 每周期训练步数（S6 deep 律定域 [120,400]）
     # 三档睡眠（2026-10-11）：light/rem 各自独立的自适应步数域，调节律与
     # sleep_steps 相同（AUTOTUNE_EVERY=20 周期、±5%、回滚率高上调/稳定通过下调）。
     "sleep_steps_light": (8, 40),   # 浅睡：低强度快速巩固
@@ -45,11 +45,30 @@ _DOMAINS = {
     # （大量挂起）上限 50%（几乎不挂起）。域内值由跳过率/挂起率反馈自调。
     "goldilocks_lo": (0.02, 0.10),
     "goldilocks_hi": (0.10, 0.50),
-    # 内生健康度合成权重（2026-10-13）：遗忘/发散惩罚权重域 [0.1,0.9]，
-    # 坍缩惩罚权重域 [0.5,1.5]。初值 0.5/0.5/1.0 与旧模块常量一致。
-    "endo_alpha": (0.1, 0.9),
-    "endo_beta": (0.1, 0.9),
-    "endo_gamma": (0.5, 1.5),
+    # S6 四档睡眠（2026-10-13）：nrem（N2 浅睡）独立自适应步数域。
+    "sleep_steps_nrem": (40, 120),
+    # S3 睡眠压力权重（2026-10-13）：Dolphin.update_hemi_pressure 通过
+    # autotune.get 读取，域 [0,1] 内值自成。
+    "pressure_w1": (0.0, 1.0),
+    "pressure_w2": (0.0, 1.0),
+    "pressure_w3": (0.0, 1.0),
+    "pressure_k": (0.0, 1.0),
+    # S5 债务/还债系数（2026-10-13）：life.py 换班记账/还债通过
+    # autotune.get 读取，域 [0,1] 内值自成。
+    "debt_alpha_loss": (0.0, 1.0),
+    "debt_beta_repay": (0.0, 1.0),
+    "debt_gamma_repay": (0.0, 1.0),
+    # S7 杏仁核显著性（2026-10-13）：salience_score 的增益/增强/阈值。
+    "salience_gain": (0.1, 3.0),
+    "salience_boost": (0.0, 2.0),
+    "salience_thresh": (0.0, 1.0),
+    # F-07 睡眠编制系数（2026-10-14）：compute_sleep_program 的可调系数。
+    # 域设计保证单调性约束恒成立：deep=p（p 单调）、total_steps=base×(1+p)
+    # （base>0 时随 p 单调不减）；rem/nrem 系数只影响占比分配。
+    "sleep_prog_rem_base": (0.10, 0.30),
+    "sleep_prog_rem_debt": (0.00, 0.20),
+    "sleep_prog_nrem_scale": (0.30, 0.70),
+    "sleep_prog_total_base": (120, 240),
 }
 
 # 每多少个睡眠周期调整一次（慢环；测试周期数远小于此，永不触发）
@@ -74,7 +93,6 @@ class Autotune:
             "rollback_rate": 0.0,           # 连续周期回滚率 EMA
             "goldilocks_skip_rate": 0.0,    # 金发姑娘太熟跳过率 EMA（[0,1]）
             "goldilocks_suspend_rate": 0.0,  # 金发姑娘太怪挂起率 EMA（[0,1]）
-            "endo_zero_rate": 0.0,           # 内生健康度 h 硬拦截为 0 的占比 EMA
         }
         self.tunables = {
             "note_k": 5, "dream_k": 5, "promote_hits": 3,
@@ -87,10 +105,27 @@ class Autotune:
             # 金发姑娘带通阈值（2026-10-13）：初值 0.05/0.20 与模块常量一致。
             "goldilocks_lo": 0.05,
             "goldilocks_hi": 0.20,
-            # 内生健康度合成权重（2026-10-13）：初值 0.5/0.5/1.0 与旧常量一致。
-            "endo_alpha": 0.5,
-            "endo_beta": 0.5,
-            "endo_gamma": 1.0,
+            # S6 四档睡眠（2026-10-13）：nrem（N2 浅睡）步数初值 80（域内）。
+            "sleep_steps_nrem": 80,
+            # S3 睡眠压力权重（2026-10-13）：初值 w1=0.5/w2=0.3/w3=0.2/k=0.3。
+            "pressure_w1": 0.5,
+            "pressure_w2": 0.3,
+            "pressure_w3": 0.2,
+            "pressure_k": 0.3,
+            # S5 债务/还债系数（2026-10-13）：初值 ALPHA_LOSS/BETA_REPAY/GAMMA_REPAY。
+            "debt_alpha_loss": 0.4,
+            "debt_beta_repay": 0.05,
+            "debt_gamma_repay": 0.5,
+            # S7 杏仁核显著性（2026-10-13）：初值 GAIN/BOOST/THRESH。
+            "salience_gain": 1.0,
+            "salience_boost": 0.5,
+            "salience_thresh": 0.7,
+            # F-07 睡眠编制系数（2026-10-14）：初值与 compute_sleep_program
+            # 既有硬编码一致（rem_base=0.2/rem_debt=0.1/nrem_scale=0.5/total_base=120）。
+            "sleep_prog_rem_base": 0.2,
+            "sleep_prog_rem_debt": 0.1,
+            "sleep_prog_nrem_scale": 0.5,
+            "sleep_prog_total_base": 120,
         }
         self.cycle_count = 0   # 已运行周期数（Autotune 内部计数）
         self.last_adjust = {} # 上次调整记录（报告用）
@@ -164,9 +199,13 @@ class Autotune:
         else:
             s["note_hit_rate"] = 0.9 * s["note_hit_rate"]  # 无笔记：信号自然衰减
         # 复活吞吐（resurrect 返回条数）
-        revived = len(report.get("candidates") and []) or 0
+        # P1 修复（验收）：candidates 是整数（len(buf.items)），旧表达式
+        # `len(report.get("candidates") and [])` 在 candidates==0 时对整数 0 调
+        # len() 抛 TypeError。改为 `int(report.get("candidates") or 0)`：
+        # candidates 为 0/None/缺省时安全回落 0。
+        revived = int(report.get("candidates") or 0)
         # 用 dreamed 近似复活通道活跃度（复活条目进入缓冲成为候选）
-        dreamed = report.get("dreamed", 0)
+        dreamed = report.get("dreamed", 0) or 0
         s["resurrect_throughput"] = 0.9 * s["resurrect_throughput"] + 0.1 * dreamed
         # 睡眠间隔（用 since_sleep 近似）
         since = getattr(d, "_since_sleep", 0)
@@ -204,11 +243,6 @@ class Autotune:
                 s["goldilocks_suspend_rate"] *= 0.9
             self._last_skipped = sk
             self._last_suspended = su
-        # 内生健康度硬拦截率（2026-10-13）：h 为 0（硬拦截）的周期占比。
-        h = report.get("m4_endogenous_h")
-        if h is not None:
-            zero = 1.0 if float(h) <= 0.0 else 0.0
-            s["endo_zero_rate"] = 0.9 * s["endo_zero_rate"] + 0.1 * zero
 
     # ---------- 慢速调整（每 AUTOTUNE_EVERY 周期一次） ----------
 
@@ -388,17 +422,43 @@ class Autotune:
             if v: adj["goldilocks_hi"] = ("down", round(v, 4),
                                           f"suspend_rate={s['goldilocks_suspend_rate']:.2f}")
 
-        # 内生健康度合成权重（2026-10-13）：最简单的一条规则——h 长期为 0
-        # （硬拦截/惩罚过重钳位到 0）时降低惩罚权重，避免「永久卡死」。硬拦截
-        # （d NaN 或 >10×基线）直接返回 h=0 不走权重合成，因此降权重不会绕过
-        # 物理保护，只缓解「惩罚过重导致 h 长期钳位 0」的僵局。
-        if s["endo_zero_rate"] > 0.6:
-            for key, dom in (("endo_alpha", "endo_alpha"),
-                             ("endo_beta", "endo_beta"),
-                             ("endo_gamma", "endo_gamma")):
-                v = nudge(key, -_STEP, *_DOMAINS[dom])
-                if v: adj[key] = ("down", round(v, 4),
-                                   f"h_zero_rate={s['endo_zero_rate']:.2f}")
+        # —— F-01 修复：S3 睡眠压力权重反馈（值自成）——
+        # 睡眠间隔长期短于目标 → 加大 w3（时间积累权重），让压力积累更平缓；
+        # 回滚率高 → 加大 w1（数据惊讶度权重），让睡眠触发更及时。
+        if s["sleep_interval_ema"] < t["target_interval"] * 0.7:
+            v = nudge("pressure_w3", _STEP, *_DOMAINS["pressure_w3"])
+            if v: adj["pressure_w3"] = ("up", round(v, 3),
+                                        f"interval={s['sleep_interval_ema']:.1f}")
+        if s["rollback_rate"] > 0.4:
+            v = nudge("pressure_w1", _STEP, *_DOMAINS["pressure_w1"])
+            if v: adj["pressure_w1"] = ("up", round(v, 3),
+                                        f"rollback={s['rollback_rate']:.2f}")
+
+        # —— F-01 修复：S5 债务系数反馈（值自成）——
+        # 胼胝体 KL 偏大（两半球输出分布分化）→ 加大 beta_repay（债务加权步数），
+        # 促进蒸馏对齐；记忆通道活跃 → 加大 gamma_repay（每轮还债比例），防滚雪球。
+        if d is not None:
+            kl = getattr(getattr(d, "debt_ledger", None), "callosum_kl", None)
+            if kl is not None and kl > 0.01:
+                v = nudge("debt_beta_repay", _STEP, *_DOMAINS["debt_beta_repay"])
+                if v: adj["debt_beta_repay"] = ("up", round(v, 4),
+                                                f"callosum_kl={kl:.4f}")
+        if s["resurrect_throughput"] > 2.0:
+            v = nudge("debt_gamma_repay", _STEP, *_DOMAINS["debt_gamma_repay"])
+            if v: adj["debt_gamma_repay"] = ("up", round(v, 4),
+                                             f"resurrect={s['resurrect_throughput']:.2f}")
+
+        # —— F-01 修复：S7 杏仁核显著性系数反馈（值自成）——
+        # 笔记命中率低 → 下调显著性阈值（更多经验可优先入 note）；
+        # 命中率高 → 上调显著性增益（显著记忆获得更高选拔权重）。
+        if s["note_hit_rate"] < 0.05:
+            v = nudge("salience_thresh", -_STEP, *_DOMAINS["salience_thresh"])
+            if v: adj["salience_thresh"] = ("down", round(v, 3),
+                                            f"note_hit={s['note_hit_rate']:.2f}")
+        elif s["note_hit_rate"] > 0.3:
+            v = nudge("salience_boost", _STEP, *_DOMAINS["salience_boost"])
+            if v: adj["salience_boost"] = ("up", round(v, 3),
+                                           f"note_hit={s['note_hit_rate']:.2f}")
 
         self.last_adjust = adj
         # 把调整后的值同步到 Dolphin 对象（dolphin.py 使用这些属性）。
@@ -419,17 +479,15 @@ class Autotune:
             # life.run_cycle 按 mode 读取对应属性。
             d.sleep_steps_light = int(round(t["sleep_steps_light"]))
             d.sleep_steps_rem = int(round(t["sleep_steps_rem"]))
+            # S6 四档睡眠（2026-10-13）：nrem 步数域同步回 Dolphin 属性，
+            # life.run_cycle 按 mode 读取对应属性。
+            d.sleep_steps_nrem = round(t["sleep_steps_nrem"])
             # 判决带传导系数（2026-10-11）：同步回 Dolphin 属性，Dolphin.gate 消费。
             d.k_margin = round(t["k_margin"], 4)
             # 金发姑娘带通阈值（2026-10-13）：同步回 Dolphin 属性，learn() 的
             # goldilocks_gate 调用点会读取（见 dolphin.py learn()）。
             d.goldilocks_lo = round(t["goldilocks_lo"], 4)
             d.goldilocks_hi = round(t["goldilocks_hi"], 4)
-            # 内生健康度合成权重（2026-10-13）：同步回 Dolphin 属性，
-            # life.run_cycle 的 Endogenous.update 调用点会读取。
-            d.endo_alpha = round(t["endo_alpha"], 4)
-            d.endo_beta = round(t["endo_beta"], 4)
-            d.endo_gamma = round(t["endo_gamma"], 4)
         return adj
 
     # ---------- 周期入口（由 run_cycle 调用） ----------

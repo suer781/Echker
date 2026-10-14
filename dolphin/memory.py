@@ -12,6 +12,7 @@ import array
 import bisect
 import json
 import os
+import sys
 import threading
 import time
 
@@ -121,6 +122,7 @@ class MemoryStore:
         self._cold_inverted_ready = threading.Event()
         self._cold_by_seq = []              # cold_seq -> MemoryEntry（resurrect 后置 None）
         self._cold_next_seq = 0
+        self._cold_skip_warned = False      # 大冷层索引构建中跳过检索的警告标记（只提醒一次）
 
     # ---------- 冷层（G1：逐出降级落盘，跨周期可检索可复活） ----------
 
@@ -289,6 +291,37 @@ class MemoryStore:
                         best[seq] = (ov, en)
         return list(best.values())
 
+    def _retrieve_cold_indexed(self, q, k):
+        """用倒排索引对冷层做 retrieve 打分（精确语义：count/len(q) == len(q&g)/len(q)）。
+
+        与 _dream_cold_indexed 的区别：retrieve 对冷层所有条目打分，不排除
+        hits>=promote_hits 的条目（检索命中计数本就作用于全部冷层条目，
+        复活是另一条独立通道）。返回 [(ov, entry), ...]，由 retrieve 统一排序。
+        """
+        idx = self._cold_inverted
+        qh = {_hash64(g) for g in q}
+        lq = len(q)
+        if lq <= 0:
+            return []
+        thresh = lq * 0.05
+        counts = {}
+        for h in qh:
+            lo = bisect.bisect_left(idx.hashes, h)
+            hi = bisect.bisect_left(idx.hashes, h + 1)
+            for j in range(lo, hi):
+                seq = idx.seqs[j]
+                counts[seq] = counts.get(seq, 0) + 1
+            for seq in idx.delta.get(h, ()):
+                counts[seq] = counts.get(seq, 0) + 1
+        out = []
+        for seq, cnt in counts.items():
+            if cnt > thresh:
+                en = self._cold_by_seq[seq] if seq < len(self._cold_by_seq) else None
+                if en is None:
+                    continue
+                out.append((cnt / lq, en))
+        return out
+
     def flush_cold(self):
         """把冷层影子索引（含检索命中计数）写回落盘，供存档时调用——
         冷层命中进度跨重启不丢。缓存从未加载过则落盘文件为唯一依据，不做改动；
@@ -398,18 +431,35 @@ class MemoryStore:
         # 2026-10-04 修复：训练线程（_evict/_demote/resurrect）会并发修改
         # self.entries / self.cold_entries，直接迭代会跳过元素/漏检索（语义错误）。
         # 迭代前取快照，保证检索看到一致视图，且不会在遍历中触发列表长度突变。
+        # 热层全量扫描（≤cap≈500，毫秒级），行为不变。
         for en in list(self.entries):
             g = _grams(en.text)
             if g:
                 ov = len(q & g) / len(q)
                 if ov > 0.05:
                     scored.append((ov, en))
-        for en in list(self.cold_entries):
-            g = _grams(en.text)
-            if g:
-                ov = len(q & g) / len(q)
-                if ov > 0.05:
-                    scored.append((ov, en))
+        # 冷层：倒排索引就绪则走索引加速（精确语义与全量扫描一致）；大冷层
+        # 索引构建中则本次跳过冷层（后台构建完成后自动恢复参与）；小冷层
+        # 同步构建后必然就绪，行为与历史全量扫描完全一致。
+        idx = self._cold_inverted
+        if idx is not None:
+            scored.extend(self._retrieve_cold_indexed(q, k))
+        elif len(self.cold_entries) > _SYNC_BUILD_THRESHOLD:
+            # 生产冷层（数十万条）后台构建中：本次检索跳过冷层，避免首周期
+            # 全量扫描卡死（220s 问题）。只提醒一次，避免每次检索刷屏。
+            if not self._cold_skip_warned:
+                print("[MemoryStore] 冷层索引构建中，暂不参与检索"
+                      "（后台构建完成后自动恢复）。", file=sys.stderr)
+                self._cold_skip_warned = True
+            self._maybe_start_index_build()  # 幂等：确保后台构建已启动
+        else:
+            # 小冷层（≤_SYNC_BUILD_THRESHOLD）：保持原全量扫描路径不变。
+            for en in list(self.cold_entries):
+                g = _grams(en.text)
+                if g:
+                    ov = len(q & g) / len(q)
+                    if ov > 0.05:
+                        scored.append((ov, en))
         scored.sort(key=lambda t: -t[0])
         top = [en for _, en in scored[:k]]
         for en in top:

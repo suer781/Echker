@@ -1911,8 +1911,8 @@ def t_m4_dev_birth():
     m = ByteTransformer(cfg)
     n = sum(p.numel() for p in m.parameters())
     check("M4-发育 种子身体规格 d32/L2/H2 随机初始化 41,856 参数", n == 41856,
-          f"{n:,}（57M 身体的 0.07%；发育模式的出生体重）")
-    # 注：57M 为历史默认出生档（≈57,097,728 参数），非容量上限；此处仅作比例对照。
+          f"{n:,}（大模型身体的 0.07%；发育模式的出生体重）")
+    # 注：大模型为历史默认出生档（d_model=768×8层），非容量上限；此处仅作比例对照。
     # ③ 轴②移植体的捕获对账（2026-10-05 发育实验发现并修复：父账本须经
     #    _AXIS_LEDGER 映射到 attn_out 位——旧实现直接查 "b0.attn_v" 得 None →
     #    对账单被无声清除 → 轴②移植体的 λ_g 捕获结算结构性死。轴①前缀
@@ -2865,7 +2865,7 @@ def t_m4_thermostat():
               LifeController()._mature_input() == 0.0)
 
         # ================= T7f R1 修复验收：稳态 gap̄=0.40 不触发重锤、带自动上浮 =================
-        # 病灶（监督审计 2026-10-05）：XI_HI=0.20 低于 57M 真实身体实测稳态 gap̄≈0.45
+        # 病灶（监督审计 2026-10-05）：XI_HI=0.20 低于大模型真实身体实测稳态 gap̄≈0.45
         # （docstring 自引数），带不可自校准 → born_sustained 12 周期重锤在健康系统
         # 几乎必触发。修复后带 = max(XI_HI, gap̄ 滞后滚动 p90)，随系统自身稳态上浮。
         ctl, v = fresh_ctl()
@@ -3402,104 +3402,65 @@ def t_amygdala():
 
 
 def t_amygdala_tone():
-    """杏仁核语气感知/显著性/情绪标签（2026-10-13）：纯 surprise 驱动，无硬编码词。
+    """杏仁核死方法已移除 + 采样托管仍工作（S7/S11，2026-10-13）。
 
-    read_tone 对高 surprise（用户说了预期之外的话）返回负 tone，对低 surprise
-    （预期内/满意）返回正 tone；tone 与文本内容无关（同一 surprise 不同文本
-    返回相同值，证明不读词表）；salience 用幅度度量显著（高幅度 > 低幅度）；
-    emotion_tag 打分落在 [0,1]。
+    S7 删除 read_tone/salience/emotion_tag 三个零调用死方法后，本测试等价改写：
+    - Amygdala 不再暴露 read_tone/salience/emotion_tag 属性（死方法已移除）；
+    - 采样托管（temperature/top_k/top_p）仍可读写，且 to_state/from_state 往返一致。
     """
     from dolphin.amygdala import Amygdala
 
     a = Amygdala()
-    a.read_tone("任意文本甲", 5.0)  # 预热基线
-    t_high = a.read_tone("完全不同的文本乙", 9.0)
-    t_low = a.read_tone("又一句无关的话", 2.0)
-    check("amygdala tone 高 surprise → 负信号", t_high < 0, f"t_high={t_high:.4f}")
-    check("amygdala tone 低 surprise → 正信号", t_low > 0, f"t_low={t_low:.4f}")
-    check("amygdala tone 落在 [-1,1]", -1.0 <= t_high <= 1.0 and -1.0 <= t_low <= 1.0)
+    # ① 死方法已移除：不再有 read_tone/salience/emotion_tag 属性
+    check("amygdala 死方法 read_tone 已移除", not hasattr(a, "read_tone"))
+    check("amygdala 死方法 salience 已移除", not hasattr(a, "salience"))
+    check("amygdala 死方法 emotion_tag 已移除", not hasattr(a, "emotion_tag"))
 
-    # 纯 surprise 驱动：同一 surprise 下不同文本返回相同 tone（不读词表）
-    a2, a3 = Amygdala(), Amygdala()
-    a2.read_tone("预热种子", 5.0)
-    a3.read_tone("另一段预热种子", 5.0)
-    t1 = a2.read_tone("文本内容A：完全不同", 7.0)
-    t2 = a3.read_tone("文本内容B：也不一样", 7.0)
-    check("amygdala tone 与文本内容无关（纯 surprise）", abs(t1 - t2) < 1e-12,
-          f"t1={t1} t2={t2}")
+    # ② 采样托管仍工作：temperature/top_k/top_p 可读写
+    check("amygdala temperature 初值 0.8", abs(a.temperature - 0.8) < 1e-9)
+    check("amygdala top_k 初值 0（不启用）", a.top_k == 0)
+    check("amygdala top_p 初值 1.0（不启用）", abs(a.top_p - 1.0) < 1e-9)
+    a.temperature = 1.1
+    a.top_k = 20
+    a.top_p = 0.8
+    check("amygdala temperature 可写", abs(a.temperature - 1.1) < 1e-9)
+    check("amygdala top_k 可写", a.top_k == 20)
+    check("amygdala top_p 可写", abs(a.top_p - 0.8) < 1e-9)
 
-    # 显著性：surprise 幅度越大越显著（正/负显著都算幅度）
-    a4 = Amygdala()
-    a4.read_tone("预热", 5.0)
-    s_high = a4.salience(9.0)
-    s_low = a4.salience(2.0)
-    check("amygdala salience 高幅度 > 低幅度", s_high > s_low,
-          f"s_high={s_high:.4f} s_low={s_low:.4f}")
-    check("amygdala salience 落在 [0,1]", 0.0 <= s_high <= 1.0 and 0.0 <= s_low <= 1.0)
-
-    # 情绪标签打分：落在 [0,1] 的显著性分
-    tag = a4.emotion_tag(9.0)
-    check("amygdala emotion_tag 分数在 [0,1]", 0.0 <= tag <= 1.0, f"tag={tag:.4f}")
+    # ③ 采样托管随档持久化：to_state/from_state 往返一致
+    st = a.to_state()
+    a2 = Amygdala()
+    a2.from_state(st)
+    check("amygdala 采样托管存档往返",
+          a2.temperature == a.temperature and a2.top_k == a.top_k
+          and a2.top_p == a.top_p,
+          f"orig={a.to_state()} load={a2.to_state()}")
 
 
 def t_endogenous_h():
-    """内生健康度 h（2026-10-13）：四信号计算、h 合成、NaN 硬拦截、归一化。
+    """endogenous 影子模式已移除（S10，2026-10-13）。
 
-    compute_signals 对同源模型返回 g≈0/f=0（无旧记忆）/d≈1/c≈0；weight_norm_ratio
-    对 2× 权重返回 d≈2；Endogenous.update 相对自身历史中位基线归一化后合成 h
-    （连续喂同值 → 中位基线=该值 → g_norm/f_norm=1 → h=0.5）；NaN d 与 d>10×
-    基线触发硬拦截 h=0。
+    S10 删除 dolphin/endogenous.py 及全部接入点后，本测试等价改写：
+    - Dolphin 不再有 endogenous 属性；
+    - Dolphin 不再有 endo_alpha/endo_beta/endo_gamma 属性；
+    - 存档 payload 无 "endogenous" 字段。
     """
-    from dolphin.endogenous import Endogenous, compute_signals, weight_norm_ratio
-    from dolphin.model import ByteTransformer, Config
+    from dolphin.dolphin import Dolphin
+    from dolphin.model import Config
 
-    # a) 同源模型：g≈0、f=0（无旧记忆）、d≈1、c≈0
-    cfg = Config(d_model=32, n_layers=1, n_heads=2, block_size=64)
-    awake = ByteTransformer(cfg)
-    sleeping = ByteTransformer(cfg)
-    sleeping.load_state_dict(awake.state_dict())
-    data = [("内生信号验证数据，长度足够越过最短评分窗口，用于学习增益与熵差计算。" * 2).encode()]
-    sig = compute_signals(awake, sleeping, data, [], "cpu")
-    check("endogenous 同源模型 g≈0", abs(sig["g"]) < 1e-4, f"g={sig['g']:.6f}")
-    check("endogenous 同源模型 d≈1", abs(sig["d"] - 1.0) < 1e-6, f"d={sig['d']:.6f}")
-    check("endogenous 同源模型 c≈0", abs(sig["c"]) < 1e-4, f"c={sig['c']:.6f}")
-    check("endogenous 无旧记忆 f=0", sig["f"] == 0.0)
-    data2 = [("旧记忆验证数据，用于遗忘信号计算。" * 2).encode()]
-    sig2 = compute_signals(awake, sleeping, data, data2, "cpu")
-    check("endogenous 同源模型遗忘 f≈0", abs(sig2["f"]) < 1e-4, f"f={sig2['f']:.6f}")
+    d = Dolphin(cfg=Config(d_model=32, n_layers=1, n_heads=2, block_size=64),
+                device="cpu")
+    check("endogenous 属性已移除", not hasattr(d, "endogenous"))
+    check("endo_alpha 属性已移除", not hasattr(d, "endo_alpha"))
+    check("endo_beta 属性已移除", not hasattr(d, "endo_beta"))
+    check("endo_gamma 属性已移除", not hasattr(d, "endo_gamma"))
 
-    # b) 发散 d：sleeping 权重 ×2 → 范数比 ≈2，无 NaN
-    with torch.no_grad():
-        for p in sleeping.parameters():
-            p.mul_(2.0)
-    d2, nan2 = weight_norm_ratio(sleeping, awake)
-    check("endogenous 权重范数比 d≈2 且无 NaN", abs(d2 - 2.0) < 1e-4 and not nan2,
-          f"d={d2:.6f} nan={nan2}")
-
-    # c) 归一化 + h 合成：连续喂同值 → 中位基线=该值 → g_norm/f_norm=1 → h=0.5
-    en = Endogenous()
-    for _ in range(5):
-        en.update(g=2.0, f=1.0, d=1.0, c=0.0)
-    r = en.update(g=2.0, f=1.0, d=1.0, c=0.0)
-    check("endogenous 中位基线归一化 g_norm=1.0", abs(r["g_norm"] - 1.0) < 1e-6,
-          f"g_norm={r['g_norm']:.6f}")
-    check("endogenous 中位基线归一化 f_norm=1.0", abs(r["f_norm"] - 1.0) < 1e-6,
-          f"f_norm={r['f_norm']:.6f}")
-    check("endogenous h 合成 = 0.5", abs(r["h"] - 0.5) < 1e-6, f"h={r['h']:.6f}")
-
-    # d) NaN 硬拦截 → h=0
-    en2 = Endogenous()
-    r2 = en2.update(g=1.0, f=0.0, d=float("nan"), c=0.0)
-    check("endogenous NaN 硬拦截 h=0", r2["h"] == 0.0 and r2["hard_block"],
-          f"h={r2['h']} hard={r2['hard_block']}")
-
-    # e) d > 10× 基线硬拦截 → h=0
-    en3 = Endogenous()
-    for _ in range(5):
-        en3.update(g=1.0, f=0.0, d=1.0, c=0.0)  # d 中位基线=1.0
-    r3 = en3.update(g=1.0, f=0.0, d=12.0, c=0.0)
-    check("endogenous d>10×基线 硬拦截 h=0", r3["h"] == 0.0 and r3["hard_block"],
-          f"h={r3['h']} hard={r3['hard_block']}")
+    # 存档 payload 不含 "endogenous" 字段
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "fed_state.pt")
+        d.save(path)
+        ck = torch.load(path, map_location="cpu", weights_only=True)
+        check("存档无 endogenous 字段", "endogenous" not in ck)
 
 
 def t_autotune_goldilocks():
@@ -3578,42 +3539,33 @@ def t_autotune_goldilocks():
 
 
 def t_autotune_endo():
-    """内生健康度合成权重接入 autotune（2026-10-13）：endo_alpha/beta/gamma
-    是 autotune 管理的被调量，值在律定域内、h 长期为 0 时下调（避免永久卡死）、
-    存档往返。
+    """endogenous 相关 autotune 条目已移除（S10，2026-10-13）。
+
+    S10 删除 endo_alpha/beta/gamma 的 _DOMAINS/tunables 条目与 endo_zero_rate
+    信号后，本测试等价改写：autotune 不再暴露任何 endogenous 相关被调量/信号，
+    其余被调量（如 goldilocks 阈值）仍正常存档往返。
     """
     from dolphin.autotune import Autotune, _DOMAINS
 
-    for key, dom in (("endo_alpha", _DOMAINS["endo_alpha"]),
-                     ("endo_beta", _DOMAINS["endo_beta"]),
-                     ("endo_gamma", _DOMAINS["endo_gamma"])):
-        # ① h 长期为 0（硬拦截率高）→ 权重下调，且在律定域内
-        au = Autotune()
-        au.signals["endo_zero_rate"] = 0.9
-        adj = au.adjust(None, {})
-        v = au.tunables[key]
-        check(f"autotune h长期为0 → {key} 下调", v < {"endo_alpha": 0.5, "endo_beta": 0.5, "endo_gamma": 1.0}[key],
-              f"{key}={v:.4f}")
-        check(f"autotune {key} 在律定域内", dom[0] <= v <= dom[1], f"{key}={v:.4f}")
-        check(f"autotune 调整记录含 {key}", key in adj and adj[key][0] == "down",
-              f"adj={adj.get(key)}")
+    # ① _DOMAINS 无 endo_* 条目
+    check("autotune _DOMAINS 无 endo_alpha", "endo_alpha" not in _DOMAINS)
+    check("autotune _DOMAINS 无 endo_beta", "endo_beta" not in _DOMAINS)
+    check("autotune _DOMAINS 无 endo_gamma", "endo_gamma" not in _DOMAINS)
 
-        # ② 存档往返
-        au2 = Autotune()
-        au2.signals["endo_zero_rate"] = 0.9
-        au2.adjust(None, {})
-        st = au2.to_state()
-        au3 = Autotune()
-        au3.from_state(st)
-        check(f"autotune {key} 存档往返",
-              abs(au3.tunables[key] - au2.tunables[key]) < 1e-9)
+    # ② tunables/signals 无 endo_* 条目
+    au = Autotune()
+    check("autotune tunables 无 endo_alpha", "endo_alpha" not in au.tunables)
+    check("autotune tunables 无 endo_beta", "endo_beta" not in au.tunables)
+    check("autotune tunables 无 endo_gamma", "endo_gamma" not in au.tunables)
+    check("autotune signals 无 endo_zero_rate", "endo_zero_rate" not in au.signals)
 
-    # ③ 旧档（无新字段）→ from_state 用初值
-    au4 = Autotune()
-    au4.from_state({"signals": {}, "tunables": {}, "cycle_count": 0})
-    check("autotune 旧档 endo_alpha 用初值", abs(au4.tunables["endo_alpha"] - 0.5) < 1e-9)
-    check("autotune 旧档 endo_beta 用初值", abs(au4.tunables["endo_beta"] - 0.5) < 1e-9)
-    check("autotune 旧档 endo_gamma 用初值", abs(au4.tunables["endo_gamma"] - 1.0) < 1e-9)
+    # ③ 存档往返仍工作（以 goldilocks 阈值验证）
+    au.tunables["goldilocks_lo"] = 0.08
+    st = au.to_state()
+    au2 = Autotune()
+    au2.from_state(st)
+    check("autotune 存档往返仍工作",
+          abs(au2.tunables["goldilocks_lo"] - 0.08) < 1e-9)
 
 
 if __name__ == "__main__":
@@ -3667,10 +3619,10 @@ if __name__ == "__main__":
     t_stdin_chat()        # 无模式 stdin 对话通道（2026-10-07）
     t_stdin_chat_loop()   # stdin 对话通道线程循环（EOF/stop_flag 退出）
     t_amygdala()          # 杏仁核自动温度调节（2026-10-08）
-    t_amygdala_tone()     # 杏仁核语气感知/显著性/情绪标签（2026-10-13）
-    t_endogenous_h()      # 内生健康度 h 影子模式（2026-10-13）
+    t_amygdala_tone()     # 杏仁核死方法已移除 + 采样托管（S7）
+    t_endogenous_h()      # endogenous 影子模式已移除（S10）
     t_autotune_goldilocks()  # 金发姑娘阈值接入 autotune（2026-10-13）
-    t_autotune_endo()        # 内生健康度权重接入 autotune（2026-10-13）
+    t_autotune_endo()        # endogenous 相关 autotune 条目已移除（S10）
     t_cold_quarantine()   # 隔离机制自检（先跑：此时污染若已发生，下面那条会一并变红）
     t_cold_untouched()    # 收尾红线：必须最后跑
     n_ok = sum(PASS)

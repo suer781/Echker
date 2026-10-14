@@ -10,7 +10,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dolphin.datasets import SOURCES, _READERS, iter_source, serialize, MIN_CHARS
+from dolphin.datasets import SOURCES, _READERS, iter_source, serialize
 
 NEW_SOURCES = ["school_math_r1", "cmid", "math_ds_r1_10k", "basic_math_1m",
                "math_hard_zh", "mathinstruct_zh", "belle_math_zh",

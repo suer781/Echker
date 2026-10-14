@@ -37,7 +37,7 @@ Ctrl+C 与 --max-idle（连续 N 个空选拔周期后允许收工，防真死�
 
 用法：
   python feed.py --sources logiqa,cmath,distil --limit 5000 \
-      --sleep-every 100 --sleep-steps 120 --model 57
+      --sleep-every 100 --sleep-steps 120 --model big
   python feed.py --resume   # 从 dolphin/fed_state.pt 按喂食游标续喂
 
 存档与恢复：启动时若存在 dolphin/fed_state.pt（--resume 或 --model auto）则读档
@@ -75,6 +75,7 @@ from dolphin.datasets import DEFAULT_ORDER, SOURCES, iter_source, serialize
 from dolphin.dolphin import Dolphin, GateDisabled, clamp_threshold
 from dolphin.life import _threshold_feedback  # noqa: F401  兼容再导出（tests G9 用）
 from dolphin.life import run_cycle as life_run_cycle
+from dolphin.modal_input import encode_audio_bytes, encode_image_bytes, sample_video_chunks
 from dolphin.model import Config
 
 FED_STATE = os.path.join("dolphin", "fed_state.pt")
@@ -463,8 +464,10 @@ def structural_reward(d, eid, text, seen):
     如实标注：这是结构信号（可复核：同文 sha256 计数），不是内容评价——
     真正的内容奖励（用户点赞/求解器验证）留给部署时代（M4：归属贡献过于复杂）。
     负奖励的压分边界 [-0.9, 9.0] 由 experience.select 唯一持有（分数恒正）。
+    S8：多模态原始字节同样适用——str/bytes 统一哈希进同一张重复计数表。
     """
-    h = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
+    data = text.encode("utf-8", errors="replace") if isinstance(text, str) else bytes(text)
+    h = hashlib.sha256(data).hexdigest()[:16]
     n = seen.get(h, 0)
     seen[h] = n + 1
     if n == 0:
@@ -534,11 +537,12 @@ def chat_count():
 
 
 def chat_once(d, text, source="stdin_chat"):
-    """无模式单轮对话：serve 回答 + 用户输入自动成为学习信号 + 可选打分。
+    """无模式单轮对话：serve 回答 + 用户输入自动成为学习信号 + 模型自评估打分。
 
     serve() 内部已把用户输入 add 进 buffer（learn_total+1），与批量喂食同一条
-    链路——这就是"没有用户模式/训练投喂模式"的体现。打印回复后从 stdin 读
-    一行打分：+1/-1/0（空=跳过），调用 d.feedback(eid, reward) 写奖励。
+    链路——这就是"没有用户模式/训练投喂模式"的体现。回复后由模型在后台自动
+    完成三维度自评估打分（d.self_evaluate(text, resp, eid)），无需用户参与、
+    不展示任何提示，打分经原 feedback 链路写入经验缓冲。
     异常不影响部署（部署持续运行原则）：打印错误后返回 None。
     返回 (eid, resp) 或 None。
     """
@@ -551,28 +555,10 @@ def chat_once(d, text, source="stdin_chat"):
     print(f"[对话] 蓝蓟智能：{resp}", flush=True)
     _bump_chat_count()
     try:
-        print("[对话] 打分？（+1/-1/0 或直接回车跳过）", flush=True)
-        line = sys.stdin.readline()
-        if line is None:  # 流已关闭：不能再读，跳过打分
-            return (eid, resp)
-        reward_line = line.strip()
-        if reward_line in ("+1", "1", "+", "赞", "好"):
-            reward = 1.0
-        elif reward_line in ("-1", "0", "-", "踩", "差"):
-            reward = -1.0 if reward_line in ("-1", "-", "踩", "差") else 0.0
-        elif reward_line == "":
-            log("对话", "跳过打分（空输入）")
-            return (eid, resp)
-        else:
-            try:
-                reward = float(reward_line)
-            except ValueError:
-                log("对话", f"无法识别的打分 {reward_line!r}，跳过（可输入 +1/-1/0 或空）")
-                return (eid, resp)
-        d.feedback(eid, reward)
-        log("对话", f"已写入奖励 {reward:+.1f} → 经验 {eid}")
-    except Exception as e:  # 打分失败不影响回复与学习信号（部署持续运行）
-        log("对话", f"打分写入异常（忽略）：{e!r}")
+        d.self_evaluate(text, resp, eid)
+        log("对话", f"模型自评估完成 → 经验 {eid}")
+    except Exception as e:  # 自评估失败不影响回复与学习信号（部署持续运行）
+        log("对话", f"自评估异常（忽略）：{e!r}")
     return (eid, resp)
 
 
@@ -580,7 +566,7 @@ def stdin_chat_loop(d, stop_flag, wake_cb=None):
     """无模式 stdin 对话通道（独立线程，daemon=True 由调用方设置）。
 
     逐行读 sys.stdin（阻塞）。feed.py 主线程不用 stdin，所以独占 stdin 安全。
-    每读到一行非空输入 → chat_once(d, line)（打分提示同样从 stdin 读）。
+    每读到一行非空输入 → chat_once(d, line)（模型自评估在后台自动执行，无需读打分）。
     每处理一条输入可调用 wake_cb()（可选）——通常不需要：serve 已把经验加入
     buffer，SleepTrainer 的压力/通知通道会自然触发睡眠。
     线程退出条件：stop_flag.is_set() 且 stdin 无更多输入（EOF 时退出）。
@@ -617,12 +603,18 @@ def stdin_chat_loop(d, stop_flag, wake_cb=None):
 
 def feed_from(d, names, cursor, seen, trainer=None, sleep_every=500, quota=None,
               stats=None, fed_base=0, progress_every=PROGRESS_EVERY, serve_every=0,
-              feed_interval=0.0, loop=False):
+              feed_interval=0.0, loop=False, input_type="text"):
     """正式喂食：从喂食游标（G3）起迭代数据源，喂入 + 自动第二信号接线。
 
-    游标语义：record_idx 计数据源内已消费的记录数（含碎片跳过）。cursor 与
+    游标语义：record_idx 计数据源内已消费的记录数。cursor 与
     d.feed_cursor 是同一引用：喂食推进即"入档就绪"（周期边界/收工存档自动携带）。
-    quota=本次最多喂入条数（None=不限，喂到数据尽）。返回 (fed, limit_hit, skipped)。
+    quota=本次最多喂入条数（None=不限，喂到数据尽）。返回 (fed, limit_hit, skipped)；
+    skipped 恒为 0（S1 已删除碎片长度过滤，非空样本全量入链），保留仅为兼容调用方解包。
+
+    input_type（S8 多模态输入）：默认 "text" 走现有文本解析路径；"image"/"audio"/
+    "video" 时把 names 视为文件路径列表，读取文件原始字节后按类型调用
+    dolphin.modal_input（图片/音频直通、视频分块），bytes 直接进入与文本同一条
+    经验链路（金发姑娘统一去噪）。
 
     loop（无限循环喂食，--loop-feed 默认开启，2026-10-07）：True 时数据源喂尽
     自动轮转回第一个源从头再喂（游标退化为"轮转位置标记"，不再有"数据尽/序位
@@ -640,7 +632,7 @@ def feed_from(d, names, cursor, seen, trainer=None, sleep_every=500, quota=None,
     阶段一实测 6/6 周期 hold("睡眠债 15.0 > 4.0")。系统每 ~41s 触发一次睡眠（并无
     剥夺），债务虚高纯因 target_interval=15 按"交互数"计而批量喂食交互极快。
     """
-    fed = skipped = 0
+    fed = 0
     limit_hit = False
     si = cursor["source_idx"]
     # 是否已实际开始过至少一个源（用于区分"游标越界恢复"与"完整一圈零产出"）：
@@ -668,15 +660,59 @@ def feed_from(d, names, cursor, seen, trainer=None, sleep_every=500, quota=None,
         name = names[si]
         started_any = True
         start = cursor["record_idx"] if si == cursor["source_idx"] else 0
+        if input_type != "text":
+            # S8 多模态：文件原始字节直通（零解码），金发姑娘统一去噪。
+            try:
+                with open(name, "rb") as f:
+                    raw = f.read()
+            except OSError as e:
+                log("部署", f"读取多模态文件失败 {name!r}：{e!r}，跳过")
+                si += 1
+                cursor["source_idx"], cursor["record_idx"] = si, 0
+                continue
+            cursor["source_idx"], cursor["record_idx"] = si, start + 1
+            if input_type == "image":
+                items = [encode_image_bytes(raw)]
+            elif input_type == "audio":
+                items = [encode_audio_bytes(raw)]
+            else:  # video：分块"自适应抽帧"，信息量筛选交给金发姑娘带通
+                items = sample_video_chunks(raw)
+            for data in items:
+                if quota is not None and fed >= quota:
+                    limit_hit = True
+                    break
+                eid = d.learn(data, source=name)  # 部署主线程：锁外算惊讶度，从不等待训练
+                structural_reward(d, eid, data, seen)  # G3 奖励接线：自动第二信号
+                fed += 1
+                if feed_interval > 0:
+                    time.sleep(feed_interval)  # 部署节流（发育实验）：交互节奏模拟
+                if stats is not None:
+                    stats[name] = stats.get(name, 0) + 1
+                fed_total = fed_base + fed
+                if trainer is not None and sleep_every and fed_total % sleep_every == 0:
+                    trainer.request_sleep()  # 非阻塞通知，喂入继续
+                    log("部署", f"已喂 {fed_total} 条 → 通知训练线程触发睡眠周期")
+                elif fed_total % progress_every == 0:
+                    log("部署", f"已喂 {fed_total} 条（当前源 {name}）"
+                        f"  缓冲 {d.buffer.bytes}B  压力 {d.buffer.pressure():.2f}")
+                if serve_every and fed_total % serve_every == 0:  # 零点实验专用（V2 证据）
+                    serve_demo(d, fed_total)
+                if quota is not None and fed >= quota:
+                    limit_hit = True  # 人工限次已达：文件内精确收工（limit 是人工限次，不是数据尽头）
+                    break
+            if not limit_hit:  # 文件已喂完：游标推进到下一源
+                si += 1
+                cursor["source_idx"], cursor["record_idx"] = si, 0
+                if loop and si >= len(names) and quota is not None and fed >= quota:
+                    limit_hit = True  # 人工限次已达：直接收工（limit 是人工限次，不是数据尽头）
+                    break
+            continue
         for ri, rec in enumerate(itertools.islice(iter_source(name), start, None), start):
             if quota is not None and fed >= quota:
                 limit_hit = True
                 break
             text = serialize(rec)
             cursor["source_idx"], cursor["record_idx"] = si, ri + 1
-            if not text:
-                skipped += 1  # 碎片过滤：序列化后短于 30 字符
-                continue
             eid = d.learn(text, source=name)  # 部署主线程：锁外算惊讶度，从不等待训练
             structural_reward(d, eid, text, seen)  # G3 奖励接线：自动第二信号
             fed += 1
@@ -702,7 +738,7 @@ def feed_from(d, names, cursor, seen, trainer=None, sleep_every=500, quota=None,
             if loop and si >= len(names) and quota is not None and fed >= quota:
                 limit_hit = True  # 人工限次已达：直接收工（limit 是人工限次，不是数据尽头）
                 break
-    return fed, limit_hit, skipped
+    return fed, limit_hit, 0
 
 
 def _daemon_wait(d, trainer, args, poll_interval=5.0):
@@ -769,17 +805,28 @@ def guard_loop(d, trainer, max_idle, log_every=50):
 def parse_args():
     ap = argparse.ArgumentParser(description="B 路线部署期喂食（部署-训练双线程，守护模式默认开启）")
     ap.add_argument("--sources", default=",".join(DEFAULT_ORDER),
-                    help="逗号分隔的数据源（默认按质量排序，logiconbench 需显式指定）")
-    ap.add_argument("--limit", type=int, default=None, help="本次最多喂入条数（默认不限："
-                    "--loop-feed 开启时无限循环喂食；"
-                    "--no-loop-feed 时喂到数据尽）")
+                    help="逗号分隔的数据源（默认按质量排序，logiconbench 需显式指定；"
+                         "--input-type 非 text 时传文件路径）")
+    ap.add_argument("--input-type", default="text", choices=["text", "image", "audio", "video"],
+                    help="S8 多模态输入：text=现有文本解析路径（默认）；image/audio=文件原始"
+                         "字节直通（零解码承诺，模型靠暴露自学统计结构）；video=文件字节分块"
+                         "（自适应抽帧，金发姑娘带通自然筛选信息量大的块）。非 text 时"
+                         "--sources 传文件路径，bytes 直接进入同一经验链路。")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="本次最多喂入条数（默认不限：--loop-feed 开启时无限循环喂食、"
+                         "不会自然结束，需 Ctrl+C 或 --limit 收工；"
+                         "--no-loop-feed 时喂到数据尽）")
     ap.add_argument("--sleep-every", type=int, default=500, help="每喂多少条通知训练线程睡眠")
-    ap.add_argument("--sleep-steps", type=int, default=120, help="每次睡眠的训练步数")
-    ap.add_argument("--model", default="auto", choices=["57", "small", "seed", "auto"],
-                    help="57=历史默认出生档（≈57M 参数，非容量上限）；small=冒烟用小模型；"
+    ap.add_argument("--sleep-steps", type=int, default=120,
+                    help="每次睡眠的训练步数（仅 autotune_steps=False 时生效；"
+                         "生产路径 autotune_steps=True 由 autotune 值自成覆盖，"
+                         "此值在律定域 [120,400] 内自适应，人工设置会被忽略）")
+    ap.add_argument("--model", default="auto", choices=["big", "small", "seed", "auto"],
+                    help="big=大模型出生档（d_model=768×8层，参数由恒温器动态生长，非固定大小）；"
+                         "small=冒烟用小模型；"
                          "seed=发育模式最小种子 d32×2 层×2 头（41,856 参数随机初始化，"
                          "生长机制可用——模型规模随经验增长）；"
-                         "auto=有存档则读存档 cfg（默认），无存档回落历史默认出生档 57")
+                         "auto=有存档则读存档 cfg（默认），无存档回落历史默认出生档")
     ap.add_argument("--resume", action="store_true", help="从 dolphin/fed_state.pt 按喂食游标续喂")
     ap.add_argument("--no-guard", action="store_true",
                     help="关闭守护模式（数据尽即收工；默认开启：数据尽后转入反刍等待新经验）")
@@ -835,7 +882,7 @@ def make_cfg(which):
         return Config(d_model=32, n_layers=2, n_heads=2, block_size=256)
     if which == "auto":
         # 无人值守默认档：有存档则用存档模型（load 会覆盖），无存档回落历史默认出生档
-        # （≈57M，非容量上限；生产起点已改为最小种子档）。
+        # （d_model=768×8 层，非容量上限；生产起点已改为最小种子档）。
         # 实际模型由 Dolphin.load() 从存档 cfg 决定，此处只提供占位 Config。
         if os.path.exists(FED_STATE):
             try:
@@ -843,8 +890,8 @@ def make_cfg(which):
                 return Config(**ck["cfg"])
             except Exception:
                 pass
-        return Config(d_model=768, n_layers=8, n_heads=8, block_size=256)  # 历史默认出生档 ≈57M 参数（非容量上限）
-    return Config(d_model=768, n_layers=8, n_heads=8, block_size=256)  # 历史默认出生档 ≈57M 参数（非容量上限）
+        return Config(d_model=768, n_layers=8, n_heads=8, block_size=256)  # 历史默认出生档（d_model=768×8 层，非容量上限）
+    return Config(d_model=768, n_layers=8, n_heads=8, block_size=256)  # 历史默认出生档（d_model=768×8 层，非容量上限）
 
 
 def _sigbreak_to_interrupt(sig, frame):
@@ -858,9 +905,10 @@ def main():
 
     args = parse_args()
     names = [s.strip() for s in args.sources.split(",") if s.strip()]
-    for n in names:
-        if n not in SOURCES:
-            sys.exit(f"未知数据源 {n}，可选：{SOURCES}")
+    if args.input_type == "text":  # S8：非 text 时 --sources 传文件路径，不做数据源名校验
+        for n in names:
+            if n not in SOURCES:
+                sys.exit(f"未知数据源 {n}，可选：{SOURCES}")
 
     # —— 日志轮转（2026-10-10）：启动时压缩/清理超限日志，保护磁盘 ——
     try:
@@ -976,7 +1024,6 @@ def _run_once(args, names):
     t_train_span0 = time.monotonic()
 
     stats = {n: 0 for n in names}
-    skipped = 0
     total = 0
     ruminate_total = 0
     seen = {}  # 结构信号的重复计数表（G3 奖励接线）
@@ -986,12 +1033,12 @@ def _run_once(args, names):
         while True:  # feed ↔ ruminate 状态机（G3 自续运行：触发、执行、验收全内部完成）
             _CURRENT_CYCLE = d.cycle  # 崩溃记录用：保持最后已知周期
             quota = None if args.limit is None else max(0, args.limit - total)
-            fed, limit_hit, skip = feed_from(
+            fed, limit_hit, _ = feed_from(
                 d, names, cursor, seen, trainer=trainer, sleep_every=args.sleep_every,
                 quota=quota, stats=stats, fed_base=total, serve_every=args.serve_every,
-                feed_interval=args.feed_interval, loop=args.loop_feed)
+                feed_interval=args.feed_interval, loop=args.loop_feed,
+                input_type=args.input_type)
             total += fed
-            skipped += skip
             if limit_hit:
                 stop_reason = "limit"
                 break
@@ -1041,7 +1088,7 @@ def _run_once(args, names):
         awake = d.awake()
         print("\n== 运行总结 ==", flush=True)
         print(f"退出原因：{stop_reason}")
-        print(f"总喂入 {total} 条（碎片跳过 {skipped} 条）")
+        print(f"总喂入 {total} 条（无碎片过滤，非空样本全量入链）")
         for n in names:
             print(f"  {n:<13} {stats[n]} 条")
         print(f"反刍 {ruminate_total} 条  连续空选拔周期 {trainer.idle_cycles} 个")

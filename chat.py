@@ -7,7 +7,8 @@
   SleepTrainer 后台线程压力触发睡眠训练，自动巩固。
 - 杏仁核自动托管：生成温度/top_k/top_p 由 Amygdala 根据系统健康度自动调节，
   无需人工设置。
-- 打分反馈：每次回答后输入 +1/-1/0（或回车跳过），奖励进入记忆库影响选拔。
+- 模型自评估：每次回答后由模型在后台自动完成三维度自评估打分（需求匹配度/
+  问题解决完整性/响应准确性），奖励进入记忆库影响选拔，无需用户手动打分。
 
 用法：
   python chat.py            # 前台聊天（后台睡眠训练线程保持自循环）
@@ -42,7 +43,7 @@ def load_dolphin():
 
 
 def chat_once(d, text):
-    """单轮对话：serve 回答 + 输入自动成为学习信号 + 可选打分。"""
+    """单轮对话：serve 回答 + 输入自动成为学习信号 + 模型自评估打分（后台无感）。"""
     try:
         resp, eid = d.serve(text)
     except Exception as e:
@@ -50,20 +51,12 @@ def chat_once(d, text):
         return
     print(f"\n你：{text}")
     print(f"蓝蓟智能：{resp}")
-    # 打分反馈（输入即学习的内容级奖励）
+    # 模型自评估打分（2026-10-14）：替代原用户手动打分交互，后台自动执行，
+    # 无需用户参与、不展示提示，打分经原 feedback 链路写入经验缓冲。
     try:
-        reward_line = input("[打分] +1/-1/0 或回车跳过：").strip()
-        if reward_line in ("+1", "1", "+", "赞", "好"):
-            d.feedback(eid, 1.0)
-            print("  → 已记录 好评 +1")
-        elif reward_line in ("-1", "-", "踩", "差"):
-            d.feedback(eid, -1.0)
-            print("  → 已记录 差评 -1")
-        elif reward_line == "0":
-            d.feedback(eid, 0.0)
-            print("  → 已记录 中性 0")
-    except Exception:
-        pass
+        d.self_evaluate(text, resp, eid)
+    except Exception as e:
+        print(f"[自评估] 异常：{e!r}")
 
 
 def main():
@@ -75,7 +68,6 @@ def main():
     print("\n" + "=" * 56)
     print("  蓝蓟智能（Echker）聊天入口（输入自动成为学习信号，无模式）")
     print("  输入内容直接回车发送；输入 exit 退出")
-    print("  每次回答后可以打分：+1 / -1 / 0（回车跳过）")
     print("=" * 56 + "\n")
 
     try:

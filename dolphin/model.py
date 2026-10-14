@@ -4,7 +4,7 @@
 无任何现成 GPT 工程代码。唯一依赖 PyTorch 张量运算。
 """
 import math
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -107,6 +107,10 @@ class ByteTransformer(nn.Module):
 
     @torch.no_grad()
     def generate(self, idx, max_new, temperature=0.8, top_k=None, top_p=None):
+        # 空统计上下文（T==0）：没有任何可条件化的历史信息，模型自然省略生成
+        # （金发姑娘语义：零信息量=无内容可产出），原样返回，不做输入侧拦截。
+        if idx.shape[1] == 0:
+            return idx
         for _ in range(max_new):
             ctx = idx[:, -self.cfg.block_size:]
             logits, _ = self(ctx)
@@ -204,6 +208,3 @@ class ByteTransformer(nn.Module):
             _, loss = self(x.unsqueeze(0), y.unsqueeze(0))
             losses[owner].append(loss.item())
         return [sum(l) / len(l) if l else 0.0 for l in losses]
-
-    def cfg_dict(self):
-        return asdict(self.cfg)

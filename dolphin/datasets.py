@@ -2,7 +2,6 @@
 
 每个解析器是生成器函数，yield {"prompt": str, "answer": str, "source": str}。
 铁律：test/dev 等评测 split 永不进入训练数据（律 L8 前置）——它们是体检候选。
-序列化后短于 MIN_CHARS 的碎片一律跳过。
 """
 import json
 import os
@@ -10,8 +9,6 @@ import os
 # 数据根：优先取环境变量 ECHKER_DATA_ROOT，否则回退到仓库根目录旁的 datasets/ 目录
 DATA_ROOT = os.environ.get("ECHKER_DATA_ROOT",
                            os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "datasets")))
-# 碎片过滤：序列化后短于该长度没有统计结构的噪声（语料白名单.md 工序 4）
-MIN_CHARS = 30
 
 # LogiQA 2.0 的 MRC train split（只用 train；dev/test/ood_test 是体检候选，禁止使用）
 _LOGIQA2_TRAIN = DATA_ROOT + "/01_LogiQA/LogiQA-2.0" \
@@ -794,9 +791,9 @@ _READERS = {
 
 
 def serialize(rec):
-    """统一训练数据格式。短于 MIN_CHARS 的碎片返回空串（调用方跳过）。"""
+    """统一训练数据格式。对任何非空样本原样返回字符串，不做长度过滤。"""
     s = "问：" + rec["prompt"] + "\n答：" + rec["answer"]
-    return s if len(s) >= MIN_CHARS else ""
+    return s
 
 
 def iter_source(name):
