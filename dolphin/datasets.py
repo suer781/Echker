@@ -341,6 +341,57 @@ def read_synlogic():
                 yield {"prompt": q, "answer": a, "source": "synlogic"}
 
 
+# ---------- 鲁迅文学（自然中文语料，09_鲁迅文学） ----------
+
+# 目录/藏书清单类噪声特征：制表方框字符（OCR 排版数据）、私有区 Unicode、
+# 以及中文占比过低的记录（日文书名/生僻字密集的藏书目录）。
+_LUXUN_NOISE_BOX = set("─│┌┐└┘├┤┬┴┼╭╮╯╰○●◎◇◆")
+
+
+def _is_luxun_noise(text):
+    """判断鲁迅语料记录是否为不可学的排版/目录噪声。
+
+    生产实测（2026-10-15）：LuXunWorks_dedup.jsonl 尾部约 6 千条为书籍目录
+    （制表符+数字+日文书名+私有区字符），对字节模型近似随机（惊讶度≈ln256），
+    会把金发姑娘能力基线污染抬高。此类记录应从训练流中剔除。
+    """
+    if any(c in _LUXUN_NOISE_BOX for c in text):
+        return True
+    if any("\ue000" <= c <= "\uf8ff" for c in text):
+        return True
+    # 藏书目录/书账：chunk 核心句含日文假名（书名/人名），非自然散文。
+    kana = sum(1 for c in text if "\u3040" <= c <= "\u30ff")
+    if kana >= 2:
+        return True
+    body = text.replace(" ", "")
+    if not body:
+        return True
+    zh = sum(1 for c in body if "\u4e00" <= c <= "\u9fff")
+    if zh / len(body) < 0.30:
+        return True
+    return False
+
+
+def read_luxun():
+    """鲁迅作品集（sentence_window 切分）：window 为上下文窗口，chunk 为核心句。
+
+    自然中文散文语料，用于学习真实语言结构（对应"正常人类语言交流"目标）。
+    prompt 给出三句上下文窗口，answer 为窗口核心句——模型学习在上下文中
+    产出自然中文，而非公式/符号堆砌。文件尾部的藏书目录/排版数据属噪声，
+    经 _is_luxun_noise 过滤，不进入训练流。
+    """
+    p = _norm(DATA_ROOT + "/09_鲁迅文学/LuXunWorks_dedup.jsonl")
+    for rec in _iter_jsonl(p):
+        window = _clean(rec.get("window"))
+        chunk = _clean(rec.get("chunk"))
+        if not window or not chunk:
+            continue
+        if _is_luxun_noise(window + chunk):
+            continue
+        prompt = f"阅读以下文字：\n{window}"
+        yield {"prompt": prompt, "answer": chunk, "source": "luxun"}
+
+
 # ---------- 第三批扩充：10_数学推理扩充（纯中文） ----------
 
 def read_school_math_r1():
@@ -757,6 +808,177 @@ def read_logic_cot_zh():
         yield {"prompt": prompt, "answer": answer, "source": "logic_cot_zh"}
 
 
+# ---------- 08_谜语谜题（自然中文问答，2026-10-16 纳入覆盖） ----------
+
+def read_riddle():
+    """tigerbot-riddle-qa-1k：中文谜语问答（instruction=谜面，input=空，output=谜底）。
+
+    自然中文短问答，帮助模型学习语言理解与联想。谜面含"（打一X）"提示，
+    谜底为简短的动物/食物/物品名，是干净的自然语言训练样本。
+    """
+    p = _norm(DATA_ROOT + "/08_谜语谜题/tigerbot-riddle-qa-1k.json")
+    for rec in _iter_jsonl(p):
+        prompt = _clean(rec.get("instruction"))
+        extra = _clean(rec.get("input"))
+        if extra:
+            prompt += "\n" + extra
+        answer = _clean(rec.get("output"))
+        if prompt and answer:
+            yield {"prompt": prompt, "answer": answer, "source": "riddle"}
+
+
+def read_superclue_c3():
+    """tigerbot-superclue-c3-zh-5k：中文阅读理解（instruction=问题，input=短文，output=答案）。
+
+    短文阅读理解，训练模型依据上下文回答中文问题，对语义理解与长文上下文
+    连贯性有帮助。input 作为材料并入题面。
+    """
+    p = _norm(DATA_ROOT + "/08_谜语谜题/tigerbot-superclue-c3-zh-5k.json")
+    for rec in _iter_jsonl(p):
+        prompt = _clean(rec.get("instruction"))
+        extra = _clean(rec.get("input"))
+        if extra:
+            prompt += "\n材料：" + extra
+        answer = _clean(rec.get("output"))
+        if prompt and answer:
+            yield {"prompt": prompt, "answer": answer, "source": "superclue_c3"}
+
+
+# ---------- 12_模型蒸馏（2026-10-16 引入中文对话/指令跟随蒸馏语料） ----------
+# 这些是社区用大模型（Qwen3/R1 等）蒸馏的中文指令-回答数据，含大量自然语言
+# 对话、通用问答、故事讲述、思维链。此前训练主要喂数学/逻辑题，模型输出始终
+# 是乱码；加入通用中文对话蒸馏语料，让模型在字节级自回归中学会自然语言结构。
+
+def read_alpaca_qwen():
+    """Alpaca-Chinese-5K-Distill-Qwen：5000 条中文 Alpaca 蒸馏（通用指令）。"""
+    p = _norm(DATA_ROOT + "/12_模型蒸馏/Alpaca-Chinese-5K-Distill-Qwen/"
+              "Alpaca-Chinese-5K-Distill-Qwen.json")
+    with _open_text(p) as f:
+        data = json.load(f)
+    for rec in data:
+        prompt = _clean(rec.get("instruction"))
+        extra = _clean(rec.get("input"))
+        if extra:
+            prompt += "\n" + extra
+        answer = _clean(rec.get("output"))
+        if prompt and answer:
+            yield {"prompt": prompt, "answer": answer, "source": "alpaca_qwen"}
+
+
+def read_alpaca_zh_r1():
+    """alpaca-zh-R1-Distill-20k：20000 条中文对话（messages 含 R1 思维链）。
+
+    取最后一条 assistant 内容为答案（含 thinking 思维链），前面的 user 内容
+    为题面；system 提示忽略（统一为通用助手）。
+    """
+    p = _norm(DATA_ROOT + "/12_模型蒸馏/alpaca-zh-R1-Distill-20k/"
+              "alpaca_data_zh_20k_distill_qwen_32b.json")
+    with _open_text(p) as f:
+        data = json.load(f)
+    for rec in data:
+        msgs = rec.get("messages") or []
+        user_parts, ans = [], None
+        for m in msgs:
+            role = m.get("role")
+            content = _clean(m.get("content"))
+            if role == "assistant":
+                ans = content
+            elif role == "user" and content:
+                user_parts.append(content)
+        prompt = "\n".join(user_parts)
+        if prompt and ans:
+            yield {"prompt": prompt, "answer": ans, "source": "alpaca_zh_r1"}
+
+
+def read_qwen3_thinking():
+    """Chinese-Qwen3-Thinking-Distill-100k：约 10 万条 Qwen3 思考蒸馏。
+
+    Input 为题面；CoT_content 为思维链，Answer_content 为正式回答。拼接
+    思维链+回答作为完整答案（与 read_distil 同风格）。
+    """
+    p = _norm(DATA_ROOT + "/12_模型蒸馏/Chinese-Qwen3-Thinking-Distill-100k/"
+              "Chinese-Qwen3-235b-a22b-Thinking-2507-Distill-data-100K_final.jsonl")
+    for rec in _iter_jsonl(p):
+        prompt = _clean(rec.get("Input"))
+        cot = _clean(rec.get("CoT_content"))
+        ans = _clean(rec.get("Answer_content"))
+        if prompt and (cot or ans):
+            answer = (cot + ("\n" + ans if ans else "")) if cot else ans
+            yield {"prompt": prompt, "answer": answer, "source": "qwen3_thinking"}
+
+
+def read_r1_110k():
+    """Chinese-R1-Distill-110k：约 11 万条 R1 蒸馏（input/content/reasoning_content）。
+
+    content 是正式回答；reasoning_content 是思维链。拼接思维链+回答。
+    """
+    p = _norm(DATA_ROOT + "/12_模型蒸馏/Chinese-R1-Distill-110k/"
+              "distill_r1_110k.jsonl")
+    for rec in _iter_jsonl(p):
+        prompt = _clean(rec.get("input"))
+        content = _clean(rec.get("content"))
+        reasoning = _clean(rec.get("reasoning_content"))
+        if prompt and content:
+            answer = (reasoning + ("\n" + content if content else "")) if reasoning else content
+            yield {"prompt": prompt, "answer": answer, "source": "r1_110k"}
+
+
+def read_r1_110k_sft():
+    """Chinese-R1-Distill-110k-SFT：约 11 万条 R1 蒸馏 SFT 版（instruction/output）。
+
+    与 alpaca 同构，output 含 thinking 思维链。
+    """
+    p = _norm(DATA_ROOT + "/12_模型蒸馏/Chinese-R1-Distill-110k-SFT/"
+              "distill_r1_110k_sft.jsonl")
+    for rec in _iter_jsonl(p):
+        prompt = _clean(rec.get("instruction"))
+        extra = _clean(rec.get("input"))
+        if extra:
+            prompt += "\n" + extra
+        answer = _clean(rec.get("output"))
+        if prompt and answer:
+            yield {"prompt": prompt, "answer": answer, "source": "r1_110k_sft"}
+
+
+def read_medical_r1():
+    """Medical-R1-Distill-Chinese：17000 条中文医疗 R1 蒸馏 SFT。
+
+    question 为题面；reasoning (reasoning_content) 为思维链；
+    response (content) 为正式回答。拼接思维链+回答。
+    """
+    p = _norm(DATA_ROOT + "/12_模型蒸馏/Medical-R1-Distill-Chinese/"
+              "medical_r1_distill_sft_Chinese.json")
+    with _open_text(p) as f:
+        data = json.load(f)
+    for rec in data:
+        prompt = _clean(rec.get("question"))
+        reasoning = _clean(rec.get("reasoning (reasoning_content)"))
+        response = _clean(rec.get("response (content)"))
+        if prompt and (reasoning or response):
+            answer = (reasoning + ("\n" + response if response else "")) if reasoning else response
+            yield {"prompt": prompt, "answer": answer, "source": "medical_r1"}
+
+
+def read_chinese_medical_r1():
+    """chinese-medical-R1-distill-20k：18107 条中文医疗 R1 蒸馏（pretty 多行 JSON）。
+
+    文件实际是缩进打印的 JSON 数组（非 JSONL），整文件解析。question 为题面，
+    synthesized_text 为模型合成回答（含思维链）。
+    """
+    p = _norm(DATA_ROOT + "/12_模型蒸馏/chinese-medical-R1-distill-20k/"
+              "medical_gen.jsonl")
+    with _open_text(p) as f:
+        data = json.load(f)
+    for rec in data:
+        if not isinstance(rec, dict):
+            continue
+        prompt = _clean(rec.get("question") or rec.get("input"))
+        answer = _clean(rec.get("synthesized_text") or rec.get("answer")
+                        or rec.get("response") or rec.get("content"))
+        if prompt and answer:
+            yield {"prompt": prompt, "answer": answer, "source": "chinese_medical_r1"}
+
+
 # ---------- 统一序列化 ----------
 
 SOURCES = ["logiqa", "logiqa2", "cmath", "gsm8k", "distil",
@@ -764,14 +986,21 @@ SOURCES = ["logiqa", "logiqa2", "cmath", "gsm8k", "distil",
            "school_math_r1", "cmid", "math_ds_r1_10k", "basic_math_1m",
            "math_hard_zh", "mathinstruct_zh", "belle_math_zh",
            "openqa_reasoning_50k", "math23k", "ape210k", "gaokao_math",
-           "xnli_zh", "clue", "logic_cot_zh"]
+           "xnli_zh", "clue", "logic_cot_zh", "luxun",
+           "riddle", "superclue_c3",
+           "alpaca_qwen", "alpaca_zh_r1", "qwen3_thinking", "r1_110k",
+           "r1_110k_sft", "medical_r1", "chinese_medical_r1"]
 
-# 质量排序的默认喂食顺序（logiconbench 默认不启用；扩充源按数学→逻辑次序追加）
+# 质量排序的默认喂食顺序（logiconbench 默认不启用；扩充源按数学→逻辑次序追加；
+# 12_模型蒸馏 中文对话源排最后，作为通用语言语料轮转补充）
 DEFAULT_ORDER = ["logiqa", "cmath", "gsm8k", "distil", "coig", "synlogic",
                  "metamath", "school_math_r1", "cmid", "math_ds_r1_10k",
                  "basic_math_1m", "math_hard_zh", "mathinstruct_zh",
                  "belle_math_zh", "openqa_reasoning_50k", "math23k",
-                 "ape210k", "gaokao_math", "xnli_zh", "clue", "logic_cot_zh"]
+                 "ape210k", "gaokao_math", "xnli_zh", "clue", "logic_cot_zh",
+                 "luxun", "riddle", "superclue_c3",
+                 "alpaca_qwen", "alpaca_zh_r1", "qwen3_thinking", "r1_110k",
+                 "r1_110k_sft", "medical_r1", "chinese_medical_r1"]
 
 _READERS = {
     "logiqa": read_logiqa, "logiqa2": read_logiqa2, "cmath": read_cmath,
@@ -786,7 +1015,12 @@ _READERS = {
     "math23k": read_math23k, "ape210k": read_ape210k,
     "gaokao_math": read_gaokao_math,
     "xnli_zh": read_xnli_zh, "clue": read_clue,
-    "logic_cot_zh": read_logic_cot_zh,
+    "logic_cot_zh": read_logic_cot_zh, "luxun": read_luxun,
+    "riddle": read_riddle, "superclue_c3": read_superclue_c3,
+    "alpaca_qwen": read_alpaca_qwen, "alpaca_zh_r1": read_alpaca_zh_r1,
+    "qwen3_thinking": read_qwen3_thinking, "r1_110k": read_r1_110k,
+    "r1_110k_sft": read_r1_110k_sft, "medical_r1": read_medical_r1,
+    "chinese_medical_r1": read_chinese_medical_r1,
 }
 
 

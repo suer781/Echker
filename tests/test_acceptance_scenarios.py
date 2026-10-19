@@ -283,23 +283,30 @@ def test_teacher_flip_old_ckpt_default(tmp_path):
     assert d2._teacher_flip is False
 
 
-def test_mem_ratio_boundary_090_095(tmp_path):
-    """S9 显存分档边界：mem_ratio 恰好 0.90 / 0.95 时按严格大于语义分档。"""
+def test_mem_ratio_boundary_075_085(tmp_path):
+    """S9 显存分档边界（2026-10-17 用户定案）：mem_ratio 恰好 0.75 / 0.85 时
+    按严格大于语义分档；>85% 走动态 15%~3% 档。"""
     probe = os.path.join(tmp_path, "probe.txt")
     _write_synthetic_probe(probe, block_size=_SMALL_CFG.block_size)
     d = make_dolphin(cfg=_SMALL_CFG, probe_path=probe)
     pa = ParamAdaptive()
-    # 0.90：不 >0.90 → 正常理想容量档（1.571 ≥1.0），不需要收缩，不排程计划
+    # 0.75：不 >0.75 → 正常理想容量档（1.571 ≥1.0），不需要收缩，不排程计划
     report = {}
-    res = pa._schedule_shrink(d, report, ratio=0.30, mem_ratio=0.90)
+    res = pa._schedule_shrink(d, report, ratio=0.30, mem_ratio=0.75)
     assert res is None
     assert "m4_param_adaptive" not in report
     assert d.life_ctl.plan is None
-    # 0.95：>0.90 但不 >0.95 → 30% 档（而非 10% 档）
+    # 0.80：>0.75 但不 >0.85 → 30% 档（而非 15%/动态档）
     report = {}
-    pa._schedule_shrink(d, report, ratio=0.30, mem_ratio=0.95)
+    pa._schedule_shrink(d, report, ratio=0.30, mem_ratio=0.80)
     assert report["m4_param_adaptive"]["target_ratio"] == pytest.approx(0.30)
-    assert report["m4_param_adaptive"]["target_ratio"] != pytest.approx(0.10)
+    # 0.90：>0.85 → 动态档（15%~3% 之间，且 < 0.30）
+    # （mock 大身体避免小模型 body_frac 触发容量下限拦截）
+    d.life_ctl._body_frac = lambda dd, hname: 10.0
+    report = {}
+    pa._schedule_shrink(d, report, ratio=0.30, mem_ratio=0.90)
+    tr = report["m4_param_adaptive"]["target_ratio"]
+    assert 0.03 <= tr < 0.15, f"target={tr}"
 
 
 def test_modal_sample_video_chunks_edges():

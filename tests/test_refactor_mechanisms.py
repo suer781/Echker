@@ -462,23 +462,31 @@ def test_s8_learn_bytes_no_crash():
 # ==================== S9 理想容量档位 ====================
 
 def test_s9_schedule_shrink_tiers(tmp_path):
-    """理想容量三档下调：mem_ratio>0.90→30%、>0.95→10%、None→容量路径（S9）。"""
+    """理想容量三段式平滑下降（2026-10-17 用户定案）：>75%→30%、>85%→
+    动态 15%~3%、None→容量路径（S9）。"""
     probe = os.path.join(tmp_path, "probe.txt")
     _write_synthetic_probe(probe, block_size=_SMALL_CFG.block_size)
     d = make_dolphin(cfg=_SMALL_CFG, probe_path=probe)
     pa = ParamAdaptive()
 
-    # 0.92 → 30%（默认 body_frac=1.0 不触发容量下限拦截）
+    # 0.80 → 30%（>75% 且 ≤85%）
     report = {}
-    pa._schedule_shrink(d, report, ratio=0.30, mem_ratio=0.92)
+    pa._schedule_shrink(d, report, ratio=0.30, mem_ratio=0.80)
     assert report["m4_param_adaptive"]["target_ratio"] == pytest.approx(0.30)
     assert d.life_ctl.plan["target"] == pytest.approx(0.30)
 
-    # 0.97 → 10%（需 body_frac 足够大以通过 MIN_BODY_FRAC 下限，mock 大身体）
-    d.life_ctl._body_frac = lambda dd, hname: 3.0
+    # 0.92 → 动态档（>85%，15%~3% 之间；mock 大身体避免容量下限拦截）
+    d.life_ctl._body_frac = lambda dd, hname: 10.0
+    report = {}
+    pa._schedule_shrink(d, report, ratio=0.30, mem_ratio=0.92)
+    tr = report["m4_param_adaptive"]["target_ratio"]
+    assert 0.03 <= tr < 0.15, f"target={tr}"
+
+    # 0.97 → 动态档更低（压力更高 → 目标更小）
     report = {}
     pa._schedule_shrink(d, report, ratio=0.30, mem_ratio=0.97)
-    assert report["m4_param_adaptive"]["target_ratio"] == pytest.approx(0.10)
+    tr2 = report["m4_param_adaptive"]["target_ratio"]
+    assert 0.03 <= tr2 < tr, f"target={tr2} vs {tr}"
 
     # 无显存（None）→ 容量压力路径：target=传入 ratio
     report = {}

@@ -44,6 +44,9 @@ __pycache__/
 *.log
 .workbuddy/
 dolphin/memory_cold.jsonl
+# 外部下载模型（Qwen2.5-0.5B 等）：第三方权重可能携带许可证约束，
+# 不入库（2026-10-19 用户定案：不 push 任何会被传染许可证的内容）。
+external_models/
 实验记录/**/*.pt
 实验记录/**/*.bak*
 实验记录/**/*.jsonl.bak*

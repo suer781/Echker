@@ -101,6 +101,29 @@ class _ColdInvertedIndex:
 # 冷层小于等于该条数时同步构建倒排索引（测试确定性、毫秒级）；
 # 生产冷层（数十万条）走后台线程，避免首周期阻塞。
 _SYNC_BUILD_THRESHOLD = 5000
+# 超过该条数的冷层不再自动构建倒排索引：后台构建会消耗巨量内存并长时间
+# 抢占 GIL，饿死部署喂入线程（生产实况 39 万条 × 长文本 → 约 5 亿个 gram
+# 哈希排序，观测到 13GB 内存 + 部署停滞）。此类冷层检索回退随机抽样/
+# 全量扫描（resurrect_light/dream_light 已支持）。
+_ASYNC_BUILD_MAX = 100000
+# 冷层倒排索引后台构建的等待超时（秒）。dream_light 可能在 feed_lock 锁内被调用
+# （life.run_cycle），无限等待会让部署主线程 learn() 永久卡死（2026-10-18 生产
+# 死锁实况）。超时后回退随机抽样，索引构建完成后的后续周期自动走索引。
+_COLD_INDEX_WAIT_TIMEOUT = 5.0
+
+# ---------- 冷层遗忘代谢（2026-10-16 深睡周期） ----------
+# 分龄保质期（天）：只对 hits==0（从未被想起）的条目生效；被想起过的永不遗忘。
+# residue 落选残渣保质期最短（训过/落选的旧料）；suspended 太怪挂起要留待
+# 能力增长后再学，故更久；note 高显著笔记最珍贵，保质期最长。
+COLD_FORGET_TTL_DAYS = {
+    "residue": 2.0,
+    "suspended": 5.0,
+    "note": 10.0,
+}
+# hits==0 条目硬上限：超限按"最接近过期"（剩余保质期最短）优先淘汰，
+# 遏制冷层只进不出的 GB 级膨胀（生产实况 4 天 52 万条 / 2.1GB，95% 零命中，
+# flush_cold 每 5 周期全量重写并全程持 _cold_lock，拖慢存档且阻塞部署写入）。
+COLD_ZERO_HIT_CAP = 50000
 
 
 class MemoryStore:
@@ -122,6 +145,7 @@ class MemoryStore:
         self._cold_inverted_ready = threading.Event()
         self._cold_by_seq = []              # cold_seq -> MemoryEntry（resurrect 后置 None）
         self._cold_next_seq = 0
+        self._cold_by_text = {}             # text -> MemoryEntry（O(1) 查重，避免大冷层线性扫描）
         self._cold_skip_warned = False      # 大冷层索引构建中跳过检索的警告标记（只提醒一次）
 
     # ---------- 冷层（G1：逐出降级落盘，跨周期可检索可复活） ----------
@@ -164,6 +188,7 @@ class MemoryStore:
                         if en.score < existing.score:
                             existing.score = en.score
             self.cold_entries = list(seen.values())
+            self._cold_by_text = seen
         self._cold_loaded = True
         # 分配冷层稳定序号并登记 seq -> entry 映射（倒排索引的地址空间）。
         # 仅首次加载时执行（_cold_loaded 守卫保证只跑一次）。
@@ -188,6 +213,13 @@ class MemoryStore:
         if self._cold_inverted is not None or self._cold_inverted_building:
             return
         if not self.cold_entries:
+            return
+        if len(self.cold_entries) > _ASYNC_BUILD_MAX:
+            # 超大冷层：不自动构建倒排索引（内存/CPU 黑洞，会饿死部署喂入线程）。
+            # 标记 building=True 保持幂等，并 set ready 让 dream_light 的等待
+            # 立即返回，冷层检索走随机抽样回退（resurrect_light/dream_light）。
+            self._cold_inverted_building = True
+            self._cold_inverted_ready.set()
             return
         if len(self.cold_entries) <= _SYNC_BUILD_THRESHOLD:
             idx = self._build_cold_inverted()
@@ -322,6 +354,41 @@ class MemoryStore:
                 out.append((cnt / lq, en))
         return out
 
+    def promote_cold_related(self, query: bytes, k=2, min_overlap=0.10):
+        """梦境相关事件热提升（2026-10-17 用户定案）。
+
+        模型醒来后，如果用户输入/新经验与冷层里的梦境记忆高度相关（4-gram
+        重叠超过 min_overlap，默认 0.10——长查询共享少量 gram 即算"巧合相关"），
+        把相关条目**临时复制到热层**（不删冷层原条目，热层 cap 自然逐出）——
+        使 serve 的 retrieve 快通道能立即引用这些记忆，相当于"用户提及梦境
+        内容时，相关记忆临时回到手边"。
+
+        返回提升条数（观测用）。冷层为空/索引不可用时返回 0，绝不抛错。
+        """
+        if not self._cold_loaded:
+            self._ensure_cold()
+        if not self.cold_entries:
+            return 0
+        try:
+            self._ensure_cold_index()
+            if self._cold_inverted is None:
+                return 0  # 超大冷层不建索引（_ASYNC_BUILD_MAX 回退），跳过
+            qs = [_grams(query.decode("utf-8", errors="replace"))]
+            hits_list = self._dream_cold_indexed(qs, k)
+        except Exception:
+            return 0
+        n = 0
+        for ov, en in hits_list:
+            if ov < min_overlap:
+                continue
+            try:
+                self.add(en.text.encode("utf-8", errors="replace"),
+                         en.score, en.cycle, "note")
+                n += 1
+            except Exception:
+                continue
+        return n
+
     def flush_cold(self):
         """把冷层影子索引（含检索命中计数）写回落盘，供存档时调用——
         冷层命中进度跨重启不丢。缓存从未加载过则落盘文件为唯一依据，不做改动；
@@ -338,6 +405,96 @@ class MemoryStore:
                 for en in self.cold_entries:
                     f.write(json.dumps(en.to_json(), ensure_ascii=False) + "\n")
             os.replace(tmp, self.cold_path)
+
+    def forget_cold(self, now=None, limit=None, zero_hit_cap=None):
+        """深睡遗忘代谢（2026-10-16）：按分龄保质期淘汰零命中冷层条目。
+
+        - 只淘汰 hits==0（从未被想起）的条目：被想起过的（hits>0）是已验证
+          记忆，永不遗忘——L9「可检索可复活」只对零命中无价值条目让位。
+        - 保质期按 kind 分龄（COLD_FORGET_TTL_DAYS）：residue 最短、suspended
+          （太怪挂起，留待能力增长后再学）更久、note（高显著笔记）最长。
+        - 零命中条目超上限时，按剩余保质期最短者优先补砍至上限——遏制冷层
+          只进不出的 GB 级膨胀。上限默认 COLD_ZERO_HIT_CAP（50000），
+          2026-10-17 起支持 zero_hit_cap 参数：由调用方按模型规格自适应
+          （模型越大 → 上限越高；防止冷层比模型参数还大的离谱场面）。
+        - 只改影子索引（删 text 字典键 + 置 seq 槽 None，与 resurrect 失效
+          标记语义一致）；文件由 save() 的 flush_cold 统一重写。
+
+        limit（2026-10-17 用户定案：睡眠阶段杂交小任务用）：非 None 时只淘汰
+        最旧 limit 条过期零命中条目，且不做零命中硬上限补砍——深睡之外的其他
+        睡眠档位以极小量混入"遗忘代谢"这个小事情，平滑性能尖峰。返回统计
+        dict（无淘汰时返回空 dict，不污染报告）。
+        """
+        if not self._cold_loaded:
+            return {}
+        now = time.time() if now is None else now
+        with self._cold_lock:
+            # —— limit 模式：极小量遗忘（杂交小任务），不做硬上限补砍 ——
+            if limit is not None:
+                expired_candidates = []
+                keep = []
+                for en in self.cold_entries:
+                    if en.hits > 0:  # 被想起过的记忆永不遗忘
+                        keep.append(en)
+                        continue
+                    ttl = COLD_FORGET_TTL_DAYS.get(
+                        en.kind, COLD_FORGET_TTL_DAYS["residue"])
+                    if (now - en.created) / 86400.0 > ttl:
+                        expired_candidates.append(en)
+                    else:
+                        keep.append(en)
+                expired_candidates.sort(key=lambda e: e.created)  # 最旧优先
+                victims = expired_candidates[:limit]
+                expired = len(victims)
+                victim_ids = set(id(v) for v in victims)
+                # 未淘汰的过期条目同样保留（limit 只淘汰最旧 limit 条）
+                keep.extend(e for e in expired_candidates
+                            if id(e) not in victim_ids)
+                for v in victims:
+                    self._cold_by_text.pop(v.text, None)
+                    if 0 <= v.cold_seq < len(self._cold_by_seq):
+                        self._cold_by_seq[v.cold_seq] = None
+                self.cold_entries = keep
+                if not expired:
+                    return {}
+                return {"cold_forget_expired": expired, "cold_forget_capped": 0,
+                        "cold_forget_kept": len(self.cold_entries)}
+            # —— 全量路径（deep 深度睡眠）——
+            cap = COLD_ZERO_HIT_CAP if zero_hit_cap is None else int(zero_hit_cap)
+            expired = 0
+            keep = []
+            for en in self.cold_entries:
+                if en.hits > 0:  # 被想起过的记忆永不遗忘
+                    keep.append(en)
+                    continue
+                ttl = COLD_FORGET_TTL_DAYS.get(
+                    en.kind, COLD_FORGET_TTL_DAYS["residue"])
+                if (now - en.created) / 86400.0 > ttl:
+                    expired += 1
+                    self._cold_by_text.pop(en.text, None)
+                    if 0 <= en.cold_seq < len(self._cold_by_seq):
+                        self._cold_by_seq[en.cold_seq] = None
+                    continue
+                keep.append(en)
+            # 零命中硬上限：超限按"剩余保质期最短"优先补砍（等价 created+TTL 最小）
+            over_cap = 0
+            zero = [e for e in keep if e.hits == 0]
+            if len(zero) > cap:
+                zero.sort(key=lambda e: e.created + COLD_FORGET_TTL_DAYS.get(
+                    e.kind, COLD_FORGET_TTL_DAYS["residue"]) * 86400.0)
+                victims = zero[:len(zero) - cap]
+                over_cap = len(victims)
+                victim_ids = set(id(v) for v in victims)
+                for v in victims:
+                    self._cold_by_text.pop(v.text, None)
+                    if 0 <= v.cold_seq < len(self._cold_by_seq):
+                        self._cold_by_seq[v.cold_seq] = None
+                keep = [e for e in keep if id(e) not in victim_ids]
+            self.cold_entries = keep
+        if not expired and not over_cap:
+            return {}
+        return {"cold_forget_expired": expired, "cold_forget_capped": over_cap,
+                "cold_forget_kept": len(self.cold_entries)}
 
     # ---------- 增与逐出 ----------
 
@@ -384,7 +541,7 @@ class MemoryStore:
         d = os.path.dirname(self.cold_path)
         if d:
             os.makedirs(d, exist_ok=True)
-        existing = next((x for x in self.cold_entries if x.text == entry.text), None)
+        existing = self._cold_by_text.get(entry.text)
         if existing is not None:
             # 同 text 已在冷层：合并命中计数与分数，保留最早 created。
             # hits 取 max（合并两次逐出之间的检索进度）。
@@ -398,6 +555,7 @@ class MemoryStore:
         with open(self.cold_path, "a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(entry.to_json(), ensure_ascii=False) + "\n")
         self.cold_entries.append(entry)
+        self._cold_by_text[entry.text] = entry
         # 增量更新倒排索引（若已构建）：新条目分配稳定序号并追加到 delta。
         entry.cold_seq = self._cold_next_seq
         self._cold_next_seq += 1
@@ -493,6 +651,7 @@ class MemoryStore:
             if en.hits >= self.promote_hits:
                 out.append(en.text.encode("utf-8", errors="replace"))
                 self.cold_entries.remove(en)
+                self._cold_by_text.pop(en.text, None)
                 self.entries.append(en)
                 en.hits = 0
                 # 倒排索引失效标记：seq 槽位置 None，查询时跳过已升回热层的条目。
@@ -532,6 +691,7 @@ class MemoryStore:
             if en.hits >= self.promote_hits:
                 out.append(en.text.encode("utf-8", errors="replace"))
                 self.cold_entries.remove(en)
+                self._cold_by_text.pop(en.text, None)
                 self.entries.append(en)
                 en.hits = 0
                 if 0 <= en.cold_seq < len(self._cold_by_seq):
@@ -617,27 +777,22 @@ class MemoryStore:
         return top
 
     def dream_light(self, queries, k=5, cold_sample=32):
-        """浅睡轻量做梦（2026-10-12）：热层全量打分 + 冷层随机小批量抽样。
+        """浅睡轻量做梦（2026-10-12）：热层全量打分 + 冷层检索/抽样。
 
         语义与 dream() 一致——按 4-gram 检索分数从记忆库抽样旧经验、只抽
-        hits < promote_hits 的条目、命中计数 +1、注入量封顶 k——但冷层只随机
-        抽样 cold_sample 条参与打分，避免浅睡周期背负冷层全量 O(n) 扫描。
-        热层永远全量打分（≤cap≈500，毫秒级）。抽样每次调用种子不同，
-        保证跨周期覆盖面。仍 _ensure_cold()：冷层已加载、跨重启不失聪。
+        hits < promote_hits 的条目、命中计数 +1、注入量封顶 k。
+        冷层处理（2026-10-15 提速）：倒排索引就绪时走索引（对全部冷层条目
+        打分，快）；索引未就绪时回退到随机抽样 cold_sample 条参与打分。
+        大冷层首次调用会等待后台索引构建完成（一次性成本），避免 O(n) 全量
+        扫描卡死首个睡眠周期。热层永远全量打分（≤cap≈500，毫秒级）。
         """
         qs = [_grams(q.decode("utf-8", errors="replace")) for q in (queries or [])]
         qs = [g for g in qs if g]
         if not qs or k <= 0:
             return []
         self._ensure_cold()
-        # 热层全量 + 冷层随机抽样（浅睡不背全量）。
+        # 热层全量打分（≤cap≈500，毫秒级）。
         pool = [en for en in list(self.entries) if en.hits < self.promote_hits]
-        cold_pool = self.cold_entries
-        if len(cold_pool) > cold_sample:
-            import random as _random
-            sample_idx = set(_random.sample(range(len(cold_pool)), cold_sample))
-            cold_pool = [cold_pool[i] for i in sorted(sample_idx)]
-        pool += [en for en in cold_pool if en.hits < self.promote_hits]
         scored = []
         for en in pool:
             g = _grams(en.text)
@@ -646,6 +801,35 @@ class MemoryStore:
             ov = max(len(q & g) / len(q) for q in qs)
             if ov > 0.05:
                 scored.append((ov, en))
+        # 冷层：索引就绪走索引；否则随机抽样回退（浅睡不背全量）。
+        if cold_sample > 0:
+            idx = self._cold_inverted
+            if idx is None and self.cold_entries \
+                    and len(self.cold_entries) > _SYNC_BUILD_THRESHOLD:
+                # 大冷层索引后台构建中：有界等待（一次性成本），避免 O(n) 回退。
+                # 2026-10-18 修复：本函数可能在 feed_lock 锁内被调用（life.run_cycle），
+                # 无限等待会让部署主线程 learn() 永久卡死（生产死锁实况）。超时后
+                # 回退随机抽样，索引构建完成后的后续周期自动走索引。
+                self._cold_inverted_ready.wait(timeout=_COLD_INDEX_WAIT_TIMEOUT)
+                idx = self._cold_inverted
+            if idx is not None:
+                scored.extend(self._dream_cold_indexed(qs, k))
+            else:
+                # 小冷层（同步索引）或构建失败/未就绪：按原逻辑随机抽样打分。
+                cold_pool = self.cold_entries
+                if len(cold_pool) > cold_sample:
+                    import random as _random
+                    sample_idx = set(_random.sample(range(len(cold_pool)), cold_sample))
+                    cold_pool = [cold_pool[i] for i in sorted(sample_idx)]
+                for en in cold_pool:
+                    if en.hits >= self.promote_hits:
+                        continue
+                    g = _grams(en.text)
+                    if not g:
+                        continue
+                    ov = max(len(q & g) / len(q) for q in qs)
+                    if ov > 0.05:
+                        scored.append((ov, en))
         scored.sort(key=lambda t: (-t[0], t[1].created))
         top = [en for _, en in scored[:k]]
         for en in top:

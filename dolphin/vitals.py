@@ -292,7 +292,7 @@ class Vitals:
         for li, blk in enumerate(model.blocks):
             # 主 site：通道口径 = Linear 输入激活维度（Q6 定标口径）
             main = {"ln1_out": blk.attn.qkv, "attn_out": blk.attn.proj,
-                    "ln2_out": blk.mlp.fc, "mlp_hidden": blk.mlp.proj}
+                    "ln2_out": blk.mlp.rule, "mlp_hidden": blk.mlp.out}
             for sname, lin in main.items():
                 key = f"b{li}.{sname}"
                 self._ensure_site(key, lin.in_features)

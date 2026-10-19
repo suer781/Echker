@@ -69,6 +69,15 @@ _DOMAINS = {
     "sleep_prog_rem_debt": (0.00, 0.20),
     "sleep_prog_nrem_scale": (0.30, 0.70),
     "sleep_prog_total_base": (120, 240),
+    # 自适应评估打分（2026-10-15）：用户实时反馈驱动的自评估阈值（值自成）。
+    # 域设计本身是律：pass 线 ∈[0.40,0.80]（低于 0.4 会把好输出误判差评、
+    # 高于 0.8 几乎不给正奖励）；fail 线 ∈[0.10,0.45]（低于 0.1 差评几乎不
+    # 触发、高于 0.45 会把中性输出误判差评）。乱码/可打印阈值域同理防止
+    # 门控过严或过松。域内值由负面反馈率/交互质量反馈自调，不写死。
+    "eval_pass_thresh": (0.40, 0.80),
+    "eval_fail_thresh": (0.10, 0.45),
+    "eval_garbage_repl": (0.15, 0.50),
+    "eval_garbage_print": (0.30, 0.70),
 }
 
 # 每多少个睡眠周期调整一次（慢环；测试周期数远小于此，永不触发）
@@ -93,6 +102,7 @@ class Autotune:
             "rollback_rate": 0.0,           # 连续周期回滚率 EMA
             "goldilocks_skip_rate": 0.0,    # 金发姑娘太熟跳过率 EMA（[0,1]）
             "goldilocks_suspend_rate": 0.0,  # 金发姑娘太怪挂起率 EMA（[0,1]）
+            "negative_feedback_rate": 0.0,   # 用户实时负面反馈事件率 EMA（[0,1]）
         }
         self.tunables = {
             "note_k": 5, "dream_k": 5, "promote_hits": 3,
@@ -126,6 +136,12 @@ class Autotune:
             "sleep_prog_rem_debt": 0.1,
             "sleep_prog_nrem_scale": 0.5,
             "sleep_prog_total_base": 120,
+            # 自适应评估打分（2026-10-15）：初值与 self_evaluate 既有默认一致
+            # （pass=0.55/fail=0.30/乱码替换符=0.30/可打印=0.50），域内值自成。
+            "eval_pass_thresh": 0.55,
+            "eval_fail_thresh": 0.30,
+            "eval_garbage_repl": 0.30,
+            "eval_garbage_print": 0.50,
         }
         self.cycle_count = 0   # 已运行周期数（Autotune 内部计数）
         self.last_adjust = {} # 上次调整记录（报告用）
@@ -243,6 +259,9 @@ class Autotune:
                 s["goldilocks_suspend_rate"] *= 0.9
             self._last_skipped = sk
             self._last_suspended = su
+        # 用户负面反馈信号自然衰减（2026-10-15）：无新异常时逐渐回落，
+        # 避免一次偶发负面事件长期卡死评估阈值。
+        s["negative_feedback_rate"] = max(0.0, s["negative_feedback_rate"] * 0.9)
 
     # ---------- 慢速调整（每 AUTOTUNE_EVERY 周期一次） ----------
 
@@ -422,6 +441,38 @@ class Autotune:
             if v: adj["goldilocks_hi"] = ("down", round(v, 4),
                                           f"suspend_rate={s['goldilocks_suspend_rate']:.2f}")
 
+        # —— 金发姑娘带通中心防漂移（2026-10-16）——
+        # 能力基线 ability 是带通中心。当「太熟跳过率」极高（>0.9，几乎所有数据
+        # 都被判已会）时，说明 ability 相对当前数据分布虚高（带通中心上移导致全量
+        # 跳过）。goldilocks_lo 的放宽（上调到 0.10 上限）仍不足以覆盖时，这里直接
+        # 慢速回调带通中心 itself：每 AUTOTUNE_EVERY 周期把 ability 下调 5%（下限
+        # 2.5），使带通重新覆盖可学数据，避免「全量太熟→缓冲 0B→训练死锁」复发。
+        # 这是对金发姑娘带通的值自成补充（律 L4 不变：带通语义仍由 ability±lo/hi
+        # 决定；只是中心随世界信号慢速自校）。与 goldilocks_lo/hi 的调整互补：
+        # lo/hi 管带宽，本回调管中心。
+        if s["goldilocks_skip_rate"] > 0.90 and d is not None:
+            cur_ability = float(getattr(d, "ability", 0.0)) or 0.0
+            new_ability = max(2.5, cur_ability * 0.95)
+            if abs(new_ability - cur_ability) > 1e-9:
+                d.ability = new_ability
+                adj["ability"] = ("down", round(new_ability, 4),
+                                  f"skip_rate={s['goldilocks_skip_rate']:.2f} 自动回调带通中心")
+        # 体检钳制（2026-10-16 增强）：能力基线不得超过体检损失过多。
+        # probe（体检集 mean NLL）是模型真实能力的无偏测量；若 ability 高出
+        # probe 过多（>0.8），说明带通中心已显著高于模型真实水平（选拔偏向
+        # 高惊讶度尾部导致的 EMA 虚高）。此时直接钳制回 probe+0.8，防止
+        # 能力基线无界漂移。这是对上述 skip_rate 回调的补充：skip_rate 未达
+        # 阈值但 ability 已明显虚高时也能自动纠偏。
+        if d is not None:
+            _probe = report.get("probe_new") or report.get("probe_old")
+            if _probe:
+                _cap = float(_probe) + 0.8
+                _cur = float(getattr(d, "ability", 0.0)) or 0.0
+                if _cur > _cap:
+                    d.ability = _cap
+                    adj["ability"] = ("clamp", round(_cap, 4),
+                                      f"probe={float(_probe):.4f} 超限钳制")
+
         # —— F-01 修复：S3 睡眠压力权重反馈（值自成）——
         # 睡眠间隔长期短于目标 → 加大 w3（时间积累权重），让压力积累更平缓；
         # 回滚率高 → 加大 w1（数据惊讶度权重），让睡眠触发更及时。
@@ -459,6 +510,28 @@ class Autotune:
             v = nudge("salience_boost", _STEP, *_DOMAINS["salience_boost"])
             if v: adj["salience_boost"] = ("up", round(v, 3),
                                            f"note_hit={s['note_hit_rate']:.2f}")
+
+        # —— 用户实时负面反馈联动（动态自愈，2026-10-15）——
+        # 定位：训完上线后的"有错就改"回路，不是前置拦截门。负面反馈率高
+        # （异常事件频发，如模型误删用户内容/服务错误/答非所问）时上调正奖励
+        # 线（更难给 +1）、下调差评线（更易给 -1）→ 事后评估从严，让坏交互
+        # 更快得到负分；负面反馈低时缓慢恢复默认阈值（值自成，不写死）。
+        # 注意：不触碰体检判决带/任何前置门（那是"提前预知拦截"，与本次
+        # 事后纠错机制职责分离）。
+        if s["negative_feedback_rate"] > 0.10:
+            v = nudge("eval_pass_thresh", _STEP, *_DOMAINS["eval_pass_thresh"])
+            if v: adj["eval_pass_thresh"] = ("up", round(v, 4),
+                                            f"neg_fb={s['negative_feedback_rate']:.2f}")
+            v = nudge("eval_fail_thresh", -_STEP, *_DOMAINS["eval_fail_thresh"])
+            if v: adj["eval_fail_thresh"] = ("down", round(v, 4),
+                                             f"neg_fb={s['negative_feedback_rate']:.2f}")
+        elif s["negative_feedback_rate"] < 0.02:
+            v = nudge("eval_pass_thresh", -_STEP, *_DOMAINS["eval_pass_thresh"])
+            if v: adj["eval_pass_thresh"] = ("down", round(v, 4),
+                                             f"neg_fb={s['negative_feedback_rate']:.2f}")
+            v = nudge("eval_fail_thresh", _STEP, *_DOMAINS["eval_fail_thresh"])
+            if v: adj["eval_fail_thresh"] = ("up", round(v, 4),
+                                             f"neg_fb={s['negative_feedback_rate']:.2f}")
 
         self.last_adjust = adj
         # 把调整后的值同步到 Dolphin 对象（dolphin.py 使用这些属性）。

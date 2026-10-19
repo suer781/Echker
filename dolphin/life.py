@@ -182,8 +182,8 @@ import torch.nn.functional as F
 from .sleep import varied_replay  # 律 L6 唯一实现，复用不复制
 from .surgery import (MEM_BUDGET, born_again_student, break_symmetry_dmodel,
                       delta_params_attn_v, delta_params_dmodel, delta_params_mlp,
-                      ghost_scan, mem_budget_ok, morphology_of, rebuild_optimizer,
-                      widen)
+                      ghost_scan, grow_layer, mem_budget_ok, morphology_of,
+                      rebuild_optimizer, widen)
 from .vitals import PROBATION_CYCLES, SiteLedger, Vitals
 
 # —— 常量（来源身份见模块 docstring）——
@@ -198,6 +198,9 @@ WITHER_KD_ALPHA = 0.75
 WITHER_MAX_GEN = 3
 DECAY_GAMMA = 0.7
 REDO_MAX_FRAC = 0.05
+# 深度睡眠精炼单周期裁剪上限（2026-10-15）：每 site 至多裁剪 2% 非核心通道。
+# 低于 ReDo 的 5% 代谢上限，属精细精炼；只动非残差流位，防破坏核心能力。
+REFINE_MAX_FRAC = 0.02
 SURGERY_LR_WINDOW = 3
 SURGERY_LR_MULT = 2.0
 SLEEP_DEBT_GUARD = 4.0
@@ -252,7 +255,7 @@ DEADBAND_CAL_EVERY = 20
 # —— 硬件压力收缩（2026-10-06 新增）——
 # 设备总有上限：当显存足迹逼近硬件预算时，系统必须主动收缩
 # 而不是仅仅停止生长。与容量过剩（gap̄）收缩并列，由显存压力独立触发。
-MEM_PRESSURE_HI = 0.90        # 【律定】显存压力阈值：超过硬件预算 90% 触发收缩
+MEM_PRESSURE_HI = 0.75        # 【律定】显存压力阈值：超过硬件预算 75% 触发收缩（2026-10-17 用户定案：75% 起三段式）
 MEM_PRESSURE_TARGET = 0.75    # 【值自成】显存压力收缩目标：缩到预算的 75% 释放余量
 MEM_PRESSURE_WINDOW = 4       # 【值自成】显存压力确认窗（连续 N 周期超阈值才动刀）
 # —— 参数自适应控制律（2026-10-06 用户定案）——
@@ -261,8 +264,16 @@ MEM_PRESSURE_WINDOW = 4       # 【值自成】显存压力确认窗（连续 N 
 # 正常态下每睡眠周期用最小步长（±8 单元）微调，消除"上限误差"（实际容量 vs
 # 理想容量的偏差）；显存不够自动裁剪。实现持续自生长与每周期睡眠微调。
 PARAM_LIGHT_LIMIT = 1.571     # 【用户定案】轻限制上限 = 当前参数 × 1.571
-PARAM_STAGE_RATIOS = (0.30, 0.10, 0.03)  # 【用户定案】三段式下跌目标比例
+PARAM_STAGE_RATIOS = (0.30, 0.15, 0.03)  # 【用户定案】三段式下跌目标比例（2026-10-17：30%→15%→3%）
 PARAM_MICRO_STEP = 8          # 【值自成】每周期微调步长（最小手术单位=8 单元）
+# —— 深度生长（层数自动增长，2026-10-17 用户定案）——
+# 参照横向拓宽（WIDEN_AXIS_PRIORITY）的技术架构新增"深度轴"：当宽度轴无法
+# 满足容量需求（学习停滞且宽度轴位不可用/被守卫阻挡）时，以恒等映射插入
+# 新 Transformer 层（残差零初始化 → 插入后模型输出逐位不变），训练恢复后
+# 新层平滑学习。配置开关与参数经 feed.py CLI 透传（见 configure_depth_grow）。
+DEPTH_GROW_ENABLED = True      # 【用户定案】层数自动增长总开关（默认开启）
+DEPTH_GROW_MAX_LAYERS = 12      # 【值自成】层数上限（出生/学生层数 + 深度增长）
+DEPTH_GROW_MIN_GAP = 24         # 【值自成】两次深度生长最小间隔（周期）
 
 STATE_NORMAL = "NORMAL"
 STATE_GROW_PLAN = "GROW_PLAN"
@@ -372,9 +383,28 @@ class LifeController:
         self._seen = set()                  # 运行时指纹集（自 seen_hashes 重建）
         self.mem_pressure_hist = []        # 显存压力历史 [[cycle, ratio]，…]（硬件压力收缩）
         # —— 参数自适应控制律状态（2026-10-06 用户定案）——
-        self.param_regime = 0          # 三段式下跌阶段：0=正常/1=跌到30%/2=跌到10%/3=跌到3%
+        self.param_regime = 0          # 三段式下跌阶段：0=正常/1=跌到30%/2=跌到15%/3=跌到3%
         self.param_micro_total = 0  # 累计微调净增量（单元数，正=生长/负=收缩）
         self.last_param_reset = None  # 上次三段式下跌的 cycle
+        # —— 自动裁剪循环（2026-10-15 实现）——
+        # growth_blocked：生长连续被显存预算拒绝的周期计数（参数无法继续扩张的
+        # 信号）。达到 MEM_PRESSURE_WINDOW 后，param_adaptive 自动排 born-again
+        # 裁剪；深度睡眠执行 deep_refine 精炼后清零，形成"裁剪→再生长→再裁剪"循环。
+        self.growth_blocked = 0
+        self.prune_stats = {
+            "prune_count": 0,
+            "last_prune_cycle": None,
+            "last_refine_cycle": None,
+            "total_refined_units": 0,
+            "last_prune_before_params": None,
+            "last_prune_after_params": None,
+        }
+        # —— 深度生长配置与状态（2026-10-17 用户定案）——
+        # 配置经 feed.py CLI 透传（configure_depth_grow），随档持久化。
+        self.depth_grow_enabled = DEPTH_GROW_ENABLED
+        self.depth_grow_max_layers = DEPTH_GROW_MAX_LAYERS
+        self.depth_grow_min_gap = DEPTH_GROW_MIN_GAP
+        self.last_depth_grow_cycle = None   # 上次深度生长计划周期（限频）
 
     # ---------- 持久化 ----------
 
@@ -405,7 +435,14 @@ class LifeController:
                 "mem_pressure_hist": self.mem_pressure_hist,
                 "param_regime": self.param_regime,
                 "param_micro_total": self.param_micro_total,
-                "last_param_reset": self.last_param_reset}
+                "last_param_reset": self.last_param_reset,
+                "growth_blocked": self.growth_blocked,
+                "prune_stats": self.prune_stats,
+                # 深度生长配置与状态（2026-10-17）：随档透传，重启后保持
+                "depth_grow_enabled": self.depth_grow_enabled,
+                "depth_grow_max_layers": self.depth_grow_max_layers,
+                "depth_grow_min_gap": self.depth_grow_min_gap,
+                "last_depth_grow_cycle": self.last_depth_grow_cycle}
 
     def from_state(self, st):
         self.state = st.get("state", STATE_NORMAL)
@@ -443,6 +480,16 @@ class LifeController:
         self.no_action_streak = int(st.get("no_action_streak", 0))
         self.pending_capture = st.get("pending_capture")
         self.mem_pressure_hist = [[int(c), float(r)] for c, r in (st.get("mem_pressure_hist") or [])]
+        self.growth_blocked = int(st.get("growth_blocked", 0))
+        # 深度生长配置与状态（旧档缺键 → 模块常量默认值；容忍升级）
+        self.depth_grow_enabled = bool(st.get("depth_grow_enabled", DEPTH_GROW_ENABLED))
+        self.depth_grow_max_layers = int(st.get("depth_grow_max_layers", DEPTH_GROW_MAX_LAYERS))
+        self.depth_grow_min_gap = int(st.get("depth_grow_min_gap", DEPTH_GROW_MIN_GAP))
+        self.last_depth_grow_cycle = st.get("last_depth_grow_cycle")
+        self.prune_stats = dict(st.get("prune_stats") or {
+            "prune_count": 0, "last_prune_cycle": None, "last_refine_cycle": None,
+            "total_refined_units": 0, "last_prune_before_params": None,
+            "last_prune_after_params": None})
         self._seen = set(self.seen_hashes)
         return self
 
@@ -457,8 +504,30 @@ class LifeController:
     def morph_for(self, d, hname):
         m = self.morphology.get(hname)
         if m is None:
-            m = self.morphology[hname] = {"d_model_k": 1, "mlp": {}, "attn_v": {}}
+            m = self.morphology[hname] = {"d_model_k": 1, "mlp": {}, "attn_v": {},
+                                          "layers": []}
         return m
+
+    def configure_depth_grow(self, enabled=None, max_layers=None, min_gap=None):
+        """深度生长参数调节接口（feed.py CLI 透传）。
+
+        参数 None = 保持当前值。返回当前配置 dict（便于日志/测试核对）。
+        """
+        if enabled is not None:
+            self.depth_grow_enabled = bool(enabled)
+        if max_layers is not None:
+            max_layers = int(max_layers)
+            if max_layers < 1:
+                raise ValueError(f"depth_grow_max_layers 必须 ≥1（收到 {max_layers}）")
+            self.depth_grow_max_layers = max_layers
+        if min_gap is not None:
+            min_gap = int(min_gap)
+            if min_gap < 0:
+                raise ValueError(f"depth_grow_min_gap 必须 ≥0（收到 {min_gap}）")
+            self.depth_grow_min_gap = min_gap
+        return {"depth_grow_enabled": self.depth_grow_enabled,
+                "depth_grow_max_layers": self.depth_grow_max_layers,
+                "depth_grow_min_gap": self.depth_grow_min_gap}
 
     # ---------- 恒温器：阻尼与守卫的原语 ----------
 
@@ -813,6 +882,12 @@ class LifeController:
         born_sustained = (len(self.gapbar_hist) >= BORN_PERSIST
                           and all(e[1] > xi_eff + h
                                   for e in self.gapbar_hist[-BORN_PERSIST:]))
+        # 手术分不同睡眠的轻重缓急（2026-10-17 用户定案）：
+        # deep 全量手术；rem 允许生长/微调但禁 born-again 重收缩（记忆巩固期）；
+        # nrem 只做轻量容量调整（F-02 已禁 born-again）；light 只观察不动刀。
+        if getattr(d, "_last_sleep_mode", "deep") in ("rem", "nrem"):
+            born_now = False
+            born_sustained = False
         shrink_sites = []
         for k in gaps:
             if not k.endswith(ACTIONABLE_SUFFIX):
@@ -882,9 +957,12 @@ class LifeController:
             return self._hold("硬件压力（限频）",
                               f"显存压力 {ratio:.2f} 但收缩冷却中")
         # F-02：nrem 浅睡禁止 born-again 重手术（spec S6），硬件压力收缩同样不排。
-        if getattr(d, "_last_sleep_mode", "deep") == "nrem":
-            return self._hold("硬件压力（nrem禁born_again）",
-                              f"显存压力 {ratio:.2f} 但 nrem 浅睡不做重手术（spec S6）")
+        # 2026-10-17 用户定案：手术分不同睡眠的轻重缓急——rem 记忆巩固期同样
+        # 不做 born-again 重收缩（允许生长/微调，重收缩留给 deep）。
+        _mode_now = getattr(d, "_last_sleep_mode", "deep")
+        if _mode_now in ("nrem", "rem"):
+            return self._hold("硬件压力（禁born_again）",
+                               f"显存压力 {ratio:.2f} 但 {_mode_now} 不做重手术")
         # 触发 born-again 收缩，目标由显存决定
         body_frac = self._body_frac(d, d.sleeping().name)
         # 目标体型：使显存回落到预算的 MEM_PRESSURE_TARGET 比例
@@ -894,7 +972,8 @@ class LifeController:
         if body_frac * target < MIN_BODY_FRAC:
             target = max(target, MIN_BODY_FRAC / body_frac)
         self.plan = {"kind": "wither", "mode": "born_again",
-                     "target": round(target, 4), "source": "mem_pressure"}
+                     "target": round(target, 4), "source": "mem_pressure",
+                     "concentrate": True}  # 2026-10-17：缩减时缩浅层增深度（浓缩精华）
         self.state = STATE_WITHER_PLAN
         self.last_shrink_cycle = d.cycle
         self.last_born_again = d.cycle
@@ -1091,7 +1170,8 @@ class LifeController:
             T = T_need  # 刹车：只缩到下限允许的幅度
         self.plan = {"kind": "wither", "mode": "born_again",
                      "target": round(T, 4), "source": "thermostat",
-                     "escalated": escalated}
+                     "escalated": escalated,
+                     "concentrate": True}  # 2026-10-17：缩减时缩浅层增深度（浓缩精华）
         self.state = STATE_WITHER_PLAN
         self.last_shrink_cycle = d.cycle
         self.last_born_again = d.cycle
@@ -1225,7 +1305,15 @@ class LifeController:
             delta = max(nh, (delta // nh) * nh)
         okm, why = self._mem_ok(d, axis, delta)
         if not okm:
-            return self._hold("显存预算", f"显存预算不过：{why}")
+            # 自动裁剪触发信号（2026-10-15）：参数想扩张但硬件显存预算不允许 →
+            # 累计 growth_blocked；达到 MEM_PRESSURE_WINDOW 后由 param_adaptive
+            # 自动排 born-again 裁剪（系统级自动裁剪触发）。
+            self.growth_blocked += 1
+            report["m4_growth_blocked"] = self.growth_blocked
+            return self._hold("显存预算（生长受阻）",
+                              f"显存预算不过：{why}（连续 {self.growth_blocked} 周期无法扩张）")
+        # 生长成功排程：扩张未受阻，清零计数
+        self.growth_blocked = 0
         self.plan = {"kind": "grow", "axis": axis, "layer": li, "delta": delta,
                      "seed": d.cycle, "source": "thermostat", "site": gk}
         self.state = STATE_GROW_PLAN
@@ -1269,6 +1357,16 @@ class LifeController:
         if budget_units < 8:
             return self._hold("守卫④预算/供给比",
                               f"新鲜证据不足 {budget_units} 通道（< 最小有意义步 8）")
+        # 2026-10-17 用户定案：加层与横向生长**齐平**——学习停滞时不再把深度
+        # 生长当作宽度轴全不可用的最后回退，而是与宽度生长轮转：上次横向生长
+        # （或无深度史）则本次优先尝试纵向加层，交替扩容方向，提升算效比率。
+        last_w = self.last_stall_grow_cycle if self.last_stall_grow_cycle is not None else -1
+        last_d = self.last_depth_grow_cycle if self.last_depth_grow_cycle is not None else -1
+        if last_d <= last_w:
+            depth_out = self._plan_grow_depth(d, report, v, stream)
+            if depth_out is not None and depth_out.get("kind") == "grow_depth":
+                return depth_out
+            # 深度生长不可用（层数上限/显存不足等）→ 回落宽度生长
         # 选址：优先最窄的 MLP 轴位（容量最受限处）
         h = d.sleeping()
         best = None
@@ -1281,7 +1379,8 @@ class LifeController:
                 if best is None or W < best[0]:
                     best = (W, li, gsite, axis, site_id)
         if best is None:
-            return self._hold("限频", "无可用生长轴位（全部冷却/熔断）")
+            # 宽度轴全部不可用（冷却/熔断）→ 回退到深度生长（层数自动增长）
+            return self._plan_grow_depth(d, report, v, stream)
         W, li, gsite, axis, site_id = best
         # 乘性生长律：e 用停滞程度驱动（固定取 1.0，表示明确需要更多容量）
         delta = max(8, round(self.lambda_g_eff() * W * 1.0))
@@ -1303,11 +1402,61 @@ class LifeController:
         return {"kind": "grow", "axis": axis, "site": site_id, "delta": delta,
                 "class": "学习停滞强制生长", "reason": f"margin 均值低于 {STALL_MARGIN}，学不动先长大"}
 
+    def _plan_grow_depth(self, d, report, v, stream):
+        """深度生长判决（层数自动增长，2026-10-17 用户定案）。
+
+        触发条件（全部满足，参照横向拓宽的多重 AND 门槛）：
+          1. 深度生长开关开启（depth_grow_enabled）；
+          2. 当前层数未达上限 depth_grow_max_layers；
+          3. 距离上次深度生长 ≥ depth_grow_min_gap 周期（限频③）；
+          4. 显存预算粗核通过（新增一层足迹 ≈ 单层参数 ×16B）。
+
+        新层以**恒等映射**插入（surgery.grow_layer：残差零初始化）——插入后
+        模型输出逐位不变，训练恢复后新层平滑学习，不造成性能断崖。选址默认
+        在 blocks 中间（信息瓶颈附近），使新层有机会学习跨半网的抽象组合。
+        """
+        if not self.depth_grow_enabled:
+            return self._hold("深度生长关闭",
+                              "depth_grow_enabled=False（--no-depth-grow）")
+        h = d.sleeping()
+        cur = len(h.model.blocks)
+        if cur >= self.depth_grow_max_layers:
+            return self._hold("层数已达上限",
+                              f"n_layers={cur} ≥ depth_grow_max_layers="
+                              f"{self.depth_grow_max_layers}")
+        cycle = getattr(d, "cycle", 0)
+        if self.last_depth_grow_cycle is not None \
+                and cycle - self.last_depth_grow_cycle < self.depth_grow_min_gap:
+            return self._hold("限频",
+                              f"深度生长间隔未满 {self.depth_grow_min_gap} 周期"
+                              f"（上次 cycle={self.last_depth_grow_cycle}）")
+        # 显存预算粗核：新增一层 ≈ 当前单层参数 ×16B（权重+梯度+Adam 双动量）
+        per_layer_params = sum(p.numel() for p in h.model.blocks[0].parameters())
+        okm, why = mem_budget_ok(d.device, per_layer_params)
+        if not okm:
+            self.growth_blocked += 1
+            report["m4_growth_blocked"] = self.growth_blocked
+            return self._hold("显存预算（深度生长受阻）", why)
+        self.growth_blocked = 0
+        at = max(1, cur // 2)  # 中间插入（信息瓶颈附近）
+        self.plan = {"kind": "grow_depth", "at": at, "seed": cycle,
+                     "source": "depth_grow"}
+        self.state = STATE_GROW_PLAN
+        self.last_depth_grow_cycle = cycle
+        report["m4_plan"] = ["grow_depth", at, 1]
+        report["m4_depth_grow"] = {
+            "n_layers_before": cur, "n_layers_after": cur + 1, "at": at,
+            "trigger": "宽度轴不可用且学习停滞/容量需求持续"}
+        return {"kind": "grow_depth", "at": at,
+                "class": "容量受限（深度生长）",
+                "reason": f"宽度轴不可用且容量需求持续 → 插入新层 "
+                          f"n_layers {cur} -> {cur + 1}（at={at}）"}
+
     def _true_width(self, h, li, axis):
         """P0-2 承袭：宽度按睡脑**真实**脑形计（含移植体），不用基座 cfg。"""
         blk = h.model.blocks[li]
         if axis == "mlp":
-            return blk.mlp.fc.out_features + getattr(blk.mlp, "bypass_width", lambda: 0)()
+            return blk.mlp.rule.out_features + getattr(blk.mlp, "bypass_width", lambda: 0)()
         return (blk.attn.qkv.out_features - 2 * blk.attn.qkv.in_features
                 + getattr(blk.attn, "bypass_width", lambda: 0)())
 
@@ -1394,6 +1543,9 @@ class LifeController:
         old_model, old_opt = h.model, h.opt  # widen 前抓引用（opt.state 以参数对象为键）
         lr = old_opt.param_groups[0]["lr"]
         snap = self._snapshot(d, h)
+        if plan.get("kind") == "grow_depth":
+            self._execute_grow_depth(d, report, v, old_model, old_opt, lr, snap, plan)
+            return
         try:
             rec = widen(old_model, plan["layer"], plan["delta"], axis=plan["axis"],
                         seed=plan.get("seed", 0), device=d.device)
@@ -1447,6 +1599,52 @@ class LifeController:
         report["m4_opt"] = optstat
         report["m4_lr_window"] = SURGERY_LR_WINDOW
 
+    def _execute_grow_depth(self, d, report, v, old_model, old_opt, lr, snap, plan):
+        """执行深度生长手术：以恒等映射插入新层（精确函数保持）。
+
+        与宽度生长同型：快照 → grow_layer → 优化器重建（同名同形状参数迁移
+        Adam 动量）→ LR 重启窗 → 形态记录（morph["layers"] 追加）→ 战役记账
+        → GROWN 状态。体检门控在下一周期 post_exam 判决（通过换班/失败回滚）。
+        """
+        h = d.sleeping()
+        try:
+            rec = grow_layer(old_model, at=plan.get("at"),
+                             seed=plan.get("seed", 0))
+        except ValueError as e:  # 插入位置非法等：放弃计划退回 NORMAL
+            report["m4_grow_failed"] = str(e)
+            self.state = STATE_NORMAL
+            self.plan = None
+            return
+        # 手术后：优化器重建（同名同形状迁移动量）+ LR 重启（规格 B）
+        h.opt, optstat = rebuild_optimizer(old_model, old_opt, h.model, lr)
+        self.lr_window = SURGERY_LR_WINDOW
+        # 形态记录：layers 追加插入位置；d_model_k/shrink 史延续（load 重建依赖）
+        morph = morphology_of(h.model)
+        prev = self.morph_for(d, h.name)
+        layers = list(prev.get("layers") or [])
+        layers.append(int(rec["at"]))
+        morph["layers"] = layers
+        morph["d_model_k"] = int(prev.get("d_model_k", 1) or 1)
+        if prev.get("shrink"):
+            morph["shrink"] = prev["shrink"]
+        self.morphology[h.name] = morph
+        self.campaign = {"kind": "grow_depth", "gen": 1, "snap": snap,
+                         "at": int(rec["at"]),
+                         "source": plan.get("source", "depth_grow")}
+        # 守卫④账目：本次投资记账 + 供给账重新累计（新层须由其后证据流支撑）
+        self.grown_since_surgery += 1
+        self.fresh_since_surgery = 0.0
+        self.state = STATE_GROWN
+        self.plan = None
+        report["m4_depth_grow"] = {
+            "at": rec["at"],
+            "n_layers": rec["n_layers"],
+            "params_after": sum(p.numel() for p in h.model.parameters()),
+        }
+        report["m4_surgery"] = {k2: rec[k2] for k2 in rec if k2 != "new_model"}
+        report["m4_opt"] = optstat
+        report["m4_lr_window"] = SURGERY_LR_WINDOW
+
     def _execute_wither(self, d, report, v):
         h = d.sleeping()
         plan = self.plan
@@ -1469,7 +1667,8 @@ class LifeController:
             # 重复执行同一非法计划 → 无限崩溃循环。
             try:
                 student, opt, info = born_again_student(
-                    h.model.cfg, v, target, d.device, seed=d.cycle)
+                    h.model.cfg, v, target, d.device, seed=d.cycle,
+                    concentrate=bool(plan.get("concentrate", False)))
             except ValueError as e:
                 self.state = STATE_NORMAL
                 self.plan = None
@@ -1515,6 +1714,11 @@ class LifeController:
             report["m4_redo"] = {"recycled": {}, "dormant_frac": 0.0, "skipped": "light"}
         else:
             report["m4_redo"] = self._redo(d, h, v)
+        # 深度睡眠专属自适应精炼修剪（2026-10-15）：仅在 deep 且正处于凋零战役
+        # （WITHERING：born-again/decay 粗裁剪进行中）且生长连续受阻时执行精细裁剪。
+        if (mode == "deep" and self.state == STATE_WITHERING
+                and getattr(self, "growth_blocked", 0) >= MEM_PRESSURE_WINDOW):
+            self.deep_refine(d, report, v)
         # ② 凋零战役的软衰减分代（decay 模式的固定动作；born-again 模式无需衰减）
         if self.state == STATE_WITHERING and self.campaign.get("mode") == "decay":
             report["m4_decay"] = self._decay_generation(d, h, v)
@@ -1537,6 +1741,13 @@ class LifeController:
             lin = h.model.blocks[li].attn.bypass_qkvs[bidx]
             pw = h.model.blocks[li].attn.proj_new_ws[bidx]
         return lin, pw
+
+    def _bypass_body(self, h, li, key):
+        """mlp 旁路的胞体分支（DualMLP 双通道；attn 旁路无 body，返回 None）。"""
+        if "mlp_hidden" in key:
+            bidx = int(key.rsplit(".", 1)[1])
+            return h.model.blocks[li].mlp.bypass_bodies[bidx]
+        return None
 
     def _redo(self, d, h, v):
         """ReDo 回收：确认休眠的 LN 免疫位单元（bottom-5% × 2 周期确认、非观察期）
@@ -1562,16 +1773,22 @@ class LifeController:
             with torch.no_grad():
                 if ".new." in key:  # 旁路新单元
                     lin, pw = self._bypass_handles(h, li, key)
+                    body = self._bypass_body(h, li, key)
                     for c in picked:
                         lin.weight[c].normal_(0, 0.02, generator=g)
                         lin.bias[c].zero_()
+                        if body is not None:
+                            body.weight[c].normal_(0, 0.02, generator=g)
+                            body.bias[c].zero_()
                         pw[:, c].zero_()
                 elif key.endswith(".mlp_hidden"):
                     m = h.model.blocks[li].mlp
                     for c in picked:
-                        m.fc.weight[c].normal_(0, 0.02, generator=g)
-                        m.fc.bias[c].zero_()
-                        m.proj.weight[:, c].zero_()
+                        m.rule.weight[c].normal_(0, 0.02, generator=g)
+                        m.rule.bias[c].zero_()
+                        m.body.weight[c].normal_(0, 0.02, generator=g)
+                        m.body.bias[c].zero_()
+                        m.out.weight[:, c].zero_()
                 elif key.endswith(".attn_out"):
                     a = h.model.blocks[li].attn
                     C = a.qkv.in_features
@@ -1584,6 +1801,71 @@ class LifeController:
             v.sites[key].remap_reset(picked)
             did[key] = picked
         return {"recycled": did, "dormant_frac": round(frac, 4)}
+
+    def deep_refine(self, d, report, v):
+        """深度睡眠专属自适应精炼修剪（2026-10-15 实现）。
+
+        仅在 deep 睡眠且 growth_blocked ≥ MEM_PRESSURE_WINDOW（硬件容量达上限、
+        参数无法继续扩张）时执行。对非核心（旁路新单元 / mlp_hidden / attn_out）
+        中 stable_taylor 重要性最低的 REFINE_MAX_FRAC 比例通道做硬裁剪（输出权重
+        清零），并重置账本使其可再生长。完成后清零 growth_blocked，形成
+        "裁剪→再生长→再裁剪"循环链路。
+        残差流位（ln1_out/ln2_out）不裁剪（同 ReDo 红线，防破坏核心能力）。
+        """
+        h = d.sleeping()
+        pruned_by_site = {}
+        pruned_total = 0
+        for key, led in list(v.sites.items()):
+            if ".ln1_out" in key or ".ln2_out" in key:
+                continue
+            pool = [c for c in range(led.C) if led.probation[c] == 0]
+            if not pool:
+                continue
+            ranked = sorted(pool, key=lambda c: led.stable_tay[c])
+            cap = max(1, int(round(REFINE_MAX_FRAC * len(pool))))
+            picked = ranked[:cap]
+            li = int(key.split(".")[0][1:])
+            g = torch.Generator(device=d.device).manual_seed(
+                hash(("refine", key, d.cycle)) & 0x7FFFFFFF)
+            with torch.no_grad():
+                if ".new." in key:
+                    lin, pw = self._bypass_handles(h, li, key)
+                    body = self._bypass_body(h, li, key)
+                    for c in picked:
+                        lin.weight[c].normal_(0, 0.02, generator=g)
+                        lin.bias[c].zero_()
+                        if body is not None:
+                            body.weight[c].normal_(0, 0.02, generator=g)
+                            body.bias[c].zero_()
+                        pw[:, c].zero_()  # 输出权重清零 = 该非核心单元被裁剪
+                elif key.endswith(".mlp_hidden"):
+                    m = h.model.blocks[li].mlp
+                    for c in picked:
+                        m.out.weight[:, c].zero_()
+                elif key.endswith(".attn_out"):
+                    a = h.model.blocks[li].attn
+                    C = a.qkv.in_features
+                    for c in picked:
+                        a.proj.weight[:, c].zero_()
+                else:
+                    continue
+            v.sites[key].remap_reset(picked)
+            pruned_by_site[key] = picked
+            pruned_total += len(picked)
+        # 记录精炼统计（growth_blocked 复位由 post_exam 在战役验收通过时执行，
+        # 以确保"裁剪→再生长"循环的复位与粗裁剪（born-again）验收绑定）。
+        stats = self.prune_stats
+        stats["prune_count"] = stats.get("prune_count", 0) + 1
+        stats["last_refine_cycle"] = d.cycle
+        stats["total_refined_units"] = stats.get("total_refined_units", 0) + pruned_total
+        stats["last_prune_before_params"] = sum(p.numel() for p in h.model.parameters())
+        report["m4_deep_refine"] = {
+            "pruned_by_site": {k: len(ps) for k, ps in pruned_by_site.items()},
+            "pruned_total": pruned_total,
+            "growth_blocked_after": self.growth_blocked,
+            "prune_stats": dict(stats),
+        }
+        return report["m4_deep_refine"]
 
     def _decay_generation(self, d, h, v):
         """软衰减分代（凋零战役 decay 模式）：目标休眠单元整体 ×DECAY_GAMMA
@@ -1599,19 +1881,25 @@ class LifeController:
                 touched = 0
                 if ".new." in key:
                     lin, pw = self._bypass_handles(h, li, key)
+                    body = self._bypass_body(h, li, key)
                     for c in chans:
                         if c < lin.weight.shape[0]:
                             lin.weight[c] *= gamma
                             lin.bias[c] *= gamma
+                            if body is not None:
+                                body.weight[c] *= gamma
+                                body.bias[c] *= gamma
                             pw[:, c] *= gamma
                             touched += 1
                 elif key.endswith(".mlp_hidden"):
                     m = h.model.blocks[li].mlp
                     for c in chans:
-                        if c < m.fc.weight.shape[0]:
-                            m.fc.weight[c] *= gamma
-                            m.fc.bias[c] *= gamma
-                            m.proj.weight[:, c] *= gamma
+                        if c < m.rule.weight.shape[0]:
+                            m.rule.weight[c] *= gamma
+                            m.rule.bias[c] *= gamma
+                            m.body.weight[c] *= gamma
+                            m.body.bias[c] *= gamma
+                            m.out.weight[:, c] *= gamma
                             touched += 1
                 elif key.endswith(".attn_out"):
                     a = h.model.blocks[li].attn
@@ -1788,6 +2076,8 @@ class LifeController:
                 self.state = STATE_NORMAL
                 self.campaign = None
                 self.consec_rollback = 0
+                # 裁剪战役验收通过：模型已收缩，生长受阻解除 → 复位循环计数
+                self.growth_blocked = 0
                 return "swap"
             camp = self.campaign or {}
             camp["gen"] = camp.get("gen", 1) + 1
@@ -1799,6 +2089,8 @@ class LifeController:
                 self.state = STATE_NORMAL
                 self.campaign = None
                 self.consec_rollback += 1
+                # 放弃裁剪：本轮不再纠缠，复位计数避免无限重试
+                self.growth_blocked = 0
                 report["m4_wither_abandoned"] = True
                 return "rollback"
             report["m4_wither_keep"] = camp.get("gen")  # 学生保留标志：不回滚
@@ -1826,7 +2118,12 @@ class LifeController:
 def compute_sleep_program(dolphin):
     """睡眠编制计算（下丘脑调度映射）：压力越高→深度睡眠占比越多、睡眠时长越长。
     系数为初值（经 autotune 慢调，F-07 参数化）；必须满足单调性约束（deep 占比
-    随 p 单调不减、total_steps 随 p 单调不减）。四档占比非负且和≈1（容差 1e-6）。"""
+    随 p 单调不减、total_steps 随 p 单调不减）。四档占比非负且和≈1（容差 1e-6）。
+
+    2026-10-17 用户定案：total_steps 额外随**学习量**（自上次睡眠以来流入经验
+    条数）与**用脑量**（双半球累计训练步数）自适应——学的知识越多、用脑越
+    重，睡眠巩固步数越长（深度睡眠尤其明显）。上限封顶防爆炸。
+    """
     p = max(dolphin.hemi_pressure) / 50.0
     p = max(0.0, min(1.0, p))
     debt_ratio = min(1.0, sum(dolphin.debt_ledger.debts) / 1000.0)
@@ -1836,6 +2133,13 @@ def compute_sleep_program(dolphin):
     rem_debt = au.get("sleep_prog_rem_debt", 0.1) if au else 0.1
     nrem_scale = au.get("sleep_prog_nrem_scale", 0.5) if au else 0.5
     total_base = au.get("sleep_prog_total_base", 120) if au else 120
+    # 学习量因子：自上次睡眠以来流入经验越多 → 步数越长（上限 1.0）。
+    since = getattr(dolphin, "_since_sleep", 0)
+    target = getattr(dolphin, "target_interval", 15)
+    learn_ratio = min(1.0, since / max(1.0, target * 2.0))
+    # 用脑量因子：双半球累计实际训练步数越多 → 步数越长（慢饱和，上限 1.0）。
+    trained_total = sum(getattr(dolphin, "hemi_trained_steps", [0, 0]))
+    brain_ratio = min(1.0, trained_total / 5000.0)
     deep = p
     rem = rem_base + rem_debt * debt_ratio
     nrem = nrem_scale * (1.0 - p)
@@ -1847,9 +2151,15 @@ def compute_sleep_program(dolphin):
     if total > 1.0:
         deep, rem, nrem = deep / total, rem / total, nrem / total
         light = 0.0
-    total_steps = int(total_base * (1.0 + p))
+    # 步数上限 = 基础 × (1+压力) × (1+学习量×0.6) × (1+用脑量×0.4)，封顶 4 倍基础。
+    total_steps = int(total_base * (1.0 + p)
+                     * (1.0 + learn_ratio * 0.6)
+                     * (1.0 + brain_ratio * 0.4))
+    total_steps = min(total_steps, int(total_base * 4.0))
     return {"deep": deep, "rem": rem, "nrem": nrem,
-            "light": light, "total_steps": total_steps}
+            "light": light, "total_steps": total_steps,
+            "learn_ratio": round(learn_ratio, 4),
+            "brain_ratio": round(brain_ratio, 4)}
 
 
 def _callosum_kl(dolphin, chunks=8, eps=1e-10):
@@ -2002,6 +2312,25 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
         report["memory_scale"] = round(scale, 4)
         report["memory_cold_sample"] = cold_sample
 
+        # 深睡遗忘代谢（2026-10-16）+ 2026-10-17 用户定案：非 REM 阶段都做
+        # 冷层遗忘（REM 快速眼动回放不做遗忘）——deep 全量（分龄淘汰 + 按
+        # 模型规格自适应上限补砍），nrem/light 以极小量淘汰最旧过期零命中；
+        # 防止冷层无限膨胀（曾致 4 天 52 万条/2.1GB、95% 零命中）。
+        if mode == "deep":
+            forget_stat = dolphin.memory.forget_cold(
+                zero_hit_cap=dolphin.adaptive_cold_cap())
+            if forget_stat:
+                report.update(forget_stat)
+        elif mode == "nrem":
+            forget_stat = dolphin.memory.forget_cold(limit=32)
+            if forget_stat:
+                report.update(forget_stat)
+        elif mode == "light":
+            forget_stat = dolphin.memory.forget_cold(limit=8)
+            if forget_stat:
+                report.update(forget_stat)
+        # rem：不做遗忘（快速眼动回放，混入冷层拼梦境见 dream_light）
+
     # 记录当前睡眠档位（F-02：恒温器据此对 nrem 施加手术限制）
     dolphin._last_sleep_mode = mode
 
@@ -2015,6 +2344,21 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
             steps = getattr(dolphin, "sleep_steps_nrem", 80)
         else:
             steps = getattr(dolphin, "sleep_steps", 120)
+    # 2026-10-17 用户定案：睡眠步数随学习量/用脑量自适应（仅 feeding 生产路径）。
+    # 学习量 = 自上次睡眠以来流入经验条数；用脑量 = 双半球累计实际训练步数。
+    # deep 对用脑量额外敏感（深度睡眠随用脑量变化），cap 到睡眠编制上限。
+    if feeding:
+        _prog_steps = (prog or {}).get("total_steps", steps)
+        _since = getattr(dolphin, "_since_sleep", 0)
+        _target = getattr(dolphin, "target_interval", 15)
+        _learn_r = min(1.0, _since / max(1.0, _target * 2.0))
+        _trained = sum(getattr(dolphin, "hemi_trained_steps", [0, 0]))
+        _brain_r = min(1.0, _trained / 5000.0)
+        if mode == "deep":
+            steps = int(steps * (1.0 + _learn_r * 0.6 + _brain_r * 0.4))
+        else:
+            steps = int(steps * (1.0 + _learn_r * 0.4))
+        steps = max(1, min(steps, _prog_steps))
     if kd_alpha is None:
         kd_alpha = getattr(dolphin, "kd_alpha", 0.5)
     if kd_T is None:
@@ -2027,6 +2371,24 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     dream_k = getattr(dolphin, "dream_k", 5)
     if mode == "rem":
         dream_k = min(8, dream_k + 2)
+
+    # —— 各阶段杂交小任务（2026-10-17 用户定案）——
+    # 每个睡眠阶段以极小概率混入其他阶段的"小事情"，平滑单一功能的性能尖峰：
+    #   deep：5% 概率混入 rem 的增强做梦（dream_k +1）；
+    #   rem ：5% 概率额外增强做梦注入（混入更多冷层记忆拼梦境）；
+    #   nrem：5% 概率混入 rem 的增强做梦（dream_k +1）；
+    #   light：5% 概率混入 nrem 的参数自适应微调（放行一次 param_adaptive）。
+    # 只在 feeding 生产路径生效；feeding=False（M0 单线程）保持原语义不变。
+    hybrid = {}
+    if feeding:
+        _hr = rng.random()
+        if mode in ("deep", "rem", "nrem") and _hr < 0.05:
+            dream_k = min(8, dream_k + 1)
+            hybrid["dream_boost"] = 1
+        elif mode == "light" and _hr < 0.05:
+            hybrid["param_micro"] = True
+        if hybrid:
+            report["hybrid_tasks"] = hybrid
 
     if feeding:
         # S5 蒸馏方向交替（2026-10-13 修复）：每周期开始时读取持久化翻转标志。
@@ -2121,6 +2483,11 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
             buf.clear()
         dolphin.cycle += 1
         report["note"] = "无可训经验（滞留已全部入记忆库）"
+        # 早退修复（2026-10-16）：空选拔周期同样走 autotune 慢环。否则
+        # 金发姑娘全过滤→空选拔→autotune 永不调整→持续全过滤，训练死锁。
+        au = getattr(dolphin, "autotune", None)
+        if au is not None:
+            au.on_cycle(dolphin, report)
         return report
 
     # S7 杏仁核显著性加权（feeding 生产路径；M0 单线程路径保持原选拔顺序）：
@@ -2145,10 +2512,22 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
 
     # 律 L6：变异重放，拼成一条字节流
     donors = [e.data for _, e in sel]
+    # 做梦温度驱动变异强度（2026-10-17 用户定案）：rem 做梦时杏仁核因内容
+    # 全是熟悉的而升温（temperature_for_surprise：熟悉→高温），变异更激进，
+    # 产生天马行空的梦境；deep/nrem/light 保持默认强度。
+    dream_intensity = 1.0
+    if feeding and mode == "rem":
+        _am_d = getattr(dolphin, "amygdala", None)
+        if _am_d is not None:
+            _mean_s = sum(e.surprise for _, e in sel) / max(1, len(sel))
+            _dt = _am_d.temperature_for_surprise(_mean_s)
+            dream_intensity = max(0.5, min(1.5, _dt))
+            report["dream_temperature"] = round(_dt, 4)
+            report["dream_intensity"] = round(dream_intensity, 4)
     parts = []
     for i, (_, e) in enumerate(sel):
         donor = donors[(i + 1) % len(donors)] if len(donors) > 1 else None
-        parts.append(varied_replay(e.data, rng, donor))
+        parts.append(varied_replay(e.data, rng, donor, intensity=dream_intensity))
     stream = b"\n".join(parts)
 
     blk = dolphin.cfg.block_size
@@ -2209,16 +2588,46 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
 
     ce_hist, kd_hist = [], []
     N = bt.numel()
+    # —— 在线 Qwen 蒸馏（2026-10-17 用户定案：边学数据边看 Qwen 指导）——
+    # 训练前用 Qwen（词表级教师）对同一段 stream 前向一次，经 BPM 边际化成
+    # next-byte 软标签 [N, 256]；训练循环里与真实字节 CE、半球 KD 一起优化。
+    qwen_soft = None
+    _qwen_teacher = getattr(dolphin, "qwen_teacher", None)
+    if _qwen_teacher is not None and getattr(dolphin, "qwen_kd_enabled", False):
+        try:
+            _st = _qwen_teacher.soft_targets_for(stream)
+            if _st is not None:
+                if _st.size(0) == N:
+                    qwen_soft = _st
+                elif _st.size(0) > N:
+                    qwen_soft = _st[:N]
+                else:
+                    pad = torch.zeros(N - _st.size(0), _st.size(1),
+                                      dtype=_st.dtype)
+                    qwen_soft = torch.cat([_st, pad], dim=0)
+                qwen_soft = qwen_soft.to(dev)
+                report["qwen_kd_bytes"] = int(qwen_soft.size(0))
+        except Exception as e:
+            report["qwen_kd_error"] = str(e)
+    qbeta = float(getattr(dolphin, "qwen_kd_weight", 0.3))
+
+    # 性能修复（2026-10-15 审计）：feeding 生产路径把训练窗口批量化为每个
+    # 梯度步处理 train_batch 个随机窗口（总窗口数≈steps，与原语义一致），
+    # 大幅提升 GPU 利用率（batch=1→32 实测每窗口提速 ~23x、GPU 20%→60%）。
+    # feeding=False（M0 单线程路径）保持 batch=1，与既有测试逐字等价。
+    train_batch = getattr(dolphin, "train_batch", 32 if feeding else 1)
+    n_iter = (steps + train_batch - 1) // train_batch
     try:
-        for i in range(steps):
-            s0 = rng.randrange(0, N - blk - 1)
-            x = bt[s0:s0 + blk].unsqueeze(0)
-            y = bt[s0 + 1:s0 + blk + 1].unsqueeze(0)
+        for i in range(n_iter):
+            batch_n = min(train_batch, steps - i * train_batch)
+            s0s = [rng.randrange(0, N - blk - 1) for _ in range(batch_n)]
+            x = torch.stack([bt[s:s + blk] for s in s0s])
+            y = torch.stack([bt[s + 1:s + blk + 1] for s in s0s])
             with torch.no_grad():
                 t_logits, _ = awake.model(x)
             s_logits, _ = sleeping.model(x)
             ce = F.cross_entropy(s_logits.reshape(-1, dolphin.cfg.vocab), y.reshape(-1))
-            # light 浅睡：KD 降频——每 4 步做一次 KD，其余步只 CE（低强度快速巩固）。
+            # light 浅睡：KD 降频——每 4 个梯度步做一次 KD，其余步只 CE（低强度快速巩固）。
             if mode == "light" and i % 4 != 0:
                 loss = ce
                 kd = torch.tensor(0.0, device=dev)
@@ -2227,6 +2636,16 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
                 kd = (kd_T ** 2) * F.kl_div(
                     F.log_softmax(s_logits / kd_T, dim=-1), p_t, reduction="batchmean")
                 loss = (1 - alpha) * ce + alpha * kd
+            # Qwen 在线指导：软标签 KL（仅 feeding 生产路径，teacher 在场时）
+            if qwen_soft is not None:
+                try:
+                    y_soft = torch.stack(
+                        [qwen_soft[s + 1:s + 1 + blk] for s in s0s])
+                    qwen_kd = _qwen_teacher.kd_loss(s_logits, y_soft)
+                    loss = (1 - qbeta) * loss + qbeta * qwen_kd
+                    report["qwen_kd_loss"] = round(float(qwen_kd), 4)
+                except Exception:
+                    pass
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(sleeping.model.parameters(), 1.0)
@@ -2247,10 +2666,43 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
     if m4:
         ctl.rem_phase(dolphin, report, stream, sel, mode=mode)
 
-    # 体检（律 L8）：全卷逐块评分 + margin 判决带，判决唯一实现 Dolphin.gate
-    passed, gate = dolphin.gate(awake, sleeping)
-    report.update(gate)
-    report["passed"] = passed
+    # 体检（律 L8）：全卷逐块评分 + margin 判决带，判决唯一实现 Dolphin.gate。
+    # 2026-10-17 用户定案：移除睡醒考试——gate_exam_enabled=False 时跳过硬编码
+    # probe 考试（模型对固定探测集过度熟悉会产生"应试技巧"，考试越来越容易但
+    # 真实能力未必提升），训练成果直接接受；学歪检测由下方"局部回滚"审计负责。
+    if getattr(dolphin, "gate_exam_enabled", True):
+        passed, gate = dolphin.gate(awake, sleeping)
+        report.update(gate)
+        report["passed"] = passed
+    else:
+        passed = True
+        report["passed"] = True
+        report["gate_exam_skipped"] = True
+
+    # —— 局部回滚审计（2026-10-17 用户定案，仅 gate_exam_enabled=False 生产路径）——
+    # 不再用固定考试判整体生死：训练后逐经验比较 NLL 与入缓冲时的原始惊讶度，
+    # 学歪的经验（显著变差）降级进冷层（kind="mislearned"），下次不再选拔；
+    # 其余学对的经验正常保留——不再"90% 学对也整体作废"。
+    mislearned = []
+    if (not getattr(dolphin, "gate_exam_enabled", True)) and feeding and sel:
+        for _, e in sel:
+            try:
+                _after = sleeping.model.mean_nll(e.data, dev)
+            except Exception:
+                continue
+            if _after > e.surprise + 0.10:  # 训练后比入缓冲时惊讶还高 → 学歪
+                mislearned.append(e)
+        if mislearned:
+            for e in mislearned:
+                dolphin.memory.add_cold(e.data, e.surprise, dolphin.cycle,
+                                         kind="mislearned")
+            report["mislearned"] = len(mislearned)
+            report["mislearned_ratio"] = round(len(mislearned) / len(sel), 4)
+        # 安全网：若大部分经验都学歪，说明整体退化，仍整体回滚
+        if len(mislearned) > len(sel) * 0.5:
+            passed = False
+            report["passed"] = False
+            report["rollback_reason"] = "majority_mislearned"
     report["ce_last"] = round(ce_hist[-1], 4)
     report["kd_last"] = round(kd_hist[-1], 4)
     if vit is not None:
@@ -2410,10 +2862,13 @@ def run_cycle(dolphin, steps=None, kd_alpha=None, kd_T=None, verbose=True, feedi
             report["m4_amygdala"] = adj
     # 参数自适应控制律（2026-10-06）：独立排计划控制器。生产默认开启
     # （param_adaptive_enabled=True）；测试通过 make_dolphin 工厂统一关闭，
-    # 确保参数自适应不在测试路径触发。light 浅睡不介入（低强度快速巩固）。
+    # 确保参数自适应不在测试路径触发。light 浅睡默认不介入（低强度快速巩固），
+    # 但 2026-10-17 用户定案的"阶段杂交小任务"允许 light 以 5% 概率放行一次
+    # 极小微调（hybrid_tasks.param_micro）。
     pa = getattr(dolphin, "param_adaptive", None)
+    _hybrid_pa = bool((report.get("hybrid_tasks") or {}).get("param_micro"))
     if pa is not None and getattr(dolphin, "param_adaptive_enabled", False) \
-            and mode != "light":
+            and (mode != "light" or _hybrid_pa):
         pa.on_cycle(dolphin, report, None, report.get("util_gap", 0.0),
                     mem_ratio=None)
     if verbose:

@@ -45,6 +45,8 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
+    """旧版单通道 FFN（保留：旧存档迁移/历史引用兼容）。"""
+
     def __init__(self, cfg: Config):
         super().__init__()
         self.fc = nn.Linear(cfg.d_model, 4 * cfg.d_model)
@@ -54,6 +56,32 @@ class MLP(nn.Module):
         return self.proj(F.gelu(self.fc(x)))
 
 
+class DualMLP(nn.Module):
+    """发达神经元：树突-胞体双通道门控 FFN（2026-10-19 用户定案）。
+
+    对应中科院脑科学发现（2026-10-16 Science）：大脑皮层神经元内部存在精密分工
+    ——顶端树突编码抽象规则/内在认知变量，胞体表征外界感觉输入，两类信号在
+    神经元内部做**非线性整合**后生成决策输出。
+
+    实现：
+      rule = gelu(x @ W_rule)   # 树突通道：提取抽象规则/慢特征
+      body = tanh(x @ W_body)   # 胞体通道：表征具体输入/快特征
+      out  = (rule ⊙ body) @ W_out   # 非线性整合（逐元素乘积，非简单相加）
+    """
+
+    def __init__(self, cfg: Config):
+        super().__init__()
+        d = cfg.d_model
+        self.rule = nn.Linear(d, 4 * d)    # 树突：规则提取
+        self.body = nn.Linear(d, 4 * d)    # 胞体：输入表征
+        self.out = nn.Linear(4 * d, d)     # 整合输出
+
+    def forward(self, x):
+        rule = F.gelu(self.rule(x))
+        body = torch.tanh(self.body(x))
+        return self.out(rule * body)
+
+
 class Block(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__()
@@ -61,7 +89,7 @@ class Block(nn.Module):
         self.ln1 = nn.LayerNorm(cfg.d_model)
         self.attn = CausalSelfAttention(cfg)
         self.ln2 = nn.LayerNorm(cfg.d_model)
-        self.mlp = MLP(cfg)
+        self.mlp = DualMLP(cfg)
 
     def forward(self, x):
         x = x + F.dropout(self.attn(self.ln1(x)), self.p, self.training)
@@ -104,6 +132,31 @@ class ByteTransformer(nn.Module):
         if targets is not None:
             loss = F.cross_entropy(logits.reshape(-1, self.cfg.vocab), targets.reshape(-1))
         return logits, loss
+
+    @torch.no_grad()
+    def embed(self, data, device=None, pool="mean"):
+        """文本语义向量（2026-10-17 用户定案：杏仁核情绪判断改用模型语义理解，
+        不再靠关键词硬编码）。返回 ln_f 输出在序列维度的池化向量：
+        - pool="mean"：平均池化（整句话的语义）；
+        - pool="last"：最后一个 token 的表示（自回归语境下的"当前状态"）。
+        空输入返回零向量（情绪中性兜底）。
+        """
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        dev = device or next(self.parameters()).device
+        if not data:
+            return torch.zeros(self.cfg.d_model, device=dev)
+        b = torch.tensor(list(data), dtype=torch.long, device=dev)
+        if b.numel() == 0:
+            return torch.zeros(self.cfg.d_model, device=dev)
+        x = self.drop(self.wte(b.unsqueeze(0))
+                      + self.wpe(torch.arange(b.numel(), device=dev)))
+        for blk in self.blocks:
+            x = blk(x)
+        x = self.ln_f(x)
+        if pool == "last":
+            return x[0, -1].clone()
+        return x.mean(dim=1)[0].clone()
 
     @torch.no_grad()
     def generate(self, idx, max_new, temperature=0.8, top_k=None, top_p=None):

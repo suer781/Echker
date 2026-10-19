@@ -13,6 +13,7 @@ import shutil
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import asdict
 from datetime import datetime
 
@@ -43,6 +44,54 @@ def clamp_threshold(v):
     life._threshold_feedback（喂食路径阈值反馈，现居 dolphin/life.py），不许出现
     第三份乘法实现）。"""
     return max(THRESHOLD_LO, min(THRESHOLD_HI, float(v)))
+
+
+def _migrate_mlp_state_dict(sd):
+    """旧版 MLP（fc/proj）存档 → DualMLP（rule/body/out）权重迁移（2026-10-19）。
+
+    旧 FFN: y = proj(gelu(fc(x)))。
+    新 FFN: y = out(gelu(rule(x)) * tanh(body(x)))。
+
+    迁移策略（近似等价启动）：
+      rule ← fc（树突通道继承原第一层）；
+      body ← 权重 0、偏置 1（tanh(1)≈0.7616 常数调制，rule ⊙ body ≈ 0.76·rule）；
+      out  ← proj × (1/tanh(1))（补偿常数缩放，使初始输出接近旧模型）。
+    旧 WidenedMLP 只有 bypass_fcs 旁路，迁移时同步补齐 bypass_bodies
+    （权重 0、偏置 1，与主 body 同策略）。已是 DualMLP 键名且旁路齐备则
+    内容不变。
+    """
+    out = dict(sd)
+    if any(".mlp.fc.weight" in k for k in sd):
+        import math
+        scale = 1.0 / math.tanh(1.0)
+        # fc → rule（原样）
+        for k in list(out):
+            if ".mlp.fc." in k:
+                out[k.replace(".mlp.fc.", ".mlp.rule.")] = out.pop(k)
+        # rule → body（权重 0，偏置 1）
+        for k in list(out):
+            if ".mlp.rule.weight" in k:
+                bias_key = k.replace(".mlp.rule.weight", ".mlp.rule.bias")
+                out[k.replace(".mlp.rule.weight", ".mlp.body.weight")] = torch.zeros_like(out[k])
+                out[k.replace(".mlp.rule.weight", ".mlp.body.bias")] = torch.ones_like(out[bias_key])
+        # proj → out（权重 ×scale 补偿，偏置原样）
+        for k in list(out):
+            if ".mlp.proj." in k:
+                nk = k.replace(".mlp.proj.", ".mlp.out.")
+                if nk.endswith(".weight"):
+                    out[nk] = out.pop(k) * scale
+                else:
+                    out[nk] = out.pop(k)
+    # 旁路 body 通道补齐（旧 WidenedMLP 只有 bypass_fcs）：权重 0、偏置 1，
+    # 与主 body 同策略（tanh(1) 常数调制，宽化瞬间旁路零输出保持不变）。
+    for k in list(out):
+        if ".mlp.bypass_fcs." in k and k.endswith(".weight"):
+            bb_w = k.replace(".bypass_fcs.", ".bypass_bodies.")
+            if bb_w not in out:
+                bias_key = k.replace(".weight", ".bias")
+                out[bb_w] = torch.zeros_like(out[k])
+                out[bb_w.replace(".weight", ".bias")] = torch.ones_like(out[bias_key])
+    return out
 
 
 class GateDisabled(RuntimeError):
@@ -156,6 +205,11 @@ class Dolphin:
         # 每次交互后记录 {eid, reward, dim}，reward 与原手动打分格式兼容，
         # dim 含三维度判断依据，便于后续校验与优化。随档持久化，旧档兼容空列表。
         self.self_eval_log = []
+        # 用户负面反馈事件日志（2026-10-15）：训完上线后的"有错就改"回路。
+        # 每次捕获到异常事件（如模型误删用户内容/服务错误/答非所问/空响应等）
+        # 记录 {kind, eid, detail, ts}，并同步对交互打负分。随档持久化，
+        # 旧档兼容空列表。驱动 autotune 的 negative_feedback_rate 信号。
+        self.anomaly_log = []
         # M4 生命节律（律 L11）：自生长/自凋零控制器 + 人工总开关安全阀。
         # life_enabled=False 时 life.run_cycle 的全部 M4 钩子失效（纯 M0 语义）；
         # 人工只保留这个总开关，禁止干预手术的时机/位置/幅度（律 L11）。
@@ -168,13 +222,41 @@ class Dolphin:
         # 初始 = 随机模型的先验惊讶度 ln256（≈5.545）。随睡眠周期末用入选经验的
         # mean surprise 慢速 EMA 更新（见 life.run_cycle）。随档持久化。
         self.ability = PRIOR_ABILITY
-        # 门控观测计数：太熟跳过 / 太怪挂起的累计条数，随档持久化，写进日志观测。
+        # 门控观测计数：太熟跳过 / 太怪挂起的累计**窗口数**（2026-10-17 改
+        # 片段级门控后按窗口计），随档持久化，写进日志观测。
         self.skipped_too_easy = 0
         self.suspended_too_hard = 0
+        # 片段级噪声屏蔽观测：累计被屏蔽的噪声字节数（2026-10-17 新增）。
+        # learn() 按窗口判决，噪声窗口不入缓冲，此计数反映实际被屏蔽的数据量。
+        self.noise_masked_bytes = 0
         # 金发姑娘带通阈值（2026-10-13）：由 autotune 慢速自调（域内值自成），
         # 初值 0.05/0.20 与模块常量一致；learn() 从 autotune 读取当前值。
         self.goldilocks_lo = 0.05
         self.goldilocks_hi = 0.20
+        # 语义饱和机制（L7 强化，2026-10-17 用户定案：长期+短期双尺度）。
+        # 短期窗口：短时间内大量重复 → 强抑制（衰减 30%/次，下限 10%）；
+        # 长期窗口：历史较长范围内的偶尔重复 → 弱抑制（衰减 5%/次，下限 60%），
+        # 避免"最近 200 条重复"式单窗口导致某些字被排斥、语义识别错误。
+        self.satiation_window_short = 50
+        self.satiation_decay_short = 0.30
+        self.satiation_min_short = 0.10
+        self.satiation_window_long = 2000
+        self.satiation_decay_long = 0.05
+        self.satiation_min_long = 0.60
+        self.saturation_threshold = 0.50     # 单批重复占比阈值（>50% 触发饱和防护）
+        self.satiation_counts_short = {}   # 短期窗口指纹计数
+        self.satiation_order_short = deque()
+        self.satiation_counts_long = {}       # 长期窗口指纹计数
+        self.satiation_order_long = deque()
+        self.saturation_events = 0           # 饱和防护触发计数（随档持久化，观测用）
+        self.saturation_last_ratio = 0.0     # 最近一次窗口内重复占比（观测用）
+        # 近期惊讶值分布（2026-10-17 用户定案：金发姑娘动态偏差用）
+        self._surprise_hist = []
+        # 睡醒考试开关（2026-10-17 用户定案：移除硬编码 probe 考试——模型对
+        # 固定探测集过度熟悉后会产生"应试技巧"，考试越来越容易但真实能力未必
+        # 提升）。默认 True 保持既有行为/测试兼容；生产训练入口（feed.py）默认
+        # 关闭（--no-gate-exam），改为学习质量自审计 + 局部回滚。
+        self.gate_exam_enabled = True
 
     def awake(self):
         return self.h[self.awake_idx]
@@ -193,6 +275,19 @@ class Dolphin:
         n = sum(p.numel() for p in self.awake().model.parameters())
         s = (math.log10(max(float(n), 1e5)) - 5.0) / 3.0
         return max(0.1, min(1.0, s))
+
+    def adaptive_cold_cap(self):
+        """冷层自适应上限（2026-10-17 用户定案）：模型参数越多 → 冷层上限越高。
+
+        基础 2 万条，按模型参数量对数尺度放大，封顶 100 万条——防止冷层无限
+        膨胀、比模型本身还离谱（曾致 4 天 52 万条/2.1GB、95% 零命中）。
+        参数 1e5 → 2 万条；1e8 → 100 万条（对数插值）。
+        """
+        import math
+        n = sum(p.numel() for p in self.awake().model.parameters())
+        s = (math.log10(max(float(n), 1e5)) - 5.0) / 3.0  # 0.0（1e5）~1.0（1e8）
+        cap = int(20000 * (1.0 + max(0.0, min(1.0, s)) * 49.0))
+        return max(20000, min(1_000_000, cap))
 
     def _busy_inc(self):
         """learn_busy 原子自增（审计②-3）：serve 与 learn 并发时防止丢失更新。
@@ -278,13 +373,28 @@ class Dolphin:
         """
         self._busy_inc()  # 读屏障：换班栅栏把 serve 与 learn 同等对待（律 L3）
         try:
+            ub = user_text.encode("utf-8")
+            # 梦境相关热提升（2026-10-17 用户定案）：用户提及与冷层梦境记忆
+            # 相关的内容时，相关记忆临时复制到热层（serve 的 retrieve 快通道
+            # 立即能引用）。冷层检索锁外做，失败静默（不阻塞服务）。
+            try:
+                self.memory.promote_cold_related(ub, k=2)
+            except Exception:
+                pass
             if temperature is None:
-                temperature = self.amygdala.temperature  # 杏仁核自动托管
+                # 杏仁核三层调节（2026-10-17 用户定案）：先量输入内容的陌生
+                # 程度（L1 实时），再叠加上下文窗口统计（L2）与用户情绪感同
+                # 身受（L3：生气→恐惧降温/开心→升温）。
+                surprise = self.awake().model.mean_nll(ub, self.device)
+                temperature = self.amygdala.temperature_for_user(
+                    user_text, surprise,
+                    model=self.awake().model, device=self.device)
+            else:
+                surprise = None  # 显式传参：不预计算，生成后按原路径算
             if top_k is None:
                 top_k = self.amygdala.top_k
             if top_p is None:
                 top_p = self.amygdala.top_p
-            ub = user_text.encode("utf-8")
             notes = self.memory.retrieve(ub, k=1)  # 律 L10 预支快通道：引用记忆，不碰权重
             prefix = ("【记忆】" + notes[0].text[-120:] + "\n") if notes else ""
             prompt = (prefix + user_text).encode("utf-8")[-self.cfg.block_size:]
@@ -292,9 +402,12 @@ class Dolphin:
             out = self.awake().model.generate(
                 idx, max_new, temperature, top_k=top_k, top_p=top_p)
             resp = bytes(out[0, idx.shape[1]:].tolist()).decode("utf-8", errors="replace")
-            surprise = self.awake().model.mean_nll(ub, self.device)  # 对用户输入的困惑度
+            if surprise is None:
+                surprise = self.awake().model.mean_nll(ub, self.device)  # 对用户输入的困惑度
             with self.feed_lock:
-                eid = self.buffer.add(ub, surprise)
+                # 语义饱和：重复的用户输入同样获得衰减因子（原始惊讶值保留）
+                sat_factor = self._apply_semantic_saturation(ub, surprise)
+                eid = self.buffer.add(ub, surprise, sat_factor=sat_factor)
                 self._since_sleep += 1
                 self.learn_total += 1  # G3：部署侧经验流入总量（守护模式的恢复信号）
             return resp, eid
@@ -303,6 +416,44 @@ class Dolphin:
 
     def feedback(self, eid, reward):
         return self.buffer.feedback(eid, reward)
+
+    def capture_anomaly(self, kind, eid=None, detail=None):
+        """训完上线后的"有错就改"：实时捕获用户负面反馈事件并对交互打负分。
+
+        与前置拦截门（体检）职责分离——本方法不拦截任何输入/更新，只在异常
+        已经发生（如模型误删除用户内容、产生服务错误、答非所问、空响应等）
+        时，事后记录事件并对该交互打负分（-1.0），同时把负面反馈率信号送入
+        autotune（值自成：评估阈值随负面事件率自适应收紧/放松）。
+
+        返回 (ok, eid)。eid 为 None（纯事件、无对应交互）时只记录事件与
+        更新信号，不写缓冲。
+        """
+        import time as _time
+        ok = False
+        if eid is not None:
+            ok = self.feedback(eid, -1.0)
+        self.anomaly_log.append({
+            "kind": kind,
+            "eid": eid,
+            "detail": detail or "",
+            "ts": _time.time(),
+        })
+        if len(self.anomaly_log) > 2000:  # 防日志无限膨胀
+            del self.anomaly_log[: len(self.anomaly_log) - 2000]
+        # 负面反馈信号：EMA 累加（0.1/次），update_signals 中每周期 *0.9 衰减。
+        au = getattr(self, "autotune", None)
+        if au is not None:
+            s = au.signals
+            s["negative_feedback_rate"] = min(
+                1.0, s.get("negative_feedback_rate", 0.0) + 0.1)
+        return ok, eid
+
+    def negative_feedback_rate(self):
+        """当前用户负面反馈率（EMA [0,1]，供外部观测）。"""
+        au = getattr(self, "autotune", None)
+        if au is None:
+            return 0.0
+        return float(au.signals.get("negative_feedback_rate", 0.0))
 
     def self_evaluate(self, text, resp, eid, max_new=64):
         """模型自评估打分（2026-10-14，替代用户手动打分，后台无感执行）。
@@ -328,6 +479,14 @@ class Dolphin:
             self.self_eval_log.append({"eid": eid, "reward": -1.0, "dim": dim})
             return -1.0
 
+        # —— 自适应评估阈值（2026-10-15，值自成）：从 autotune 读取当前值，
+        # 由用户实时负面反馈率驱动慢速自调（域内），不再写死。缺省回落初值。
+        au = getattr(self, "autotune", None)
+        pass_thresh = float(au.get("eval_pass_thresh", 0.55)) if au else 0.55
+        fail_thresh = float(au.get("eval_fail_thresh", 0.30)) if au else 0.30
+        garbage_repl = float(au.get("eval_garbage_repl", 0.30)) if au else 0.30
+        garbage_print = float(au.get("eval_garbage_print", 0.50)) if au else 0.50
+
         # —— F-04 修复：乱码/不可读输出直接差评（防自评估正向强化噪声）——
         # 模型处于未学会说话阶段时，输出可能是任意字节（非法 UTF-8 被替换为
         # U+FFFD，或大量控制字符）。这类输出没有信息价值，绝不能给正奖励。
@@ -335,7 +494,7 @@ class Dolphin:
         repl_ratio = decoded_resp.count("\ufffd") / max(1, len(decoded_resp))
         printable_ratio = sum(1 for ch in decoded_resp
                                if ch.isprintable() and ch != "\ufffd") / max(1, len(decoded_resp))
-        if repl_ratio > 0.3 or printable_ratio < 0.5:
+        if repl_ratio > garbage_repl or printable_ratio < garbage_print:
             dim = {"relevance": 0.0, "completeness": 0.0, "accuracy": 0.0,
                    "total": 0.0, "reason": "输出为乱码/不可读"}
             self.feedback(eid, -1.0)
@@ -373,14 +532,16 @@ class Dolphin:
         total = 0.4 * relevance + 0.3 * completeness + 0.3 * accuracy
         # —— F-04 修复：零重叠（答非所问）时总分封顶到中性档，禁止正奖励 ——
         # 输入有实质内容（非空）但输出与输入没有任何 4-gram 共享时，即使输出
-        # 可读，也不能判定为"达成用户预期"。封顶到 0.54（<0.55 的正奖励线）。
-        # 注：输入短于 4 字符时 4-gram 天然为空（overlap=0），同样封顶，避免
-        # 短输入被 completeness+accuracy 推成正奖励。
+        # 可读，也不能判定为"达成用户预期"。封顶到 pass_thresh-0.01（低于
+        # 自适应正奖励线）。输入短于 4 字符时 4-gram 天然为空（overlap=0），
+        # 同样封顶，避免短输入被 completeness+accuracy 推成正奖励。
         if text_b and overlap <= 0.0:
-            total = min(total, 0.54)
-        if total >= 0.55:
+            total = min(total, pass_thresh - 0.01)
+        # 自适应三档 reward（值自成，不写死）：阈值由 autotune 按用户实时
+        # 负面反馈率慢速自调（负面反馈高 → 正奖励线抬升、差评线下移）。
+        if total >= pass_thresh:
             reward = 1.0
-        elif total < 0.30:
+        elif total < fail_thresh:
             reward = -1.0
         else:
             reward = 0.0
@@ -400,51 +561,183 @@ class Dolphin:
             del self.self_eval_log[: len(self.self_eval_log) - 2000]
         return reward
 
+    def _apply_semantic_saturation(self, data: bytes, surprise: float) -> float:
+        """语义饱和：长期+短期双尺度衰减因子（2026-10-17 用户定案）。
+
+        对同一数据（sha256 指纹）分别在**短期窗口**与**长期窗口**内计数重复，
+        返回两个线性衰减因子中的**较大者**：
+        - 短期（50 条内大量重复，如刷屏）：衰减 30%/次，下限 10% → 强抑制；
+        - 长期（2000 条内偶尔重复）：衰减 5%/次，下限 60% → 弱抑制。
+
+        取较大者：短期大量重复会被明显降权，但长期内偶尔重复不会把该内容
+        排斥到无法学习（避免"最近 200 条重复"式单窗口导致某些字被排斥、
+        语义识别错误）。原始惊讶值保持不变（带通中心/门控判决依赖真实值）。
+
+        单批重复占比 = 短期窗口内重复占比；超过阈值时短期衰减率增强（上限
+        0.5）并累计 saturation_events。
+        """
+        h = hashlib.sha256(bytes(data)).hexdigest()[:16]
+        # 短期计数（FIFO 滑动窗口）
+        n_short = self.satiation_counts_short.get(h, 0)
+        self.satiation_counts_short[h] = n_short + 1
+        self.satiation_order_short.append(h)
+        while len(self.satiation_order_short) > self.satiation_window_short:
+            old = self.satiation_order_short.popleft()
+            c = self.satiation_counts_short.get(old, 1)
+            if c <= 1:
+                del self.satiation_counts_short[old]
+            else:
+                self.satiation_counts_short[old] = c - 1
+        # 长期计数（FIFO 滑动窗口）
+        n_long = self.satiation_counts_long.get(h, 0)
+        self.satiation_counts_long[h] = n_long + 1
+        self.satiation_order_long.append(h)
+        while len(self.satiation_order_long) > self.satiation_window_long:
+            old = self.satiation_order_long.popleft()
+            c = self.satiation_counts_long.get(old, 1)
+            if c <= 1:
+                del self.satiation_counts_long[old]
+            else:
+                self.satiation_counts_long[old] = c - 1
+        # 批内重复占比（短期窗口观测 + 防护触发）
+        if self.satiation_order_short:
+            self.saturation_last_ratio = (
+                1.0 - len(set(self.satiation_order_short)) / len(self.satiation_order_short))
+        decay_short = self.satiation_decay_short
+        if self.saturation_last_ratio > self.saturation_threshold:
+            decay_short = min(0.5, decay_short * 1.5)
+            self.saturation_events += 1
+        factor_short = max(self.satiation_min_short, 1.0 - decay_short * n_short)
+        factor_long = max(self.satiation_min_long,
+                         1.0 - self.satiation_decay_long * n_long)
+        # 取较大者：短期强抑制、长期弱抑制，取宽松侧避免排斥字
+        return max(factor_short, factor_long)
+
     def learn(self, text: str, source="dataset"):
-        """部署期喂养：算惊讶度入缓冲，不生成回复（与 serve 相对）。
+        """部署期喂养：片段级金发姑娘门控（2026-10-17 改）——**屏蔽噪声片段，
+        保留有效内容**，而不是整条略过。
 
-        金发姑娘价值门控（律 L4）：惊讶度算出后、入缓冲前按相对能力基线
-        ability 的偏离 delta 做三态判决——
-          delta < -LO  → 太熟（已会）  → 跳过，不进缓冲（skipped_too_easy+1）
-          delta > +HI  → 太怪（学不会）→ 挂起，进记忆库冷层（suspended_too_hard+1）
-          其余          → 中间带        → 放行进缓冲
-        跳过/挂起的条目仍计 learn_total（部署侧经验流入口径不变，守护模式的
-        恢复检测不受门控影响），但不计 _since_sleep（未进入缓冲、不积累睡眠压力）。
+        原始律 L4 的"太熟跳过/太怪挂起"在**整条数据**粒度上判决，会把"大部分
+        正常、小部分噪声"的数据整条扔掉——不是真正的噪声屏蔽。本实现改为：
 
-        双线程约束：mean_nll 是部署计算，锁外做（部署永不排队等锁）；
-        只有缓冲交换持 feed_lock，与训练线程的快照/换班互斥。
-        learn_busy 供训练线程在动睡脑前等待在途读取清零——
-        刚换下的醒脑可能还有 learn 在读，梯度训练前必须等它读完。
+          1. 将输入按 block_size 无重叠切分为窗口；
+          2. 批量计算每窗口的惊讶度（mean_nll_batch）；
+          3. 对每窗口用金发姑娘带通三态判决：
+               delta < -LO  → 太熟窗口（已会）→ 屏蔽（计数 skipped_too_easy）
+               delta > +HI  → 太怪窗口（噪声/学不会）→ 屏蔽（计数 suspended_too_hard）
+               其余          → 有效窗口 → 保留
+          4. 所有保留窗口**拼接**后进入经验缓冲（有效内容正常学习）；
+             被屏蔽窗口字节数计入 noise_masked_bytes（观测）。
+
+        只有整条全部窗口都被屏蔽时才不进缓冲（等效旧"整条丢弃"）。窗口粒度
+        让模型学会"屏蔽噪声、保留正文"——这正是自学习应有的噪声免疫。
+
+        双线程约束不变：mean_nll 是部署计算，锁外做；只有缓冲交换持 feed_lock。
         """
         data = text.encode("utf-8") if isinstance(text, str) else bytes(text)
         self._busy_inc()
         try:
-            surprise = self.awake().model.mean_nll(data, self.device)
+            # 片段级惊讶度：无重叠切窗（尾部不足 2 字节的碎片丢弃，无法计算）
+            windows = self._split_windows(data, self.cfg.block_size)
+            if not windows:
+                with self.feed_lock:
+                    self.learn_total += 1  # G3：部署侧经验流入总量（守护恢复信号）
+                    return None
+            surprises = self.awake().model.mean_nll_batch(windows, self.device)
         finally:
             self._busy_dec()
         with self.feed_lock:
-            # 金发姑娘带通阈值由 autotune 慢速自调（律定域内值自成）。旧档/
-            # 测试没有 autotune 或该量时回落模块常量初值（goldilocks.py 默认参数）。
-            lo = self.goldilocks_lo
-            hi = self.goldilocks_hi
+            # 金发姑娘带通：基准阈值来自 autotune（律定域内值自成），再按
+            # 近期惊讶值分布的变异系数**动态制定**（2026-10-17 用户定案）。
+            base_lo = self.goldilocks_lo
+            base_hi = self.goldilocks_hi
             au = getattr(self, "autotune", None)
             if au is not None:
-                lo = au.get("goldilocks_lo", lo)
-                hi = au.get("goldilocks_hi", hi)
-            state, delta = goldilocks_gate(surprise, self.ability, lo=lo, hi=hi)
-            if state == "skip":
-                self.skipped_too_easy += 1
-                self.learn_total += 1  # G3：部署侧经验流入总量（守护模式的恢复信号）
-                return None
-            if state == "suspend":
-                self.memory.add_cold(data, surprise, self.cycle, kind="suspended")
-                self.suspended_too_hard += 1
+                base_lo = au.get("goldilocks_lo", base_lo)
+                base_hi = au.get("goldilocks_hi", base_hi)
+            self._surprise_hist.extend(float(s) for s in surprises)
+            del self._surprise_hist[:-256]
+            lo, hi = self._dynamic_band(base_lo, base_hi)
+            kept, kept_surp = [], []
+            masked = 0
+            skip_n = 0
+            suspend_n = 0
+            for w, s in zip(windows, surprises):
+                if len(w) < 2:
+                    # 无法计算有意义的惊讶值：直接保留（用户定案：不丢弃），
+                    # 惊讶值用能力线代替（中间带语义）。
+                    kept.append(w)
+                    kept_surp.append(s if s > 0 else self.ability)
+                    continue
+                state, _ = goldilocks_gate(s, self.ability, lo=lo, hi=hi)
+                if state == "skip":
+                    # 太熟窗口（已会）：跳过丢弃，不进缓冲也不进冷层
+                    skip_n += 1
+                    masked += len(w)
+                    continue
+                if state == "suspend":
+                    # 太怪窗口（噪声/学不会）：屏蔽出训练流，但进冷层留待能力
+                    # 增长后再碰（保留原"挂起"语义；噪声片段不再污染有效学习）。
+                    suspend_n += 1
+                    masked += len(w)
+                    self.memory.add_cold(w, s, self.cycle, kind="suspended")
+                    continue
+                kept.append(w)
+                kept_surp.append(s)
+            self.skipped_too_easy += skip_n
+            self.suspended_too_hard += suspend_n
+            self.noise_masked_bytes += masked
+            if not kept:
+                # 整条全部窗口都被屏蔽：仍计经验流入，但不进缓冲
                 self.learn_total += 1
                 return None
-            eid = self.buffer.add(data, surprise)
+            kept_data = b"".join(kept)
+            # 保留窗口的加权平均惊讶度（按字节数加权）作为该条经验入缓冲的
+            # surprise——带通中心/选拔分数对应的是实际入缓冲的内容，而非原始整条。
+            total_w = sum(len(w) for w in kept)
+            surprise = sum(len(w) * s for w, s in zip(kept, kept_surp)) / total_w
+            # 语义饱和：对实际入缓冲的保留数据计重复衰减（原始惊讶值保留口径不变）。
+            sat_factor = self._apply_semantic_saturation(kept_data, surprise)
+            eid = self.buffer.add(kept_data, surprise, sat_factor=sat_factor)
             self._since_sleep += 1
             self.learn_total += 1  # G3：部署侧经验流入总量（守护模式的恢复信号）
-        return eid
+            return eid
+
+    def _dynamic_band(self, base_lo, base_hi):
+        """金发姑娘带通**动态制定**（2026-10-17 用户定案）。
+
+        基于近期惊讶值分布的变异系数（CV）动态放宽/收窄带通：
+        - 数据分布越分散（CV 大）→ 带越宽（lo 更小、hi 更大），容纳正常波动；
+        - 数据越集中（CV 小）→ 带越窄（筛选更精确）。
+        结果被钳位在合理域：lo ∈ [0.01, 0.15]，hi ∈ [0.05, 0.60]。
+        """
+        hist = self._surprise_hist
+        if len(hist) < 8:
+            return base_lo, base_hi
+        mean = sum(hist) / len(hist)
+        if mean <= 1e-9:
+            return base_lo, base_hi
+        var = sum((x - mean) ** 2 for x in hist) / len(hist)
+        cv = max(0.0, min(1.0, (var ** 0.5) / mean))
+        lo = max(0.01, min(0.15, base_lo * (1.0 - cv * 0.5)))
+        hi = max(0.05, min(0.60, base_hi * (1.0 + cv)))
+        return lo, hi
+
+    @staticmethod
+    def _split_windows(data, chunk_size):
+        """自适应切分字节流（2026-10-17 用户定案：**即使无法切块也不丢弃**）。
+
+        - 空输入返回 []；
+        - 整条长度 ≤ chunk_size → 作为一块返回（哪怕只有 1 字节也不丢弃）；
+        - 否则按 chunk_size 无重叠切分，**尾部不足一块时也独立保留**（不再
+          并入前一块，避免块超过 chunk_size；1 字节窗口由 learn() 兜底保留），
+          保证没有任何数据被切分逻辑丢弃。
+        """
+        if not data:
+            return []
+        if len(data) <= chunk_size:
+            return [data]
+        return [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
 
     # ---------- 睡眠触发（值自成：压力阈值 + 间隔反馈） ----------
 
@@ -557,8 +850,10 @@ class Dolphin:
                 "lrs": [h.opt.param_groups[0]["lr"] for h in self.h],
                 "opt_states": [h.opt.state_dict() for h in self.h],  # 动量入档：--resume 非热重启
                 # G7 身份入档：v3 起 (eid, data, surprise, reward) 四元组——eid 随档
-                # 恢复，逐出+重启后 feedback 不会错挂（旧版 add 重建会平移 id）
-                "buffer": [(e.id, e.data, e.surprise, e.reward) for e in self.buffer.items],
+                # 恢复，逐出+重启后 feedback 不会错挂（旧版 add 重建会平移 id）。
+                # 2026-10-15 起增补 sat_factor 为第五元（语义饱和衰减因子随档透传）。
+                "buffer": [(e.id, e.data, e.surprise, e.reward, getattr(e, "sat_factor", 1.0))
+                           for e in self.buffer.items],
                 # 经验身份计数器透传（experience.py 本轮禁改，包内管理层透传 _next_id；
                 # M4 可将其正式化）。缺它则重启后新经验与幸存旧经验撞 id。
                 "next_id": self.buffer._next_id,
@@ -589,6 +884,7 @@ class Dolphin:
                 "hemi_pressure": list(self.hemi_pressure),
                 "debt": self.debt_ledger.to_state(),
                 "self_eval_log": list(self.self_eval_log),
+                "anomaly_log": list(self.anomaly_log),
                 # S5 蒸馏方向交替标志（2026-10-13）：feeding 生产路径连续周期
                 # 互为师生；随档透传，旧档缺省 False（兼容）。
                 "_teacher_flip": bool(self._teacher_flip),
@@ -615,6 +911,10 @@ class Dolphin:
                 "ability": self.ability,
                 "skipped_too_easy": self.skipped_too_easy,
                 "suspended_too_hard": self.suspended_too_hard,
+                # 片段级噪声屏蔽观测（2026-10-17）：累计被屏蔽噪声字节数随档透传。
+                "noise_masked_bytes": self.noise_masked_bytes,
+                # 语义饱和防护触发计数（2026-10-15）：观测用，随档透传。
+                "saturation_events": self.saturation_events,
             }
         # G7 原子写：先写同目录临时文件再 os.replace——任何瞬间断电，目标文件
         # 要么是旧版要么是新版，绝不出现写了一半的存档。
@@ -664,18 +964,30 @@ class Dolphin:
         for i, h in enumerate(self.h):
             morph = self.life_ctl.morphology.get(h.name) or {}
             k = int(morph.get("d_model_k", 1) or 1)
+            # 旧 MLP（fc/proj）存档 → DualMLP（rule/body/out）权重迁移（2026-10-19）。
+            sd = _migrate_mlp_state_dict(ck["states"][i])
             # shrink（born-again 学生体型）也走形态重建——否则学生脑 load 按基座
-            # cfg 重建 → state_dict 形状不匹配崩溃。
-            if k > 1 or morph.get("mlp") or morph.get("attn_v") or morph.get("shrink"):
+            # cfg 重建 → state_dict 形状不匹配崩溃。layers（深度生长史）同理。
+            if (k > 1 or morph.get("mlp") or morph.get("attn_v")
+                    or morph.get("shrink") or morph.get("layers")):
                 m, _ = apply_morphology(self.cfg, morph, self.device)
-                m.load_state_dict(ck["states"][i])
+                m.load_state_dict(sd)
             else:
                 m = ByteTransformer(self.cfg).to(self.device)
-                m.load_state_dict(ck["states"][i])
+                m.load_state_dict(sd)
             h.model = m
             h.opt = torch.optim.AdamW(m.parameters(), lr=lrs[i], weight_decay=0.01)
             if "opt_states" in ck:  # v2 存档：动量一并恢复，续喂不再是热重启
-                h.opt.load_state_dict(ck["opt_states"][i])
+                # DualMLP 架构升级（2026-10-19）：旧 MLP 的 Adam 参数组
+                # （fc/proj）与迁移后模型（rule/body/out，新增 body 通道）
+                # 不匹配，动量无法跨架构迁移——检测到旧格式存档则重置
+                # 优化器状态（权重已由 _migrate_mlp_state_dict 转换）。
+                legacy_mlp = any(".mlp.fc." in k for k in ck["states"][i])
+                if legacy_mlp:
+                    print("[load] 旧版 MLP 存档：优化器动量不跨架构迁移"
+                          "（新增 body 通道），Adam 状态重置。")
+                else:
+                    h.opt.load_state_dict(ck["opt_states"][i])
         self.awake_idx = ck["awake_idx"]
         self.budget = ck["budget"]
         self.buffer.sleep_threshold = ck["threshold"]
@@ -710,6 +1022,8 @@ class Dolphin:
         self.hemi_pressure = [float(x) for x in ck.get("hemi_pressure", [0.0, 0.0])]
         self.debt_ledger.from_state(ck.get("debt"))
         self.self_eval_log = list(ck.get("self_eval_log", []))
+        # 用户负面反馈事件日志（2026-10-15）：旧档无此字段 → 空列表（兼容升级）。
+        self.anomaly_log = list(ck.get("anomaly_log", []))
         # S5 蒸馏方向交替标志（2026-10-13）：随档恢复；旧档无此字段 → False。
         self._teacher_flip = bool(ck.get("_teacher_flip", False))
         # 学习停滞检测原料（2026-10-12）：旧档无此字段 → 空列表（兼容升级）。
@@ -719,19 +1033,26 @@ class Dolphin:
         self.ability = float(ck.get("ability", PRIOR_ABILITY))
         self.skipped_too_easy = int(ck.get("skipped_too_easy", 0))
         self.suspended_too_hard = int(ck.get("suspended_too_hard", 0))
+        self.noise_masked_bytes = int(ck.get("noise_masked_bytes", 0))
+        # 语义饱和防护触发计数（2026-10-15）：旧档无此字段 → 0（兼容升级）。
+        self.saturation_events = int(ck.get("saturation_events", 0))
         if "feed_cursor" in ck:  # G3：喂食游标透传恢复（语义归 feed.py 解释）
             self.feed_cursor = ck["feed_cursor"]
         if "buffer" in ck:  # v2 起经验缓冲随档恢复，换班季中断零丢失
             self.buffer.items = []
             self.buffer.bytes = 0
             for tup in ck["buffer"]:
-                if len(tup) == 4:  # v3：身份随档恢复（G7——eid 不平移，feedback 不错挂）
+                if len(tup) == 5:  # v3.1（2026-10-15）：含语义饱和衰减因子
+                    eid, data, sup, rw, satf = tup
+                elif len(tup) == 4:  # v3：身份随档恢复（G7——eid 不平移，feedback 不错挂）
                     eid, data, sup, rw = tup
+                    satf = 1.0
                 else:              # v2 兼容：id 现场重排
                     data, sup, rw = tup
                     eid = self.buffer._next_id
                     self.buffer._next_id += 1
-                e = Experience(eid, data, sup)
+                    satf = 1.0
+                e = Experience(eid, data, sup, sat_factor=float(satf))
                 e.reward = float(rw)
                 self.buffer.items.append(e)
                 self.buffer.bytes += len(e.data)

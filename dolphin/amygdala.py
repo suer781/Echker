@@ -25,6 +25,7 @@
 6. 不破坏既有测试：AMYGDALA_EVERY=20 慢环保证短测试（几周期）永不触发
    adjust，Dolphin 新增属性不影响任何断言。
 """
+import torch
 
 # 每多少个睡眠周期调整一次（慢环；测试周期数远小于此，永不触发）
 AMYGDALA_EVERY = 20
@@ -44,6 +45,45 @@ _TONE_GAIN = 1.0        # 相对偏离为 1（即 surprise=2×基线或 0）时�
 _SALIENCE_GAIN = 1.0    # 相对偏离幅度为 1 时显著性饱和到 1
 _TONE_EMA = 0.1         # 语气基线的 EMA 系数（慢漂移，防单条抖动）
 _SURPRISE_EPS = 1e-6    # 浮点守卫：基线为 0 时避免除零
+
+# 用户情绪感知（2026-10-17 用户定案：**语义理解判断，不靠关键词硬编码**）。
+# 主路径：用模型自身的语义表示（ByteTransformer.embed）把用户输入编码成向量，
+# 与"生气/开心/中性"三类情绪原型的语义向量做余弦相似度，相似度差即情绪得分——
+# 原型向量随模型成长而漂移，模型语义理解越深，判断越准。
+# 关键词表仅作为"模型不可用/向量无区分度"时的兜底回退（不抛错），不再主用。
+_NEG_WORDS = (
+    "生气", "愤怒", "混蛋", "垃圾", "差劲", "错误", "失败", "讨厌", "滚",
+    "笨", "蠢", "失望", "伤心", "难过", "哭", "烦", "恨", "气死", "没用",
+    "糟糕", "烂", "废物", "有病", "烦死", "恶心", "离谱",
+)
+_POS_WORDS = (
+    "谢谢", "感谢", "好", "棒", "厉害", "优秀", "喜欢", "开心", "哈哈",
+    "嘻嘻", "爱", "赞", "完美", "不错", "高兴", "满意", "太好了", "聪明",
+    "真棒", "厉害", "靠谱", "给力", "可爱", "真好", "太棒了",
+)
+_CONTEXT_WINDOW = 64  # 上下文统计窗口长度（最近 N 条交互）
+
+# 情绪语义原型种子文本（2026-10-17 用户定案）：不是关键词，而是**语义场景**。
+# 每个类别 3 句，用当前模型编码成原型向量（类内平均）；用户输入的语义向量与
+# 原型向量的余弦相似度决定情绪——随模型成长，原型向量不断漂移、越来越准。
+_SENTIMENT_PROTOTYPES = {
+    "angry": (
+        "你太让我生气了，这个回答完全错误！",
+        "我真失望，你根本没在听我说话！",
+        "你是个混蛋，我恨死你了！",
+    ),
+    "happy": (
+        "谢谢你的帮助，我太开心了！",
+        "你回答得太棒了，我非常满意！",
+        "哈哈你太厉害了，我真喜欢你！",
+    ),
+    "neutral": (
+        "今天天气怎么样？",
+        "帮我查一下明天的日程安排。",
+        "你觉得这个问题应该怎么看？",
+    ),
+}
+_PROTO_GAIN = 2.0  # 语义相似度差 → 情绪分的增益（相似度差 0.5 即饱和 ±1）
 
 
 def _clamp(v, lo, hi):
@@ -75,6 +115,14 @@ class Amygdala:
         self.last_adjust = {}          # 上次调整记录（报告/存档用）
         # surprise 滚动基线（None=尚未观测）。随档持久化保留，兼容旧档字段。
         self.surprise_ema = None
+        # 上下文统计窗口（2026-10-17 用户定案）：最近 _CONTEXT_WINDOW 条交互的
+        # 惊讶值与用户情绪得分，供 L2 上下文统计层调节。随档持久化。
+        self.recent_surprises = []
+        self.recent_sentiments = []
+        # 情绪原型向量缓存（2026-10-17 用户定案：语义理解判断）：
+        # {"model_id": id, "vecs": {"angry": tensor, "happy": tensor, "neutral": tensor}}
+        # 模型换班（id 变化）后自动重算——原型随模型成长漂移。
+        self._proto_cache = None
 
     # ---------- 威胁等级计算 ----------
 
@@ -163,6 +211,150 @@ class Amygdala:
         self.surprise_ema = surprise if self.surprise_ema is None \
             else (1 - 0.1) * self.surprise_ema + 0.1 * surprise
         return max(0.0, min(1.0, score))
+
+    def temperature_for_surprise(self, surprise, base=None):
+        """根据内容陌生程度动态微调生成温度（2026-10-17 用户定案）。
+
+        杏仁核不仅按慢环威胁等级调节，还**参考"惊讶值"（内容陌生程度）**
+        对单次回答做实时微调：
+        - 内容**陌生**（surprise 高于自身滚动基线）→ 警惕：温度调低，
+          输出更稳定、更保守、更可预测（陌生内容易出错，先求稳）；
+        - 内容**熟悉**（surprise 低于/接近基线）→ 放松：温度调高，
+          输出更多样、发散性更高（熟悉内容可放开创造）。
+
+        偏离越大调节越强，但单次偏移上限 ±0.2，并钳位在温度物理域
+        [0.4, 1.4]。基线 surprise_ema 随每次调用慢漂移（与 salience_score
+        同节奏 EMA，防单条抖动）。
+        """
+        base = base if base is not None else self.temperature
+        surprise = float(surprise)
+        ref = self.surprise_ema if self.surprise_ema is not None else surprise
+        # 更新基线（慢 EMA，与 salience_score 同节奏，防单条抖动）
+        self.surprise_ema = surprise if self.surprise_ema is None \
+            else (1 - 0.1) * self.surprise_ema + 0.1 * surprise
+        if ref <= _SURPRISE_EPS:
+            return base
+        rel = (surprise - ref) / ref            # 正=陌生，负=熟悉
+        delta = -max(-1.0, min(1.0, rel)) * 0.2  # 陌生→降温；熟悉→升温，饱和±0.2
+        return _clamp(base + delta, *_DOMAIN)
+
+    # ---------- 三层调节（2026-10-17 用户定案） ----------
+
+    def _get_prototypes(self, model, device):
+        """用当前模型编码情绪语义原型（懒计算 + 按模型对象缓存）。
+
+        模型换班（id 变化）后自动重算；原型向量是模型语义表示的类内平均，
+        随模型成长漂移——这就是"语义理解"：判断依据是模型对情绪场景的
+        内在表示，而不是任何关键词表。
+        """
+        if self._proto_cache is not None \
+                and self._proto_cache.get("model_id") == id(model):
+            return self._proto_cache["vecs"]
+        vecs = {}
+        for label, texts in _SENTIMENT_PROTOTYPES.items():
+            vs = [model.embed(t, device=device) for t in texts]
+            proto = torch.stack(vs).mean(dim=0)
+            n = proto.norm()
+            vecs[label] = proto / n if n > 1e-8 else proto
+        self._proto_cache = {"model_id": id(model), "vecs": vecs}
+        return vecs
+
+    def sentiment(self, text, model=None, device=None) -> float:
+        """用户情绪得分 [-1,1]：负=生气/负面，正=开心/正面，0=中性。
+
+        2026-10-17 用户定案：**语义理解判断，不靠关键词硬编码**——
+        用模型把用户输入编码成语义向量，与"生气/开心/中性"三类情绪原型的
+        向量做余弦相似度，`开心相似度 − 生气相似度` 即情绪分（增益饱和 ±1）。
+        原型向量由模型对语义场景文本的表示得到，随模型成长漂移。
+
+        兜底：model 为 None（测试/模型不可用）或语义向量无区分度时，回退到
+        轻量关键词统计，保证任何情况下都能给出有界情绪分、不抛错。
+        """
+        if model is not None:
+            try:
+                vecs = self._get_prototypes(model, device)
+                v = model.embed(text, device=device)
+                vn = v.norm()
+                if vn > 1e-8:
+                    v = v / vn
+                    sim_happy = float(v @ vecs["happy"])
+                    sim_angry = float(v @ vecs["angry"])
+                    sim_neutral = float(v @ vecs["neutral"])
+                    # 中性最接近 → 情绪接近 0；开心/生气相似度差 → ±1
+                    score = (sim_happy - sim_angry) * _PROTO_GAIN
+                    # 若三类原型几乎无区分（早期模型语义未分化），回退统计。
+                    spread = max(abs(sim_happy - sim_neutral),
+                                 abs(sim_angry - sim_neutral))
+                    if spread > 0.05:
+                        return max(-1.0, min(1.0, score))
+            except Exception:
+                pass  # 语义路径任何异常都回退统计兜底
+        # —— 兜底：轻量关键词统计（仅模型不可用/语义未分化时）——
+        if not text:
+            return 0.0
+        neg = sum(1 for w in _NEG_WORDS if w in text)
+        pos = sum(1 for w in _POS_WORDS if w in text)
+        exclaim = text.count("！") + text.count("!")
+        intense = min(1.0, exclaim / 3.0)
+        score = (pos - neg) / max(1, pos + neg + 1)
+        if neg > pos:
+            score -= intense * 0.3   # 生气 + 感叹 → 更负面（用户很愤怒）
+        elif pos > neg:
+            score += intense * 0.2   # 开心 + 感叹 → 更正面（用户很高兴）
+        return max(-1.0, min(1.0, score))
+
+    def temperature_for_sentiment(self, sentiment, base=None):
+        """L3 用户情绪感同身受：负面情绪 → 降温（模型"恐惧"，保守稳定）；
+        正面情绪 → 升温（模型"开心"，创造丰富）。偏移 ±0.2 饱和。"""
+        base = base if base is not None else self.temperature
+        delta = float(sentiment) * 0.2
+        return _clamp(base + delta, *_DOMAIN)
+
+    def temperature_for_context(self, base=None):
+        """L2 上下文窗口统计：最近 _CONTEXT_WINDOW 条交互的平均用户情绪与
+        平均惊讶值压力。
+
+        - 平均情绪负面 → 整体降温（用户最近不开心，模型谨慎）；
+        - 平均惊讶值持续偏高（用户输入一直陌生/复杂）→ 微降温（认知压力）。
+        偏移 ±0.1 饱和（上下文是慢变量，不应大幅抖动）。
+        """
+        base = base if base is not None else self.temperature
+        if not self.recent_sentiments:
+            return base
+        avg_sent = sum(self.recent_sentiments) / len(self.recent_sentiments)
+        delta = avg_sent * 0.1
+        if self.recent_surprises:
+            avg_surp = sum(self.recent_surprises) / len(self.recent_surprises)
+            ref = self.surprise_ema if self.surprise_ema else avg_surp
+            if ref > _SURPRISE_EPS:
+                rel = (avg_surp - ref) / ref
+                delta -= max(-0.1, min(0.1, rel)) * 0.1
+        return _clamp(base + delta, *_DOMAIN)
+
+    def record_interaction(self, surprise, sentiment):
+        """记录一次交互的惊讶值与用户情绪，供 L2 上下文统计使用。"""
+        self.recent_surprises.append(float(surprise))
+        del self.recent_surprises[:-_CONTEXT_WINDOW]
+        self.recent_sentiments.append(float(sentiment))
+        del self.recent_sentiments[:-_CONTEXT_WINDOW]
+
+    def temperature_for_user(self, text, surprise, base=None, model=None, device=None):
+        """三层综合调节（2026-10-17 用户定案）：
+
+        L1 实时惊讶值（陌生→降温/熟悉→升温，±0.2）
+        → L2 上下文窗口统计（最近交互情绪/压力，±0.1）
+        → L3 用户情绪感同身受（生气→恐惧降温/开心→升温，±0.2）。
+
+        情绪由**模型语义理解**给出（model.embed + 情绪原型相似度），不是关键词。
+        逐层叠加并钳位到温度物理域 [0.4, 1.4]；同时把本次交互记入上下文
+        统计窗口。
+        """
+        sent = self.sentiment(text, model=model, device=device)   # 语义情绪
+        t = self.temperature_for_surprise(surprise, base=base)  # L1
+        t = self.temperature_for_context(base=t)                # L2
+        t = self.temperature_for_sentiment(sent, base=t)        # L3
+        self.record_interaction(surprise, sent)
+        return t
 
     # ---------- 慢速调整（每 AMYGDALA_EVERY 周期一次） ----------
 
@@ -255,6 +447,8 @@ class Amygdala:
             "last_adjust_cycle": self.last_adjust_cycle,
             "last_adjust": self.last_adjust,
             "surprise_ema": self.surprise_ema,
+            "recent_surprises": list(self.recent_surprises),
+            "recent_sentiments": list(self.recent_sentiments),
         }
 
     def from_state(self, st):
@@ -274,4 +468,7 @@ class Amygdala:
         # surprise 滚动基线（2026-10-13）：旧档无此字段 → None（保持初值）。
         sema = st.get("surprise_ema")
         self.surprise_ema = float(sema) if sema is not None else None
+        # 上下文统计窗口（2026-10-17）：旧档无此字段 → 空列表（兼容升级）。
+        self.recent_surprises = [float(x) for x in st.get("recent_surprises", [])]
+        self.recent_sentiments = [float(x) for x in st.get("recent_sentiments", [])]
         return self

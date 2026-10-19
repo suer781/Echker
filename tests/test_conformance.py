@@ -1965,7 +1965,7 @@ def t_m4_widen_exact():
     # 实验定标，见 surgery.py 模块 docstring）。新单元走旁路：零输出权重掩蔽
     # （精确 +0），对称破缺噪声藏在掩蔽后面就位。
     check("M4-B 轴① 移植体就位（老 GEMM 原封+旁路新单元+零输出掩蔽+破缺噪声）",
-          m.blocks[0].mlp.fc.out_features == 4 * 64
+          m.blocks[0].mlp.rule.out_features == 4 * 64
           and m.blocks[0].mlp.bypass_width() == 16
           and float(m.blocks[0].mlp.proj_new_ws[0].abs().sum()) == 0.0
           and float(m.blocks[0].mlp.bypass_fcs[0].weight.abs().sum()) > 0.0)
@@ -2014,7 +2014,7 @@ def t_m4_widen_exact():
           f"相对误差={rel:.2e}（浮点 K 维物理极限，逐位不可达——见 surgery.py docstring）")
     check("M4-B 轴③ 形态倍增与 eps 同步（LN eps/k 是 LN(平铺)=平铺(LN) 的前提）",
           m3.cfg.d_model == 128
-          and m3.blocks[0].mlp.fc.out_features == 512
+          and m3.blocks[0].mlp.rule.out_features == 512
           and abs(m3.blocks[0].ln1.eps - m2.blocks[0].ln1.eps / 2) < 1e-12)
     # 轴③对称破缺：副本行加噪后输出改变（不加则梯度逐位相同永不分化）
     with torch.no_grad():
@@ -2176,23 +2176,23 @@ def t_m4_redo_recycle():
         ctl = d.life_ctl
         h = d.sleeping()
         v = ctl.vitals_for(d, h.name)
-        C = h.model.blocks[0].mlp.fc.out_features
+        C = h.model.blocks[0].mlp.rule.out_features
         led = SiteLedger("b0.mlp_hidden", C)
         for c in (0, 1, 2):  # 伪造连续 2 周期 bottom-5% 的休眠通道
             led.dorm_cycles[c] = 2
             led.stable_act[c] = 0.0
         v.sites["b0.mlp_hidden"] = led
-        before_fc = h.model.blocks[0].mlp.fc.weight[0].clone()
-        before_proj = h.model.blocks[0].mlp.proj.weight[:, 0].clone()
+        before_fc = h.model.blocks[0].mlp.rule.weight[0].clone()
+        before_proj = h.model.blocks[0].mlp.out.weight[:, 0].clone()
         # 单元级：直接调回收（权重断言与训练解耦）
         res = ctl._redo(d, h, v)
         picked = res["recycled"].get("b0.mlp_hidden", [])
         check("M4-F 确认休眠通道进入回收名单", 0 in picked and len(picked) == 1,
               f"picked={picked}（单周期上限 REDO_MAX_FRAC）")
         check("M4-F 输入行被重随机（不再是原权重）",
-              not torch.equal(before_fc, h.model.blocks[0].mlp.fc.weight[0]))
+              not torch.equal(before_fc, h.model.blocks[0].mlp.rule.weight[0]))
         check("M4-F 输出列清零（ReDo 重生单元从零贡献起步）",
-              float(h.model.blocks[0].mlp.proj.weight[:, 0].abs().sum()) == 0.0
+              float(h.model.blocks[0].mlp.out.weight[:, 0].abs().sum()) == 0.0
               and float(before_proj.abs().sum()) > 0)
         led2 = v.sites["b0.mlp_hidden"]
         check("M4-F 账本重置 + probation 生效",
@@ -2211,7 +2211,7 @@ def t_m4_redo_recycle():
         for i in range(10):
             d2.learn(f"回收集成验证记录第{i}条，内容足够长。{i}" * 6, source="test")
         v2 = d2.life_ctl.vitals_for(d2, d2.sleeping().name)
-        led3 = SiteLedger("b1.mlp_hidden", d2.sleeping().model.blocks[1].mlp.fc.out_features)
+        led3 = SiteLedger("b1.mlp_hidden", d2.sleeping().model.blocks[1].mlp.rule.out_features)
         led3.dorm_cycles[5] = 2
         led3.stable_act[5] = 0.0
         v2.sites["b1.mlp_hidden"] = led3
@@ -2302,7 +2302,7 @@ def t_m4_state_machine():
         check("M4-H GROW 验收失败 → 回滚指令",
               ctl.post_exam(d, rep, False) == "rollback" and ctl.state == STATE_NORMAL)
         check("M4-H 回滚后形态还原（移植体消失）",
-              h.model.blocks[0].mlp.fc.out_features == 4 * 64
+              h.model.blocks[0].mlp.rule.out_features == 4 * 64
               and not hasattr(h.model.blocks[0].mlp, "bypass_fcs"))
         check("M4-H 回滚后与醒脑同源（M0 回滚语义）",
               all(torch.equal(pa, pb) for pa, pb in
@@ -2391,7 +2391,7 @@ def t_m4_state_machine():
         d.life_ctl = ctl3
         ctl3.plateau = life_mod.PLATEAU_CYCLES * 3
         from dolphin.vitals import SiteLedger
-        C = d.sleeping().model.blocks[0].mlp.fc.out_features
+        C = d.sleeping().model.blocks[0].mlp.rule.out_features
         led = SiteLedger("b0.mlp_hidden", C)
         for c in range(int(0.3 * C)):
             led.dorm_cycles[c] = 2
@@ -3066,9 +3066,13 @@ def t_stall_grow():
         ctl.last_stall_grow_cycle = None
 
         # ===== 场景 5：正常场景 → 返回 grow 计划 =====
+        # 2026-10-17 用户定案：加层与横向生长齐平轮转。本场景专验宽度生长
+        # 契约（既有断言不降），故显式关闭深度生长，让 _plan_stall_grow 稳定
+        # 走宽度轴路径；深度生长轮转由 t_m4_grow_depth 系列覆盖。
         d.cycle += 1
         ctl.grown_since_surgery = 0
         ctl.fresh_since_surgery = 10 ** 7
+        ctl.depth_grow_enabled = False
         out = ctl._plan_stall_grow(d, rep, v, b"")
         check("STALL 学不动 → 强制生长计划（kind=grow，state=GROW_PLAN）",
               out.get("kind") == "grow"

@@ -25,24 +25,30 @@ def _sentences(text):
     return out
 
 
-def varied_replay(data: bytes, rng: random.Random, donor=None) -> bytes:
+def varied_replay(data: bytes, rng: random.Random, donor=None, intensity=1.0) -> bytes:
     """律 L6：重放 = 改写。
 
     换序、跨经验拼接、字符 dropout。逐字复读会导致语义饱和（仅保留表面字符
     而丢失语义），改写才能提取核心信息。
+
+    intensity（2026-10-17 用户定案：做梦时杏仁核高温驱动"天马行空"）：
+    变异强度乘子，默认 1.0（既有行为）。>1 时换序/跨经验/字符替换概率按
+    min(上限, 基率×intensity) 提高——做梦（rem）时杏仁核因内容全是熟悉的
+    而升温，变异更激进，产生天马行空的梦境。
     """
     text = data.decode("utf-8", errors="replace")
     sents = _sentences(text)
-    if len(sents) >= 2 and rng.random() < 0.7:
+    if len(sents) >= 2 and rng.random() < min(0.95, 0.7 * intensity):
         rng.shuffle(sents)
-    if donor and rng.random() < 0.35:
+    if donor and rng.random() < min(0.80, 0.35 * intensity):
         ds = _sentences(donor.decode("utf-8", errors="replace"))
         if ds:
             sents.insert(rng.randrange(len(sents) + 1), rng.choice(ds))
     body = "".join(sents)
     # L6 第四算子"遮盖重填"：字符池=原文+供体（跨经验取材；不从模型自生成内容取材，L5 安全）
     pool = body + (donor.decode("utf-8", errors="replace") if donor else "")
-    chars = [rng.choice(pool) if (ch != "\n" and rng.random() < 0.02) else ch for ch in body]
+    drop_p = min(0.10, 0.02 * intensity)
+    chars = [rng.choice(pool) if (ch != "\n" and rng.random() < drop_p) else ch for ch in body]
     return "".join(chars).encode("utf-8", errors="replace")
 
 

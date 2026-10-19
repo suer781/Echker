@@ -42,11 +42,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .model import ByteTransformer, Config
+from .model import Block, ByteTransformer, Config
 
 INIT_STD = 0.02          # 【律定承袭】model._init 的出生初始化 std，对称破缺噪声同尺度
 MEM_BUDGET = int(1.9 * 2 ** 30)   # 【律定】GTX1060 3GB 训练足迹上限（交接文档 §2）
 MEM_MARGIN = int(256 * 2 ** 20)   # 【值自成】激活+碎片裕量
+CONCENTRATE_MAX_LAYERS = 16       # 【值自成】浓缩精华层数上限（缩浅层增深度的安全帽）
 WIDEN_AXIS_PRIORITY = ("mlp", "attn_v", "d_model")  # 【律定承袭规格 B】按序优先
 
 
@@ -55,39 +56,49 @@ WIDEN_AXIS_PRIORITY = ("mlp", "attn_v", "d_model")  # 【律定承袭规格 B】
 # ============================================================================
 
 class WidenedMLP(nn.Module):
-    """轴①：MLP 隐层宽化移植体。
+    """轴①：MLP 隐层宽化移植体（DualMLP 版，2026-10-19 用户定案）。
 
-    老路径 proj(gelu(fc(x))) 与原实现同形同序（逐位）；每个旁路 = 新隐层单元组
-    （fc 新行带对称破缺噪声 + 零输出权重列）。重复宽化时旁路表合并（老旁路
-    原样保留，老路径 GEMM 形状依旧不变）。
+    老路径 out(gelu(rule(x)) * tanh(body(x))) 与原实现同形同序（逐位）；每个
+    旁路 = 新隐层单元组（rule 新行 + body 新行，均带对称破缺噪声 + 零输出权重
+    列）。重复宽化时旁路表合并（老旁路原样保留，老路径 GEMM 形状依旧不变）。
     """
 
     def __init__(self, old, m, gen=None, noise_std=INIT_STD):
         super().__init__()
-        C = old.fc.in_features
-        self.fc = old.fc       # 原封：老路径逐位的根基
-        self.proj = old.proj   # 原封
+        C = old.rule.in_features
+        self.rule = old.rule     # 原封：老路径逐位的根基
+        self.body = old.body     # 原封
+        self.out = old.out       # 原封
         bypass = list(getattr(old, "bypass_fcs", []) or [])
+        bbody = list(getattr(old, "bypass_bodies", []) or [])
         pws = list(getattr(old, "proj_new_ws", []) or [])
         if m > 0:
-            lin = nn.Linear(C, m)
+            lin = nn.Linear(C, m)     # 旁路 rule 分支
+            linb = nn.Linear(C, m)    # 旁路 body 分支
             with torch.no_grad():
                 if gen is not None:
                     lin.weight.copy_(torch.randn(m, C, generator=gen) * noise_std)
+                    linb.weight.copy_(torch.randn(m, C, generator=gen) * noise_std)
                 else:  # 形态重放路径：数值将被 load_state_dict 覆盖
                     lin.weight.normal_(0.0, noise_std)
+                    linb.weight.normal_(0.0, noise_std)
                 lin.bias.zero_()
+                linb.bias.zero_()
             bypass.append(lin)
-            pws.append(nn.Parameter(torch.zeros(self.proj.out_features, m)))
+            bbody.append(linb)
+            pws.append(nn.Parameter(torch.zeros(self.out.out_features, m)))
         self.bypass_fcs = nn.ModuleList(bypass)
+        self.bypass_bodies = nn.ModuleList(bbody)
         self.proj_new_ws = nn.ParameterList(pws)
 
     def forward(self, x):
-        y = self.proj(F.gelu(self.fc(x)))  # 老路径：与 model.MLP 同形同序
-        for lin, w in zip(self.bypass_fcs, self.proj_new_ws):
+        # 老路径：与 model.DualMLP 同形同序
+        y = self.out(F.gelu(self.rule(x)) * torch.tanh(self.body(x)))
+        for lin, linb, w in zip(self.bypass_fcs, self.bypass_bodies,
+                               self.proj_new_ws):
             # w 零初始化 → 该项为精确 +0（IEEE754：有限值 + 0.0 逐位不变）；
             # 训练后 w 离开零点，新单元开始参与（对称破缺噪声已备好方向）。
-            y = y + F.linear(F.gelu(lin(x)), w)
+            y = y + F.linear(F.gelu(lin(x)) * torch.tanh(linb(x)), w)
         return y
 
     def bypass_width(self):
@@ -211,7 +222,7 @@ def ghost_probe(model, layer, data, site=None, n_ghosts=8, seed=0, device=None):
 
     if site in (None, "mlp_hidden"):
         box = {}
-        h1 = blk.mlp.fc.register_forward_hook(lambda m, i, o: box.__setitem__("x", i[0]))
+        h1 = blk.mlp.rule.register_forward_hook(lambda m, i, o: box.__setitem__("x", i[0]))
         h2 = blk.mlp.register_full_backward_hook(
             lambda m, gi, go: box.__setitem__("g", go[0]))
         loss = _ce_backward(model, data, device)
@@ -221,7 +232,9 @@ def ghost_probe(model, layer, data, site=None, n_ghosts=8, seed=0, device=None):
         gains = []
         for _ in range(n_ghosts):
             u = torch.randn(x.shape[1], generator=gen, device=device) * INIT_STD
-            h_ghost = F.gelu(x @ u)                       # (T,)
+            v = torch.randn(x.shape[1], generator=gen, device=device) * INIT_STD
+            # 幽灵单元 = 双通道（树突方向 u × 胞体方向 v）非线性整合
+            h_ghost = F.gelu(x @ u) * torch.tanh(x @ v)          # (T,)
             G = torch.einsum("tc,t->c", g, h_ghost)       # 幽灵输出列的梯度
             gains.append(float(G.norm() / max(1, T)))
         out["mlp_hidden"] = sum(gains) / len(gains)
@@ -285,8 +298,8 @@ def widen_mlp(model, layer, delta, seed=0, noise_std=INIT_STD):
     """轴①：MLP 隐层 +delta 单元（精确函数保持，逐位）。"""
     gen = torch.Generator().manual_seed(int(seed))
     blk = model.blocks[layer]
-    dev = blk.mlp.fc.weight.device  # 新模块必须跟上模型所在设备（CUDA 上新建
-    before = blk.mlp.fc.out_features  # 的 nn.Linear 默认 CPU——不同步会导致设备不一致）
+    dev = blk.mlp.rule.weight.device  # 新模块必须跟上模型所在设备（CUDA 上新建
+    before = blk.mlp.rule.out_features  # 的 nn.Linear 默认 CPU——不同步会导致设备不一致）
     blk.mlp = WidenedMLP(blk.mlp, int(delta), gen, noise_std).to(dev)
     return {"axis": "mlp", "layer": layer, "delta": int(delta),
             "hidden": f"{before} -> {before + int(delta)}"}
@@ -341,10 +354,28 @@ def tile_state_dict(sd, k):
             _ri(qb, k, 0, t_qk), _ri(kb, k, 0, t_qk), _ri(vb, k, 0, t_r)], 0)
         o[p + "attn.proj.weight"] = _ri(_ri(sd[p + "attn.proj.weight"], k, 0), k, 1, 1.0 / k)
         o[p + "attn.proj.bias"] = _ri(sd[p + "attn.proj.bias"], k, 0, t_r)
-        o[p + "mlp.fc.weight"] = _ri(_ri(sd[p + "mlp.fc.weight"], k, 0), k, 1, t_r)
-        o[p + "mlp.fc.bias"] = sd[p + "mlp.fc.bias"].repeat_interleave(k, 0)
-        o[p + "mlp.proj.weight"] = _ri(_ri(sd[p + "mlp.proj.weight"], k, 0), k, 1, t_r / k)
-        o[p + "mlp.proj.bias"] = _ri(sd[p + "mlp.proj.bias"], k, 0, t_r)
+        # DualMLP（2026-10-19）：rule/body 双通道 + out 整合。旧存档（fc/proj）
+        # 键名自动兼容——平铺后统一输出新键（新模型是 DualMLP）。旧键路径：
+        # fc 同时作为 rule/body 的平铺源（迁移近似）；新键路径：rule/body/out
+        # 各自独立平铺（body 是独立参数，绝不可复用 rule 的源——否则新模型
+        # 平铺后 body 分支错误，轴③自检失败）。
+        _fc = p + "mlp.fc.weight"
+        if _fc in sd:
+            _fcb = _fc.replace(".weight", ".bias")
+            o[p + "mlp.rule.weight"] = _ri(_ri(sd[_fc], k, 0), k, 1, t_r)
+            o[p + "mlp.rule.bias"] = sd[_fcb].repeat_interleave(k, 0)
+            o[p + "mlp.body.weight"] = _ri(_ri(sd[_fc], k, 0), k, 1, t_r)
+            o[p + "mlp.body.bias"] = sd[_fcb].repeat_interleave(k, 0)
+            _pj = p + "mlp.proj.weight"
+        else:
+            o[p + "mlp.rule.weight"] = _ri(_ri(sd[p + "mlp.rule.weight"], k, 0), k, 1, t_r)
+            o[p + "mlp.rule.bias"] = sd[p + "mlp.rule.bias"].repeat_interleave(k, 0)
+            o[p + "mlp.body.weight"] = _ri(_ri(sd[p + "mlp.body.weight"], k, 0), k, 1, t_r)
+            o[p + "mlp.body.bias"] = sd[p + "mlp.body.bias"].repeat_interleave(k, 0)
+            _pj = p + "mlp.out.weight"
+        _pjb = _pj.replace(".weight", ".bias")
+        o[p + "mlp.out.weight"] = _ri(_ri(sd[_pj], k, 0), k, 1, t_r / k)
+        o[p + "mlp.out.bias"] = _ri(sd[_pjb], k, 0, t_r)
     o["ln_f.weight"] = _ri(sd["ln_f.weight"], k, 0, t_r)
     o["ln_f.bias"] = _ri(sd["ln_f.bias"], k, 0, t_r)
     o["head.weight"] = o["wte.weight"]  # 绑定头随 wte 平铺（k·t_r²=1 保证 logits 不变）
@@ -402,7 +433,7 @@ def widen_d_model(model, k, device=None, verify=True):
 
 
 def break_symmetry_dmodel(model, k, seed=0, noise_std=INIT_STD):
-    """轴③对称破缺（训练恢复前单独调用）：对每块 attn.proj / mlp.proj 的副本行
+    """轴③对称破缺（训练恢复前单独调用）：对每块 attn.proj / mlp.out 的副本行
     （通道 c 的第 j≥1 份）加 N(0, noise_std)。
 
     副本是活的（直接参与输出），此调用起输出改变——这正是噪声的目的：不加噪声
@@ -411,8 +442,10 @@ def break_symmetry_dmodel(model, k, seed=0, noise_std=INIT_STD):
     gen = torch.Generator().manual_seed(int(seed))
     with torch.no_grad():
         for blk in model.blocks:
-            for w_name in ("attn.proj.weight", "mlp.proj.weight"):
-                w = dict(blk.named_parameters())[w_name]
+            names = dict(blk.named_parameters())
+            mlp_w = "mlp.out.weight" if "mlp.out.weight" in names else "mlp.proj.weight"
+            for w_name in ("attn.proj.weight", mlp_w):
+                w = names[w_name]
                 C_out = w.shape[0]
                 for c in range(C_out // k):
                     for j in range(1, k):
@@ -420,6 +453,68 @@ def break_symmetry_dmodel(model, k, seed=0, noise_std=INIT_STD):
                             torch.randn(w.shape[1], generator=gen,
                                         device=w.device) * noise_std)
     return {"axis": "d_model", "broken": True}
+
+
+# ============================================================================
+# 深度轴（层数增长）：恒等映射插入新层（精确函数保持）
+# ============================================================================
+
+def grow_layer(model, at=None, seed=0, noise_std=INIT_STD):
+    """深度轴：插入一个新的 Transformer 层（精确函数保持，逐位）。
+
+    新 Block 以**恒等映射**初始化：
+      - ln1/ln2：恒等（weight=1, bias=0）——LayerNorm(恒等输入)=输入；
+      - attn.qkv / mlp.rule / mlp.body：对称破缺小噪声（训练后快速分化，规格 B）；
+      - attn.proj / mlp.out：**零初始化**——残差分支输出恒为 0。
+
+    由 Block 的残差结构 `x = x + attn(ln1(x))`、`x = x + mlp(ln2(x))` 可知：
+    新 Block 对任意输入输出恒等于输入（恒等映射）。因此插入后模型对任意
+    输入的 logits **逐位不变**（IEEE754 精确：y + 0.0 = y）——与轴①②的
+    零输出权重掩蔽同型。训练恢复后 proj 权重离开零点，新层开始学习。
+
+    形态持久化：life 控制器在 morph["layers"] 中追加插入位置 `at`；
+    apply_morphology 重建时按 `n0 + len(layers)` 恢复最终层数（插入后
+    blocks 即顺序编号，state_dict 键自然对齐，无需逐层重放）。
+    """
+    cfg = model.cfg
+    dev = next(model.parameters()).device
+    blk = Block(cfg).to(dev)
+    gen = torch.Generator(device=dev).manual_seed(int(seed))
+    with torch.no_grad():
+        # 恒等 LayerNorm
+        nn.init.ones_(blk.ln1.weight)
+        nn.init.zeros_(blk.ln1.bias)
+        nn.init.ones_(blk.ln2.weight)
+        nn.init.zeros_(blk.ln2.bias)
+        # 对称破缺噪声（qkv / fc 新行）
+        blk.attn.qkv.weight.copy_(
+            torch.randn(blk.attn.qkv.weight.shape, generator=gen, device=dev) * noise_std)
+        nn.init.zeros_(blk.attn.qkv.bias)
+        blk.mlp.rule.weight.copy_(
+            torch.randn(blk.mlp.rule.weight.shape, generator=gen, device=dev) * noise_std)
+        nn.init.zeros_(blk.mlp.rule.bias)
+        blk.mlp.body.weight.copy_(
+            torch.randn(blk.mlp.body.weight.shape, generator=gen, device=dev) * noise_std)
+        nn.init.zeros_(blk.mlp.body.bias)
+        # 残差零输出（精确函数保持的根基）
+        nn.init.zeros_(blk.attn.proj.weight)
+        nn.init.zeros_(blk.attn.proj.bias)
+        nn.init.zeros_(blk.mlp.out.weight)
+        nn.init.zeros_(blk.mlp.out.bias)
+    before = len(model.blocks)
+    if at is None:
+        at = before
+    if not 0 <= at <= before:
+        raise ValueError(f"插入位置 {at} 越界（blocks 长度 {before}）")
+    model.blocks.insert(at, blk)
+    # 更新 model.cfg 为**新对象**（n_layers+1）。不得原地改 cfg 字段——外部
+    # 调用方可能持有同一 Config 引用（如测试/形态重建的 base_cfg），原地修改
+    # 会使 apply_morphology 的基座层数漂移（n0 被污染 → 重建层数错误）。
+    model.cfg = Config(d_model=cfg.d_model, n_layers=cfg.n_layers + 1,
+                       n_heads=cfg.n_heads, block_size=cfg.block_size,
+                       dropout=cfg.dropout, vocab=cfg.vocab)
+    return {"axis": "depth", "at": int(at), "delta": 1,
+            "n_layers": f"{before} -> {before + 1}"}
 
 
 def widen(model, layer, delta, axis="auto", vitals_snap=None, seed=0, device=None):
@@ -453,25 +548,36 @@ def widen(model, layer, delta, axis="auto", vitals_snap=None, seed=0, device=Non
 # 收缩与 born-again
 # ============================================================================
 
-def shrink_config(cfg, vitals=None, target=0.7):
+def shrink_config(cfg, vitals=None, target=0.7, concentrate=False):
     """born-again 学生的缩小配置（规格 B）。
 
     - n_heads 整除保持：d_model' = n_heads × max(1, round(head_dim·target))；
-    - 深度按账本逐层平均 stable-Taylor 重要性排序，保留最重要的
-      round(n_layers·target) 层（学生从头初始化，层数=保留数；重要性排序决定
-      收缩幅度并向记录交代"丢弃了哪些层"）；
+    - 默认（concentrate=False）：深度按账本逐层平均 stable-Taylor 重要性排序，
+      保留最重要的 round(n_layers·target) 层（学生从头初始化，层数=保留数；
+      重要性排序决定收缩幅度并向记录交代"丢弃了哪些层"）；
+    - 浓缩精华（2026-10-17 用户定案，concentrate=True）：缩减时**缩浅层增深度**
+      ——宽度按 target 缩小，层数反增至 round(n_layers/target)（不丢层），
+      总参数量仍 ≈ 原参数 × target，但模型更窄更深：推理算力随宽度平方下降，
+      表达深度反而提升。层数钳位到 CONCENTRATE_MAX_LAYERS 防失控。
     - vitals 缺席时按均匀重要性处理。
     返回 (new_cfg, info)。
     """
     target = float(target)
-    if not 0.1 <= target <= 0.95:
-        raise ValueError(f"shrink target={target} 出域 [0.1, 0.95]")
+    # 2026-10-17 用户定案：下限放宽到 0.03（参数自适应动态档 15%~3% 需要）。
+    if not 0.03 <= target <= 0.95:
+        raise ValueError(f"shrink target={target} 出域 [0.03, 0.95]")
     head_dim = max(1, cfg.d_model // cfg.n_heads)
     d_new = cfg.n_heads * max(1, int(round(head_dim * target)))
-    n_new = max(1, int(round(cfg.n_layers * target)))
+    if concentrate:
+        # 浓缩精华：宽度缩 target，深度增 1/target，总参数 ≈ 原参数 × target。
+        n_new = max(cfg.n_layers,
+                    min(CONCENTRATE_MAX_LAYERS,
+                        int(round(cfg.n_layers / target))))
+    else:
+        n_new = max(1, int(round(cfg.n_layers * target)))
     kept = list(range(cfg.n_layers))
     dropped = []
-    if vitals is not None and vitals.er:
+    if not concentrate and vitals is not None and vitals.er:
         # 逐层重要性 = 平均 stable-Taylor 份额（有效秩作次序参考：ER 低=谱更收敛）
         imp = {}
         for li in range(cfg.n_layers):
@@ -482,7 +588,7 @@ def shrink_config(cfg, vitals=None, target=0.7):
         ranked = sorted(range(cfg.n_layers), key=lambda li: imp[li])  # 最不重要在前
         dropped = sorted(ranked[: cfg.n_layers - n_new])
         kept = [li for li in range(cfg.n_layers) if li not in set(dropped)]
-    elif n_new < cfg.n_layers:
+    elif not concentrate and n_new < cfg.n_layers:
         # 无账本：去尾（确定性），info 如实交代"丢弃了哪些层"——否则 kept/dropped
         # 与实际 n_layers 自相矛盾（记录不一致比不记录更糟）
         dropped = list(range(cfg.n_layers - n_new, cfg.n_layers))
@@ -491,18 +597,19 @@ def shrink_config(cfg, vitals=None, target=0.7):
                      block_size=cfg.block_size, dropout=cfg.dropout, vocab=cfg.vocab)
     info = {"d_model": f"{cfg.d_model}->{d_new}", "n_layers": f"{cfg.n_layers}->{n_new}",
             "dropped_layers": dropped, "kept_layers": kept,
-            "target": target, "n_heads_divisible": d_new % cfg.n_heads == 0}
+            "target": target, "n_heads_divisible": d_new % cfg.n_heads == 0,
+            "concentrate": bool(concentrate)}
     return new_cfg, info
 
 
-def born_again_student(cfg, vitals, target, device, seed=0):
+def born_again_student(cfg, vitals, target, device, seed=0, concentrate=False):
     """born-again 学生：shrink_config 的从头初始化（规格 B）。
 
     返回 (student_model, student_opt, info)。训练由 life.run_cycle 的 WITHERING
     战役承担（kd_alpha 提到 0.75，仅限手术验收周期；训练数据=记忆库 dream+复活+
     缓冲真实回放，L5 锚定）。
     """
-    s_cfg, info = shrink_config(cfg, vitals, target)
+    s_cfg, info = shrink_config(cfg, vitals, target, concentrate=concentrate)
     torch.manual_seed(int(seed))  # 学生初始化种子（从头初始化，与教师无关）
     student = ByteTransformer(s_cfg).to(device)
     opt = torch.optim.AdamW(student.parameters(), lr=5e-5, weight_decay=0.01)
@@ -538,8 +645,8 @@ def rebuild_optimizer(old_model, old_opt, new_model, lr):
 # ============================================================================
 
 def delta_params_mlp(C, delta):
-    """轴①新增参数量：fc (delta×C 权重 + delta 偏置) + 旁路输出列 (C×delta)。"""
-    return delta * C + delta + C * delta
+    """Axis-1 new params (DualMLP): rule/body rows (2*(delta*C+delta)) + out col (C*delta)."""
+    return 2 * (delta * C + delta) + C * delta
 
 
 def delta_params_attn_v(C, delta):
@@ -552,9 +659,10 @@ def delta_params_dmodel(cfg, k):
     嵌入/头占大头）。"""
     per_layer = (4 * cfg.d_model * cfg.d_model      # qkv
                  + cfg.d_model * cfg.d_model        # attn proj
-                 + 4 * cfg.d_model * cfg.d_model    # mlp fc
-                 + 4 * cfg.d_model * cfg.d_model    # mlp proj
-                 + 2 * cfg.d_model)                 # 两个 LN
+                 + 4 * cfg.d_model * cfg.d_model    # mlp rule
+                 + 4 * cfg.d_model * cfg.d_model    # mlp body
+                 + 4 * cfg.d_model * cfg.d_model    # mlp out
+                 + 2 * cfg.d_model)                 # two LNs
     base = cfg.vocab * cfg.d_model + cfg.block_size * cfg.d_model
     total1 = base + cfg.n_layers * per_layer
     totalk = base * k + cfg.n_layers * per_layer * k * k
@@ -576,7 +684,7 @@ def mem_budget_ok(device, delta_params, reserved=None):
 
 
 def empty_morphology():
-    return {"d_model_k": 1, "mlp": {}, "attn_v": {}}
+    return {"d_model_k": 1, "mlp": {}, "attn_v": {}, "layers": []}
 
 
 def morphology_of(model):
@@ -603,9 +711,12 @@ def apply_morphology(base_cfg, morph, device):
     morph = morph or empty_morphology()
     k = int(morph.get("d_model_k", 1) or 1)
     shrink = morph.get("shrink") or {}
+    # 深度生长史：morph["layers"] 记录历次插入位置（有序列表），最终层数 =
+    # 出生/学生层数 + 插入层数。插入后 blocks 即顺序编号，state_dict 键自然对齐。
+    layers = list(morph.get("layers") or [])
     d0 = int(shrink.get("d_model", base_cfg.d_model) or base_cfg.d_model)
     n0 = int(shrink.get("n_layers", base_cfg.n_layers) or base_cfg.n_layers)
-    real_cfg = Config(d_model=d0 * k, n_layers=n0,
+    real_cfg = Config(d_model=d0 * k, n_layers=n0 + len(layers),
                       n_heads=base_cfg.n_heads, block_size=base_cfg.block_size,
                       dropout=base_cfg.dropout, vocab=base_cfg.vocab)
     m = ByteTransformer(real_cfg).to(device)
@@ -617,7 +728,9 @@ def apply_morphology(base_cfg, morph, device):
         blk = m.blocks[int(li_s)]
         blk.mlp = WidenedMLP(blk.mlp, 0)  # 空结构；旁路结构由下面的重放补齐
         lins = [nn.Linear(real_cfg.d_model, int(w)) for w in (widths or [])]
+        linsb = [nn.Linear(real_cfg.d_model, int(w)) for w in (widths or [])]
         blk.mlp.bypass_fcs = nn.ModuleList(lins)
+        blk.mlp.bypass_bodies = nn.ModuleList(linsb)
         blk.mlp.proj_new_ws = nn.ParameterList(
             [nn.Parameter(torch.zeros(real_cfg.d_model, int(w))) for w in (widths or [])])
     for li_s, widths in (morph.get("attn_v") or {}).items():

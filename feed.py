@@ -846,6 +846,17 @@ def parse_args():
                          "默认开启（参数自适应）；用 --no-param-adaptive 关闭。")
     ap.add_argument("--no-param-adaptive", dest="param_adaptive", action="store_false",
                     help="关闭参数自适应控制律（默认开启，此开关可显式关闭）")
+    ap.add_argument("--depth-grow", action="store_true", default=True,
+                    help="启用层数自动增长（2026-10-17 用户定案，默认开启）："
+                         "当宽度轴无法满足容量需求（学习停滞且宽度轴位不可用）时，"
+                         "自动插入新 Transformer 层（恒等映射初始化，输出平滑过渡）。"
+                         "用 --no-depth-grow 关闭。")
+    ap.add_argument("--no-depth-grow", dest="depth_grow", action="store_false",
+                    help="关闭层数自动增长（默认开启）")
+    ap.add_argument("--depth-grow-max-layers", type=int, default=12,
+                    help="层数自动增长上限（默认 12，含出生/学生层数）")
+    ap.add_argument("--depth-grow-min-gap", type=int, default=24,
+                    help="两次层数增长的最小间隔周期（默认 24，限频③）")
     ap.add_argument("--daemon", action="store_true", default=True,
                     help="常驻守护模式（默认开启）：数据尽+反刍完不退出，进入休眠等待"
                          "新数据/新交互；进程异常自动重启。用 --no-daemon 关闭。")
@@ -868,6 +879,39 @@ def parse_args():
                     help=f"常驻守护：最大连续崩溃次数，超过后放弃自动重启"
                          f"（默认 {CRASH_MAX_RESTARTS_DEFAULT}，保持原行为；"
                          f"退避为指数退避，上限 {CRASH_BACKOFF_CAP:.0f}s）")
+    ap.add_argument("--web-learn", action="store_true", default=True,
+                    help="自主联网学习（默认开启）：模型空闲/知识饥饿时自动联网搜索、"
+                         "抓取网页正文喂入训练管线，实现'闲时上网冲浪'。"
+                         "用 --no-web-learn 关闭。")
+    ap.add_argument("--no-web-learn", dest="web_learn", action="store_false",
+                    help="关闭自主联网学习（仅用本地数据集训练）")
+    ap.add_argument("--web-quiet-interval", type=float, default=300.0,
+                    help="联网静默冷却（秒，默认 300）：距上次联网超过该时长即"
+                         "自主冲浪一次，无论训练状态——'闲着没事就上网'的兜底节奏。"
+                         "0=关闭兜底（仅知识饥饿触发）")
+    ap.add_argument("--gate-exam", action="store_true", default=False,
+                    help="启用睡醒考试（硬编码 probe 体检门控）。默认关闭——"
+                         "模型对固定探测集过度熟悉后会产生'应试技巧'，考试越来越"
+                         "容易但真实能力未必提升；关闭后改用学习质量自审计 + 局部回滚。")
+    ap.add_argument("--no-gate-exam", dest="gate_exam", action="store_false",
+                    help="关闭睡醒考试（默认）：移除硬编码 probe 考试，训练成果直接"
+                         "接受，学歪经验局部降级冷层，不再整体回滚。")
+    ap.add_argument("--qwen-kd", action="store_true", default=True,
+                    help="在线 Qwen 蒸馏（默认开启）：训练时实时用 Qwen2.5-0.5B "
+                         "对同一段内容的 next-byte 软分布指导 Dolphin 学习中文"
+                         "（Byte-Prefix Marginalization）。--no-qwen-kd 关闭。")
+    ap.add_argument("--no-qwen-kd", dest="qwen_kd", action="store_false",
+                    help="关闭在线 Qwen 蒸馏（仅靠数据自学习）")
+    ap.add_argument("--qwen-kd-weight", type=float, default=0.3,
+                    help="Qwen 软标签在训练损失中的权重（默认 0.3，其余为真实字节"
+                         "CE + 半球 KD）")
+    ap.add_argument("--qwen-model-dir", default=os.path.join(
+                        "external_models", "Qwen2.5-0.5B-Instruct"),
+                    help="Qwen 教师模型目录（默认 external_models/Qwen2.5-0.5B-Instruct）")
+    ap.add_argument("--qwen-device", default="cpu", choices=["cpu", "cuda"],
+                    help="Qwen 教师运行设备（默认 cpu——避免 Qwen 抢占 Dolphin 的 "
+                         "GPU 显存，GTX1060 3GB 等小显存卡必须用 cpu；"
+                         "显存充足的机器可 --qwen-device cuda 加速）")
     return ap.parse_args()
 
 
@@ -1008,6 +1052,46 @@ def _run_once(args, names):
     else:
         log("部署", "参数自适应控制律已关闭（--no-param-adaptive）")
 
+    # 睡醒考试开关（2026-10-17 用户定案）：生产默认关闭硬编码 probe 考试
+    # （模型对固定探测集过度熟悉会产生"应试技巧"）；关闭后训练成果直接接受，
+    # 学歪经验由局部回滚审计降级冷层。--gate-exam 显式启用旧行为。
+    d.gate_exam_enabled = args.gate_exam
+    if args.gate_exam:
+        log("部署", "睡醒考试已启用（--gate-exam，硬编码 probe 体检门控）")
+    else:
+        log("部署", "睡醒考试已关闭（默认）：移除硬编码 probe 考试，改用学习质量自审计 + 局部回滚")
+
+    # 在线 Qwen 蒸馏（2026-10-17 用户定案：边学数据边看 Qwen 指导）：
+    # 训练时 Qwen2.5-0.5B 对同一段内容的 next-byte 软分布作为软标签，
+    # Dolphin 同时学真实数据 + 半球 KD + Qwen 指导。Qwen 只做引导，可随时关闭。
+    d.qwen_kd_enabled = args.qwen_kd
+    d.qwen_kd_weight = args.qwen_kd_weight
+    if args.qwen_kd:
+        try:
+            from dolphin.qwen_kd import get_teacher
+            d.qwen_teacher = get_teacher(args.qwen_model_dir,
+                                         device=args.qwen_device)
+            log("部署",
+                f"在线 Qwen 蒸馏已启用（权重 {args.qwen_kd_weight:.2f}）："
+                f"Qwen2.5-0.5B 实时指导中文学习（{args.qwen_model_dir}）")
+        except Exception as e:
+            d.qwen_kd_enabled = False
+            log("部署", f"Qwen 教师加载失败，在线蒸馏关闭（{e!r}）；继续纯数据自学习")
+
+    # 层数自动增长配置（2026-10-17 用户定案）：默认开启；--no-depth-grow 关闭，
+    # --depth-grow-max-layers / --depth-grow-min-gap 调节频率与幅度。
+    try:
+        dg_cfg = d.life_ctl.configure_depth_grow(
+            enabled=args.depth_grow,
+            max_layers=args.depth_grow_max_layers,
+            min_gap=args.depth_grow_min_gap)
+        log("部署",
+            f"层数自动增长{'已启用' if dg_cfg['depth_grow_enabled'] else '已关闭'}："
+            f"上限 {dg_cfg['depth_grow_max_layers']} 层，"
+            f"最小间隔 {dg_cfg['depth_grow_min_gap']} 周期")
+    except ValueError as e:
+        log("部署", f"层数自动增长配置非法：{e!r}（使用默认值）")
+
     # M2 修复（2026-10-06）：autotune_steps=True —— 每周期步数由 autotune 决定
     # （run 里传 None 给 life.run_cycle，读 d.sleep_steps），不再使用人工
     # --sleep-steps 参数（值自成，完全自学习）。
@@ -1021,6 +1105,19 @@ def _run_once(args, names):
             target=stdin_chat_loop, args=(d, trainer.stop_flag), daemon=True,
             name="stdin-chat")
         chat_thread.start()
+    # 自主联网学习（2026-10-15）：模型空闲/知识饥饿时自动上网冲浪补充新知识。
+    # 守护线程独立运行，异常不拖垮训练主循环；--no-web-learn 可关闭。
+    web_learner = None
+    if args.web_learn:
+        try:
+            from dolphin.web_learn import WebLearner
+            web_learner = WebLearner(d, config={
+                "quiet_interval": args.web_quiet_interval,
+            })
+            web_learner.start()
+        except Exception as e:
+            log("部署", f"自主联网学习启动失败（不影响训练）：{e!r}")
+            web_learner = None
     t_train_span0 = time.monotonic()
 
     stats = {n: 0 for n in names}
@@ -1075,6 +1172,12 @@ def _run_once(args, names):
         log("部署", "收到中断信号，优雅退出：停止喂入，等待训练线程完成收尾")
     finally:
         trainer.shutdown()
+        # 自主联网学习：停止守护线程并关闭爬虫后端。
+        if web_learner is not None:
+            try:
+                web_learner.stop()
+            except Exception:
+                pass
         # 无模式对话通道：stop_flag 已置位 → 通知 stdin 线程退出。阻塞在
         # readline 上时短超时 join，避免因终端无输入而阻塞收工。
         if chat_thread is not None:

@@ -10,14 +10,20 @@ import time
 
 
 class Experience:
-    __slots__ = ("id", "data", "surprise", "reward", "ts")
+    __slots__ = ("id", "data", "surprise", "reward", "ts", "sat_factor")
 
-    def __init__(self, eid, data: bytes, surprise: float):
+    def __init__(self, eid, data: bytes, surprise: float, sat_factor: float = 1.0):
         self.id = eid
         self.data = data
-        self.surprise = float(surprise)
+        self.surprise = float(surprise)      # 原始惊讶值（模型真实困惑度，带通/压力用它）
         self.reward = 0.0
         self.ts = time.time()
+        self.sat_factor = float(sat_factor)  # 语义饱和衰减因子（学习权重乘数，≤1）
+
+    @property
+    def effective_surprise(self) -> float:
+        """有效惊讶值 = 原始惊讶值 × 语义饱和衰减因子（观测用，随重复线性衰减）。"""
+        return self.surprise * self.sat_factor
 
 
 class ExperienceBuffer:
@@ -29,8 +35,8 @@ class ExperienceBuffer:
         self._next_id = 0
         self.bytes = 0
 
-    def add(self, data: bytes, surprise: float) -> int:
-        e = Experience(self._next_id, bytes(data), surprise)
+    def add(self, data: bytes, surprise: float, sat_factor: float = 1.0) -> int:
+        e = Experience(self._next_id, bytes(data), surprise, sat_factor=sat_factor)
         self._next_id += 1
         self.items.append(e)
         self.bytes += len(e.data)
@@ -85,7 +91,10 @@ class ExperienceBuffer:
                 dup_count[h] = prior + 1
             band_w = math.exp(-0.5 * ((e.surprise - center) / width) ** 2)
             rw = max(-0.9, min(e.reward, 9.0))  # 负奖励会压低分数，但分数恒正（下限 0.1）
-            score = band_w * (1.0 + rw) / (1.0 + prior)
+            # 语义饱和：sat_factor 随重复次数线性衰减，作为学习权重乘数同步降权。
+            # e.surprise 保持原始惊讶值（带通中心/压力不受重复洪泛扭曲）。
+            sat = getattr(e, "sat_factor", 1.0)
+            score = band_w * (1.0 + rw) * sat / (1.0 + prior)
             scored.append((score, e))
 
         scored.sort(key=lambda t: -t[0])

@@ -2,7 +2,9 @@
 
 控制律（用户定案）：
 - 轻限制上限 = 当前参数量 × 1.571（高出 57.1% 是轻限制，允许正常微调）；
-- 压力触发（显存或容量任一"不够"）→ 不再增长，三段式下跌：30% → 10% → 3%；
+- 压力触发（显存或容量任一"不够"）→ 不再增长，三段式下跌：30% → 15% → 3%
+  （2026-10-17 用户定案：显存 >75% →30%、>85% →15%、>85% 以上按压力持续
+  程度动态 15%~3%）；
 - 正常态每睡眠周期用最小步长（±8 单元）微调，消除"上限误差"；
 - 微调全程看显存，不够自动裁剪。
 
@@ -30,7 +32,7 @@ class ParamAdaptive:
     """参数自适应控制律：独立排计划控制器（随档持久化）。"""
 
     def __init__(self):
-        self.param_regime = 0       # 0=正常 1=跌到30% 2=跌到10% 3=跌到3%
+        self.param_regime = 0       # 0=正常 1=跌到30% 2=跌到15% 3=跌到3%（2026-10-17 用户定案）
         self.last_param_reset = None
         self.micro_total = 0
         self.mem_ratio_hist = []    # 显存压力历史 [[cycle, ratio], ...]
@@ -102,9 +104,42 @@ class ParamAdaptive:
             h = ctl.h_eff()
             if gap_bar > max(GAP_BORN, xi_eff) + h:
                 return "cap", f"gap̄={gap_bar:.3f} 越带（空位过多）"
+        # 自动裁剪触发（2026-10-15）：生长连续被显存预算拒绝 ≥ MEM_PRESSURE_WINDOW
+        # 周期 = 硬件容量已达上限且参数无法继续扩张 → 睡眠时自动启动非核心参数裁剪。
+        if ctl is not None and getattr(ctl, "growth_blocked", 0) >= MEM_PRESSURE_WINDOW:
+            return ("growth_blocked",
+                    f"生长连续被显存预算拒绝 {ctl.growth_blocked} 周期"
+                    f"（参数无法扩张）→ 自动裁剪")
         return None, ""
 
     # ---------- 计划排程 ----------
+
+    def _mem_target_for_ratio(self, mem_ratio):
+        """三段式平滑下降目标（2026-10-17 用户定案）：
+
+        - 内存占比 ≤75%：无显存压力 → 返回 None（不收缩）；
+        - 内存占比 >75%：理想容量降为 30%；
+        - 内存占比 >85%：理想容量降为 15%；
+        - 内存占比 >85% 以上：理想容量在 15%~3% 之间**动态调节**——
+          取"特定长时间"的压力水平（最近 MEM_PRESSURE_WINDOW 个历史显存
+          占比的均值，当前值兜底），在 [0.85, 1.0] 区间内线性插值：
+          压力越高、持续时间越长 → 目标越低（最低 3%）。
+        """
+        if mem_ratio is None:
+            return None
+        if mem_ratio <= 0.75:
+            return None
+        if mem_ratio <= 0.85:
+            return 0.30
+        # 85% 以上：用最近历史压力均值体现"特定长时间"的持续压力
+        hist = [r for _, r in self.mem_ratio_hist if r > 0.75]
+        recent = hist[-MEM_PRESSURE_WINDOW:] if hist else []
+        sustained = sum(recent) / len(recent) if recent else mem_ratio
+        sustained = max(sustained, mem_ratio)  # 当前值兜底（瞬时高压不被均值稀释）
+        sustained = min(1.0, max(0.85, sustained))
+        t = (sustained - 0.85) / (1.0 - 0.85)  # 0 在 85%，1 在 100%
+        target = 0.15 - t * (0.15 - 0.03)      # 15% → 3% 线性下降
+        return max(0.03, min(0.15, target))
 
     def _schedule_shrink(self, d, report, ratio, mem_ratio=None):
         """排一个 born-again 收缩计划（复用 life_ctl 的手术计划机制）。
@@ -115,10 +150,9 @@ class ParamAdaptive:
         target 钳位到 surgery.shrink_config 的合法域 [0.1, 0.95]，确保
         _execute_wither → born_again_student 永不抛 ValueError。
 
-        S9 理想容量三档下调（律定档位，用户指定）：按显存占用分档设定目标——
-        显存占用 >0.90（可用<10%）→ 理想容量 30%；>0.95（可用<5%）→ 理想
-        参数 10%；其余（无显存压力）→ 正常理想容量 = 真实参数 × 157.1%。
-        容量压力路径（无显存信息）沿用传入的 ratio（PARAM_STAGE_RATIOS）。
+        理想容量三段式平滑下降（2026-10-17 用户定案）：显存 >75% → 30%；
+        >85% → 15%；>85% 以上按压力持续程度动态 15%~3%。容量压力路径
+        （无显存信息）沿用传入的 ratio（PARAM_STAGE_RATIOS）。
         """
         ctl = d.life_ctl
         cycle = getattr(d, "cycle", 0)
@@ -126,14 +160,10 @@ class ParamAdaptive:
         # 在函数开头读取当前显存占用：优先用入参（调用方已算好），否则现算。
         if mem_ratio is None:
             mem_ratio = self._mem_pressure_ratio(d)
-        # 律定档位（用户指定）：可用内存<10%（占用>0.90）→ 理想容量 30%；
-        # <5%（占用>0.95）→ 理想参数 10%。
+        # 律定档位（用户定案）：>75%→30%、>85%→15%、>85%以上动态 15%~3%。
         if mem_ratio is not None:
-            if mem_ratio > 0.95:
-                target = 0.10
-            elif mem_ratio > 0.90:
-                target = 0.30
-            else:
+            target = self._mem_target_for_ratio(mem_ratio)
+            if target is None:
                 # 正常理想容量档（真实参数 ×157.1%，≥1.0）：当前无显存压力，
                 # 不需要收缩。本函数只服务「收缩」场景，正常档不排程（验收 #10 修复）。
                 return None
@@ -143,7 +173,7 @@ class ParamAdaptive:
         if body_frac * target < MIN_BODY_FRAC:
             target = max(target, MIN_BODY_FRAC / body_frac)
             capped = True
-        target = max(0.1, min(0.95, target))
+        target = max(0.03, min(0.95, target))  # 2026-10-17：下限放宽到 3%（动态档需要）
         ctl.plan = {"kind": "wither", "mode": "born_again",
                     "target": round(target, 4), "source": "param_adaptive"}
         ctl.state = STATE_WITHER_PLAN
