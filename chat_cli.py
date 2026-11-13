@@ -110,9 +110,8 @@ def main() -> int:
             output = model.generate(
                 input_ids=inputs,
                 max_new_tokens=GEN_TOKENS,
-                do_sample=True,
-                top_k=40,
-                temperature=0.9,
+                do_sample=False,
+                num_beams=1,
                 repetition_penalty=1.15,
             )
         response_ids = output[0].tolist()
