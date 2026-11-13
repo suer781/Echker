@@ -52,6 +52,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--learn", dest="learn", action="store_true", default=True)
     parser.add_argument("--no-learn", dest="learn", action="store_false")
+    parser.add_argument("--no-save", action="store_true", help="冒烟测试模式：不写任何检查点")
     parser.add_argument("--save-every", type=int, default=20, help="autosave every N learned turns")
     args = parser.parse_args()
 
@@ -84,13 +85,16 @@ def main() -> int:
         if not user_text:
             continue
         if user_text == "/exit":
-            if args.learn:
+            if args.learn and not args.no_save:
                 model.config.use_cache = True
                 model.save_pretrained(FINETUNED, safe_serialization=True)
                 tok.save_pretrained(FINETUNED)
                 print("已保存并退出。")
             break
         if user_text == "/save":
+            if args.no_save:
+                print("冒烟模式（--no-save）：未保存。")
+                continue
             model.config.use_cache = True
             model.save_pretrained(FINETUNED, safe_serialization=True)
             tok.save_pretrained(FINETUNED)
@@ -121,19 +125,25 @@ def main() -> int:
             label_tensor = torch.tensor([labels], device="cuda")
             model.train()
             loss = model(input_ids=inputs, labels=label_tensor).loss
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            turns_since_save += 1
-            print(f"[本轮学习 loss={float(loss.item()):.4f}]", flush=True)
-            if turns_since_save >= args.save_every:
-                model.config.use_cache = True
-                model.save_pretrained(FINETUNED, safe_serialization=True)
-                tok.save_pretrained(FINETUNED)
-                model.config.use_cache = False
-                turns_since_save = 0
-                print("[自动保存]", flush=True)
+            loss_value = float(loss.item())
+            # 学习质量闸门：交换损失过高说明模型对这段内容毫无把握（多半是
+            # 自己的退化输出），把垃圾当教材会自我污染权重——跳过本轮学习。
+            if loss_value > 2.0:
+                print(f"[本轮学习跳过：loss={loss_value:.4f} 超过阈值 2.0]", flush=True)
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                turns_since_save += 1
+                print(f"[本轮学习 loss={loss_value:.4f}]", flush=True)
+                if turns_since_save >= args.save_every and not args.no_save:
+                    model.config.use_cache = True
+                    model.save_pretrained(FINETUNED, safe_serialization=True)
+                    tok.save_pretrained(FINETUNED)
+                    model.config.use_cache = False
+                    turns_since_save = 0
+                    print("[自动保存]", flush=True)
     return 0
 
 
