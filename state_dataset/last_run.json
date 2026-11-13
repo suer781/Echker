@@ -1,0 +1,13 @@
+{
+  "frames": 3,
+  "payload_bytes": 2000000,
+  "encoded_bytes": 2000804,
+  "chunks": 3932,
+  "trained_steps": 984,
+  "elapsed_seconds": 106.0629231999992,
+  "payload_bytes_per_second": 18856.730888216884,
+  "trained_steps_per_second": 9.277511597002706,
+  "state_dir": "state_dataset",
+  "progress": "state_dataset\\dataset_progress.json",
+  "source_access": "read-only (rb); no source writes in this program"
+}

@@ -1,0 +1,10 @@
+﻿2026-11-14 00:13:18 watchdog started pid=26752 stall=20min maxRestarts=200 poll=30s
+2026-11-14 00:13:18 started run#0 pid=9004 stdout=stdout_20261114_001318.log
+2026-11-14 00:16:01 watchdog started pid=21192 stall=20min maxRestarts=200 poll=30s
+2026-11-14 00:16:01 started run#0 pid=20560 stdout=stdout_20261114_001601.log
+2026-11-14 00:21:01 pid=20560 rss=3MB
+2026-11-14 00:24:12 watchdog started pid=15108 stall=20min maxRestarts=200 poll=30s
+2026-11-14 00:24:12 started run#0 pid=21300 stdout=stdout_20261114_002412.log
+2026-11-14 00:29:13 pid=21300 tree_rss=1,152MB (3 procs)
+2026-11-14 00:34:13 pid=21300 tree_rss=1,186MB (3 procs)
+2026-11-14 00:39:14 pid=21300 tree_rss=1,200MB (3 procs)

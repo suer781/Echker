@@ -61,11 +61,51 @@
     "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/dev_fol.jsonl": {
       "size": 16840405,
       "mtime_ns": 1790967857960458100,
-      "next_offset": 7680000,
+      "next_offset": 16840405,
+      "complete": true,
+      "last_chunk_sha256": "647b00109ef07b0577f53a2b14f4e2bd3c5807f441c8101c286136a330946cca",
+      "last_chunk_bytes": 440405
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/dev_zh.txt": {
+      "size": 1202597,
+      "mtime_ns": 1790967857965454800,
+      "next_offset": 1202597,
+      "complete": true,
+      "last_chunk_sha256": "dfbd1c8448944df89c31512951721d2965bec4ce5392556ce8ace671f62a3cd0",
+      "last_chunk_bytes": 242597
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/ood_test.jsonl": {
+      "size": 668323,
+      "mtime_ns": 1790967857967592600,
+      "next_offset": 668323,
+      "complete": true,
+      "last_chunk_sha256": "85aeb366be14f4180af021356cc07758e8a13669a4253753cd86f22f1f46dfff",
+      "last_chunk_bytes": 668323
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/readme.md": {
+      "size": 258,
+      "mtime_ns": 1790967857968622200,
+      "next_offset": 258,
+      "complete": true,
+      "last_chunk_sha256": "eb061ae7e74c39d7a2dcae68c58f061c497b916b0e902c86213303eca335aa8a",
+      "last_chunk_bytes": 258
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/statistics.py": {
+      "size": 430,
+      "mtime_ns": 1790967857969449200,
+      "next_offset": 430,
+      "complete": true,
+      "last_chunk_sha256": "247720cc1cb331dfbc0c6795d53c476a959aeefb9e8dab0fd62895ef9eda9888",
+      "last_chunk_bytes": 430
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/test_fol.jsonl": {
+      "size": 16807118,
+      "mtime_ns": 1790967858018264300,
+      "next_offset": 2880000,
       "complete": false,
-      "last_chunk_sha256": "eb5187b43f59c8c53930e8d5af41bc6cb3469d36129e989b9432856a01cd3f47",
+      "last_chunk_sha256": "0a9628b96844b344cb1f48f8d54ecb8ca740116908d1289eda642ede5990f4a2",
       "last_chunk_bytes": 960000
     }
   },
-  "frames": 16
+  "frames": 35
 }

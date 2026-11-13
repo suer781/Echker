@@ -1,9 +1,9 @@
 # 交接文档：统一字节级在线学习原型
 
-最后更新：2026-11-13  
+最后更新：2026-11-14  
 项目根目录：`O:\Documents\智能自学习AI（新）`  
 版本：`0.5.0`  
-当前源码包：`ContinualLifeAgent.zip`（38 文件，已包含本文件新增前的当前代码与文档）
+当前源码包：`ContinualLifeAgent.zip`（38 文件，2026-11-13 快照；此后新增 `watchdog.ps1` / `status_check.ps1`，见第 4.7 节）
 
 ---
 
@@ -13,7 +13,7 @@
 2. 先跑回归：`python -m unittest discover -s .\tests -v`，应为 **47 项全过**。
 3. 先读 `AUDIT_CLOSURE.md` 和 `CONTINUOUS_VALIDATION.md`，再读本文件。
 4. **不要碰 `state_dataset_smoke`**：它是真实 JSONL 冒烟状态，最终偏移 2,263,168、5 帧，是历史证据。
-5. **全量训练当前已停止，不是运行中**。最后一次观察是 28 帧、21,318,772 载荷字节、10,487 步；恢复命令见第 4 节，恢复前先读第 2.2 节。
+5. **全量训练当前运行中**（2026-11-14 00:24 起，看门狗 + WMI 分离式启动，与本会话解耦）。查看状态：`powershell -NoProfile -ExecutionPolicy Bypass -File .\status_check.ps1`。停止方式见第 4.7 节，历史与错位处理见第 2.2 节。
 
 ---
 
@@ -70,34 +70,31 @@
 
 切换没有固定计数：运行时只看累计非噪声压力、自己学到的单批偿还容量、主动侧 `train+ttt` 对被动侧 `consolidate` 的步数增量。验收器要求“至少 3 条可复算决策”，这是**验收判据**，不是运行时阈值。
 
-### 2.2 全量训练：已停止，不能称为完成
+### 2.2 全量训练：运行中（2026-11-14 起，看门狗守护）
 
-启动：
+#### 2026-11-13 第一次启动与异常停止（已处理）
 
-- 时间：2026-11-13 23:04:35
-- 初始化：`validation_runs/continuous-adaptive-final-1/state/latest.pt`
-- 命令：`ingest_dataset.py --root O:\数据集 --train --state-dir .\state_dataset --save-every 16`
-- 父/子 PID：15188 / 27040（现在进程表里都已不存在）
+- 时间：2026-11-13 23:04:35 启动，初始化自 `validation_runs/continuous-adaptive-final-1/state/latest.pt`，命令 `ingest_dataset.py --root O:\数据集 --train --state-dir .\state_dataset --save-every 16`。
+- 停止：28 帧后进程消失，`stderr.log` 为空、无 `last_run.json`、无异常栈、无退出码。结合 `agent.close()` 会先 `save()` 再由 `finally` 提交进度的顺序推断：**进程在收尾保存（23:19 的 `latest.pt`）之后、进度提交之前被硬杀**，最可能是父 PowerShell/控制台会话结束连带进程树被终止。
+- 遗留错位：`dataset_progress.json` 停在 16 帧，`latest.pt`（23:19）可能已含 17–28 帧训练。
 
-最后一次 `state_dataset.stdout.log`：
+#### 2026-11-14 错位处理（已完成）
 
-```json
-{"progress": {"frames": 28, "payload_bytes": 21318772, "encoded_bytes": 21325964, "chunks": 41911, "trained_steps": 10487, "last_file": "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/dev_zh.txt", "offset": 1202597}}
-```
+1. 三个文件已备份到 `state_dataset_backup_20261114/`：`latest.pt.misaligned28f`（23:19 检查点）、`latest.backup.pt.frame16`、`dataset_progress.json.frame16`。
+2. 按文档推荐用 `latest.backup.pt`（23:14，与进度 16 帧严格对齐）替换 `latest.pt`，两文件 sha256 一致（`5abe2630…`）。
+3. `--max-bytes 2000000` 有界续跑验证：从偏移 7,680,000 精确恢复，3 帧 / 984 步 / 106 秒，退出码 0，`last_run.json` 正常生成，进度与检查点重新严格对齐（19 帧）。
 
-停止时的状态：
+#### 当前运行（分离式 + 看门狗）
 
-- `stderr.log` 为空；`last_run.json` 不存在，说明进程没有走正常收尾的 `finally` 汇总分支。
-- 没有 Python 异常记录，也没有退出码；进程消失原因**未确认**。不能排除父 PowerShell/会话生命周期结束、系统 job 或外部终止。
-- `dataset_progress.json` 停在 **16 帧**，时间 23:14:35。
-- `latest.pt` 时间 23:19:51，大小 44.06 MB；`latest.backup.pt` 时间 23:14:35。
-- 最后 stdout 到 28 帧，但进度只提交到 16 帧：`latest.pt` 可能已经包含 17–28 帧的训练，而进度仍从 16 帧恢复。**恢复会重放第 17–28 帧**，不会跳过未训练数据，但会造成这段数据的重复训练。这是当前需要先处理的交接风险。
+- 2026-11-14 00:24 起：`watchdog.ps1` 经 WMI `Win32_Process.Create` 启动（父进程为 WmiPrvSE，不随任何会话结束），由它拉起并守护 `ingest_dataset.py`（`-u -X utf8`）。
+- 实测吞吐约 **1.6 MB/min**（~1.6 帧/分钟），全量 10.66 GiB 剩余对应 **约 5 天** 量级；按当前速率 6 GB 内存约束的 40 小时级风险需持续观察 RSS（看门狗每 5 分钟记录进程树 RSS）。
+- worker 实测 RSS ≈ 1.17 GB（venv `python.exe` 只是启动器桩，真实解释器在其子进程，内存/CPU 必须按进程树口径看）。
 
-全量规模：
+全量规模（不变）：
 
 - 只读清单：760 文件、10,913,873,703 字节（10.164 GiB）
 - 默认训练范围：754 文件、10,910,693,561 字节
-- 28 帧的 21,318,772 字节约覆盖 **0.195%**，不是全量完成。
+- 当前实时进度用 `status_check.ps1` 查看；**不能把"运行中"写成"完成"**。
 
 ### 2.3 跨格式准入：已跑，但只是准入
 
@@ -228,6 +225,32 @@ $env:PYTHONPATH = (Get-Location).Path
 
 历史结果：16 项通过。最近一轮没有在改动后重跑；交接后如修改 worker/resize/切换，必须重跑。
 
+### 4.7 长跑运维（watchdog.ps1 / status_check.ps1）
+
+启动守护（WMI 分离式，关掉所有终端也不影响）：
+
+```powershell
+Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+  CommandLine = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "O:\Documents\智能自学习AI（新）\watchdog.ps1"'
+}
+```
+
+看状态：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "O:\Documents\智能自学习AI（新）\status_check.ps1"
+```
+
+行为说明：
+
+- 看门狗循环启动 `python -u -X utf8 ingest_dataset.py --root O:\数据集 --train --state-dir .\state_dataset --save-every 16`，每次运行的 stdout/stderr 独立成 `state_dataset\stdout_<时间戳>.log` / `stderr_<时间戳>.log`。
+- **崩溃自动重启**（上限 200 次，间隔 15 秒）；退出码 0 且刚写完 `last_run.json` 判定为优雅完成（数据集全部消费完），看门狗随之退出。
+- **停滞检测**：stdout 超过 20 分钟无新输出，且 60 秒进程树 CPU 增量 < 2 秒（区分"活着但慢/休眠唤醒"与"真挂死"，避免休眠唤醒误杀）才 `taskkill /T /F` 并重启。
+- 每 5 分钟向 `state_dataset\watchdog.log` 记录进程树 RSS（6 GB 预算的长期证据）。注意 venv `python.exe` 是启动器桩，真实解释器在子进程，内存/CPU 按进程树合计。
+- **优雅停止**：在 `state_dataset` 下创建空文件 `watchdog.stop`，看门狗会在 ≤30 秒内硬杀当前训练并退出（硬杀会损失自上次进度提交以来的 ≤16 帧训练，恢复时重放，不丢数据）。
+- 直接删除 `watchdog.stop` 后用上面的命令即可重新启动守护。
+- 修改这两个 `.ps1` 时注意：文件必须带 UTF-8 BOM（PowerShell 5.1 对无 BOM 的 UTF-8 按 ANSI 解析，中文会破坏语法）；改完用解析器检查语法再上线。
+
 ---
 
 ## 5. 关键机制速览
@@ -325,13 +348,13 @@ $env:PYTHONPATH = (Get-Location).Path
 
 1. `git status` 或至少确认工作区文件时间；不要覆盖 `state_dataset_smoke`。
 2. 跑 47 项测试。
-3. 读 `AUDIT_CLOSURE.md`，确认 B6 仍是“部分关闭”。
-4. 备份 `state_dataset` 目录（尤其 `latest.pt`、`latest.backup.pt`、`dataset_progress.json`）。
-5. 解决 16/28 帧的检查点/进度错位，再续跑。
-6. 先 `--max-bytes 2000000` 有界续跑，记录 `last_run.json`、RSS、GPU、吞吐。
-7. 再决定是否启动长跑；启动后至少每 30 分钟检查 `stdout`、`stderr`、RSS、GPU。
+3. 读 `AUDIT_CLOSURE.md`，确认 B6 仍是”部分关闭”。
+4. ~~备份 `state_dataset` 目录~~ → 2026-11-14 已做：`state_dataset_backup_20261114/`。
+5. ~~解决 16/28 帧的检查点/进度错位~~ → 2026-11-14 已做：对齐到 16 帧后有界续跑验证，进度/检查点严格对齐。
+6. ~~先 `--max-bytes 2000000` 有界续跑~~ → 已做：3 帧 / 984 步 / 106 秒 / 退出码 0。
+7. 长跑已由 `watchdog.ps1` 守护运行（第 4.7 节）；用 `status_check.ps1` 常规检查，重点盯 `watchdog.log` 里的 RSS 序列。
 8. 若改 `worker.py`、`switching.py`、`store.py`、`agent.py`，必须重跑 47 项测试和 `verify_architecture.py`。
-9. 修改任何验收判据前，先确认不是为了“通过”而放宽。
+9. 修改任何验收判据前，先确认不是为了”通过”而放宽。
 
 ---
 
@@ -364,7 +387,11 @@ $env:PYTHONPATH = (Get-Location).Path
 | `ARCHITECTURE_AUDIT.md` / `ARCHITECTURE_VALIDATION.json` | 旧版双半球架构审计与 16 项 CUDA 结果 |
 | `validation_runs/continuous-adaptive-final-1/report.json` | 最终 21/21 报告 |
 | `validation_runs/cross-format-probe/report.json` | 20 格式准入报告 |
-| `state_dataset.stdout.log` / `stderr.log` | 全量训练最后记录（当前已停止） |
-| `state_dataset/dataset_progress.json` | 全量进度（当前 16 帧） |
-| `state_dataset/latest.pt` | 全量检查点（当前 23:19:51，44.06 MB） |
-| `ContinualLifeAgent.zip` | 当前源码包 |
+| `state_dataset.stdout.log` / `stderr.log` | 2026-11-13 第一次全量启动的最后记录（历史证据） |
+| `state_dataset/stdout_<时间戳>.log` / `stderr_<时间戳>.log` | 看门狗每次运行的独立输出（当前证据） |
+| `state_dataset/watchdog.log` | 看门狗动作与进程树 RSS 序列 |
+| `state_dataset/dataset_progress.json` | 全量进度（实时，`status_check.ps1` 可读） |
+| `state_dataset/latest.pt` / `latest.backup.pt` | 全量检查点对（save-then-mark，崩溃只重放不跳过） |
+| `state_dataset_backup_20261114/` | 2026-11-13 停止时三个文件的原始备份 |
+| `watchdog.ps1` / `status_check.ps1` | 长跑守护与状态查看（第 4.7 节） |
+| `ContinualLifeAgent.zip` | 2026-11-13 源码快照（不含本节新增脚本） |
