@@ -2,8 +2,61 @@
 
 最后更新：2026-11-14  
 项目根目录：`O:\Documents\智能自学习AI（新）`  
-版本：`0.5.0`  
+版本：`0.6.0`（ByT5 移植时代）  
 当前源码包：`ContinualLifeAgent.zip`（38 文件，2026-11-13 快照；此后新增 `watchdog.ps1` / `status_check.ps1`，见第 4.7 节）
+
+---
+
+## ⚡ 0.6.0：ByT5 移植时代（2026-11-14 起，当前主线）
+
+用户决策：放弃自研小模型，**完整移植谷歌 ByT5（真权重）**；装不下就缩减非语言机制，语言能力不动。旧架构文件保留为 legacy 参考，`state_dataset_archive_prebyt5/` 与 `validation_runs/continuous-adaptive-postfix-1`（21/21）是其最终验证记录。
+
+### 硬件物理实测（GTX 1060 3GB, Pascal cc 6.1）
+
+- Pascal 无 bf16、fp16 算力 1/64 → 唯一可用精度 fp32
+- byt5-small fp32 权重 1.204GB；空闲显存 2.13GB（旧训练停后）
+- **q/v 真权重直调微调（22,609,920 参数）：peak 1.42GB @seq512、0.41s/步（实测 2.39 步/秒）、生成 96 字节 2.4s——本机可跑，无需动桌面**
+- 全参数微调（~2.9GB）物理装不下；Adafactor（T5 原生）状态极小
+
+### 设计决定（含用户明确否决项）
+
+- **否决冻结基座/共享 LoRA**：用户指出这等于干掉在线学习——必须模型本体权重真实更新
+- 现行方案：`q`/`v` 注意力投影权重直调（无适配器包装），Adafactor 更新
+- **否决 10.9GB 语料全量重吃**：Google 预训练已覆盖语言习得，语料降级为微调/回放调料（用户决策）
+- 字节通道：ByT5Tokenizer 的 `vocab[chr(byte)]` 映射对 0..255 **双射无损**（id 3..258），任意二进制安全（探针实测）
+- 微调数据：LogiQA2 zh/en + LogiQA1 + CMMLU 共 5465 对 4.1MB（holdout 路径哈希排除）+ 闲聊/算术/身份 ~430 对
+
+### ByT5 时代脚本
+
+| 文件 | 用途 |
+|---|---|
+| `byt5_probe.py` | 字节映射 + 显存/步速实测探针 |
+| `prepare_finetune_data.py` | 从语料抽 QA 对话对（holdout 自动排除） |
+| `make_chitchat_data.py` | 闲聊/算术/身份指令对生成 |
+| `finetune_byt5.py` | q/v 真权重微调（`--resume` 续训，读取 finetune_data/*.jsonl 全部） |
+| `chat_cli.py` | 交互 CLI：每轮 TTT 式真权重更新（`--no-learn` 关闭，`/save` `/exit`），自动每 20 轮落盘 |
+| `evaluate_holdout.py` | 旧架构 holdout 仪器（保留；ByT5 时代判据待重定义） |
+
+### 运行
+
+```powershell
+Set-Location -LiteralPath "O:\Documents\智能自学习AI（新）"
+# 对话（微调完成后）
+& ".\.venv-life\Scripts\python.exe" ".\chat_cli.py"
+# 继续微调
+& ".\.venv-life\Scripts\python.exe" ".\finetune_byt5.py" --resume --epochs 1
+```
+
+`byt5_model/`（1.2GB）在 .gitignore，不入仓库。
+
+### 未完成 / 下一步
+
+1. 第二轮混合微调（QA+闲聊）进行中：解决"回声复读"（首版只学过 QA 答案对，闲聊轮回声）
+2. 旧管线机制（双半球/债务/自适应切换/检查点指纹）向 ByT5 语义的移植：候选方案为双适配器+共享冻结底座需用户再确认，或顺序驻留双 byT5 全微调（显存不足，需 ≥8GB 卡）
+3. ByT5 时代的 21 项验收器重定义（旧验收器绑定 DynamicByteLM 结构）
+4. 55 项测试与 `verify_architecture` 属于 ByT5-DNA 自研内核路线，已被本时代取代，作为 legacy 保留
+
+---
 
 ---
 

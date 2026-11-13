@@ -10,3 +10,9 @@ __pycache__/
 *.stderr.log
 # 交互探针的临时状态副本，不进仓库
 _audit_tmp/interactive_probe_state/
+
+# ByT5 时代产物
+byt5_model/
+finetune_byt5*.log
+postfix-1-console.log
+validation_runs/postfix-1-console.log

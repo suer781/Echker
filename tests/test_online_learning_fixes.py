@@ -95,7 +95,7 @@ class OptimizerMomentumTests(unittest.TestCase):
         state = self.state
         old_params = list(state.model.parameters())
         old_dim = state.model.blocks[0].hidden_dim
-        fc1_index = param_index(state, state.model.blocks[0].fc1.weight)
+        fc1_index = param_index(state, state.model.blocks[0].wi_0.weight)
         old_entry = state.optimizer.state_dict()["state"][fc1_index]
         old_avg = old_entry["exp_avg"].detach().clone()
         self.assertGreater(float(old_avg.abs().sum()), 0.0)
@@ -104,7 +104,7 @@ class OptimizerMomentumTests(unittest.TestCase):
         self.assertEqual(result["mode"], "grow")
         self.assertIn("row_map", result)
 
-        fc1_new = state.model.blocks[0].fc1.weight
+        fc1_new = state.model.blocks[0].wi_0.weight
         new_index = param_index(state, fc1_new)
         new_entry = state.optimizer.state_dict()["state"][new_index]
         self.assertTrue(new_entry, "grown fc1.weight lost its optimizer state entirely")
@@ -118,7 +118,7 @@ class OptimizerMomentumTests(unittest.TestCase):
     def test_prune_keeps_only_kept_neurons_momentum(self):
         state = self.state
         old_dim = state.model.blocks[0].hidden_dim
-        fc1_index = param_index(state, state.model.blocks[0].fc1.weight)
+        fc1_index = param_index(state, state.model.blocks[0].wi_0.weight)
         old_entry = state.optimizer.state_dict()["state"][fc1_index]
         old_avg = old_entry["exp_avg"].detach().clone()
 
@@ -127,7 +127,7 @@ class OptimizerMomentumTests(unittest.TestCase):
         keep_map = result["keep_map"]
         self.assertEqual(len(keep_map), old_dim - 8)
 
-        new_index = param_index(state, state.model.blocks[0].fc1.weight)
+        new_index = param_index(state, state.model.blocks[0].wi_0.weight)
         new_entry = state.optimizer.state_dict()["state"][new_index]
         self.assertTrue(new_entry)
         for new_row, old_row in enumerate(keep_map):

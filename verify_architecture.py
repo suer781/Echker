@@ -48,7 +48,7 @@ def main() -> int:
             for attribute in ("model", "cpu_model", "optimizer", "replay", "debt", "lr", "structure")
         )
         initial_weights_distinct = not torch.equal(
-            left.model.blocks[0].fc1.weight, right.model.blocks[0].fc1.weight
+            left.model.blocks[0].wi_0.weight, right.model.blocks[0].wi_0.weight
         )
         calls = {"left": 0, "right": 0}
         handles = [
@@ -120,8 +120,8 @@ def main() -> int:
         persistence_checks = {
             "checkpoint_has_both": set(payload["hemispheres"]) == {"left", "right"},
             "checkpoint_weights_distinct": not torch.equal(
-                payload["hemispheres"]["left"]["model"]["blocks.0.fc1.weight"],
-                payload["hemispheres"]["right"]["model"]["blocks.0.fc1.weight"],
+                payload["hemispheres"]["left"]["model"]["blocks.0.wi_0.weight"],
+                payload["hemispheres"]["right"]["model"]["blocks.0.wi_0.weight"],
             ),
             "restored_active": restored_ok and restored.active == "left" and restored.switch_count == 2,
             "restored_both_learned": all(

@@ -59,12 +59,12 @@ def main() -> int:
             state = agent.state()
             active_before = state.name
             before_loss = observation_loss(agent, frame)
-            before_weight = state.model.blocks[0].fc1.weight.detach().clone()
+            before_weight = state.model.blocks[0].wi_0.weight.detach().clone()
             for _ in range(args.steps):
                 agent.feed_frame(frame)
             after_loss = observation_loss(agent, frame)
             update_l2 = torch.linalg.vector_norm(
-                state.model.blocks[0].fc1.weight.detach() - before_weight
+                state.model.blocks[0].wi_0.weight.detach() - before_weight
             ).item()
             result = {
                 "interface": "BLF1",
@@ -80,7 +80,7 @@ def main() -> int:
                 "loss_after": after_loss,
                 "loss_reduction": before_loss - after_loss,
                 "loss_reduction_percent": 100 * (before_loss - after_loss) / before_loss,
-                "fc1_weight_update_l2": update_l2,
+                "wi_0_weight_update_l2": update_l2,
                 "interpretation": (
                     "Only demonstrates online optimization on observed raw bytes; "
                     "does not demonstrate general intelligence or semantic understanding."

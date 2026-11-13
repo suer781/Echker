@@ -298,7 +298,10 @@ class TrainingWorker:
             elif resize_result.get("mode") == "prune":
                 row_map = resize_result.get("keep_map") or []
         prefix = f"blocks.{layer}." if layer is not None else ""
-        fc1_weight, fc1_bias, fc2_weight = f"{prefix}fc1.weight", f"{prefix}fc1.bias", f"{prefix}fc2.weight"
+        # ByT5-DNA block: the neuron index is dim 0 of wi_0/wi_1 rows and
+        # dim 1 of wo columns. T5 linears carry no biases.
+        row_weights = (f"{prefix}wi_0.weight", f"{prefix}wi_1.weight")
+        col_weights = (f"{prefix}wo.weight",)
         with torch.no_grad():
             for name, parameter in state.model.named_parameters():
                 source = old_state_by_name.get(name)
@@ -316,38 +319,35 @@ class TrainingWorker:
                         "exp_avg_sq": source["exp_avg_sq"].detach().clone(),
                     }
                     continue
-                if row_map is None or prefix == "" or name not in (fc1_weight, fc1_bias, fc2_weight):
+                if row_map is None or prefix == "" or name not in row_weights + col_weights:
                     continue
                 old_avg = source["exp_avg"].detach()
                 old_sq = source["exp_avg_sq"].detach()
                 new_avg = torch.zeros_like(parameter)
                 new_sq = torch.zeros_like(parameter)
-                if name in (fc1_weight, fc1_bias):
-                    # The neuron index is dim 0 for fc1 rows and bias.
-                    if resize_result["mode"] == "grow":
-                        old_dim = int(resize_result["old_dim"])
-                        new_avg[:old_dim] = old_avg[:old_dim]
-                        new_sq[:old_dim] = old_sq[:old_dim]
-                        for target, source_index in row_map:
-                            new_avg[target] = old_avg[source_index]
-                            new_sq[target] = old_sq[source_index]
-                    else:
-                        kept = torch.as_tensor(row_map, dtype=torch.long, device=old_avg.device)
-                        new_avg = old_avg.index_select(0, kept)
-                        new_sq = old_sq.index_select(0, kept)
+                growing = resize_result["mode"] == "grow"
+                if name in row_weights:
+                    neuron_dim = 0
                 else:
-                    # fc2.weight: the neuron index is dim 1.
-                    if resize_result["mode"] == "grow":
-                        old_dim = int(resize_result["old_dim"])
-                        new_avg[:, :old_dim] = old_avg[:, :old_dim]
-                        new_sq[:, :old_dim] = old_sq[:, :old_dim]
-                        for target, source_index in row_map:
-                            new_avg[:, target] = old_avg[:, source_index]
-                            new_sq[:, target] = old_sq[:, source_index]
-                    else:
-                        kept = torch.as_tensor(row_map, dtype=torch.long, device=old_avg.device)
-                        new_avg = old_avg.index_select(1, kept)
-                        new_sq = old_sq.index_select(1, kept)
+                    neuron_dim = 1
+                if growing:
+                    old_dim = int(resize_result["old_dim"])
+                    index = [slice(None), slice(None)]
+                    index[neuron_dim] = slice(0, old_dim)
+                    new_avg[tuple(index)] = old_avg[tuple(index)]
+                    new_sq[tuple(index)] = old_sq[tuple(index)]
+                    for target, source_index in row_map:
+                        index[neuron_dim] = target
+                        new_avg[tuple(index)] = old_avg[
+                            tuple(index[:neuron_dim] + [source_index] + index[neuron_dim + 1 :])
+                        ]
+                        new_sq[tuple(index)] = old_sq[
+                            tuple(index[:neuron_dim] + [source_index] + index[neuron_dim + 1 :])
+                        ]
+                else:
+                    kept = torch.as_tensor(row_map, dtype=torch.long, device=old_avg.device)
+                    new_avg = old_avg.index_select(neuron_dim, kept)
+                    new_sq = old_sq.index_select(neuron_dim, kept)
                 new_optimizer.state[parameter] = {
                     "step": step,
                     "exp_avg": new_avg.to(parameter.device),

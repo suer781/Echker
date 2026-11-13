@@ -277,7 +277,7 @@ def validate_automatic_structure(config: AppConfig) -> dict[str, Any]:
 
     prune_model = DynamicByteLM(config.model).cpu()
     with torch.no_grad():
-        prune_model.blocks[0].fc2.weight[:, 0].zero_()
+        prune_model.blocks[0].wo.weight[:, 0].zero_()
         prune_model.blocks[0].activation_ema[0] = 0.0
     prune_controller = StructureController(config)
     prune_controller.losses = deque([5.0] * 16 + [4.0] * 8, maxlen=64)

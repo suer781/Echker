@@ -52,14 +52,14 @@ class WorkerTests(unittest.TestCase):
             self.skipTest("CUDA is unavailable")
         worker = TrainingWorker(test_config("cuda"))
         state = worker.states["left"]
-        before = state.cpu_model.blocks[0].fc1.weight.detach().clone()
+        before = state.cpu_model.blocks[0].wi_0.weight.detach().clone()
         ids, labels = dialogue_sample("你好", "测试")
         worker.start()
         try:
             result = worker.submit("ttt", "left", [Sample(ids, labels)], 1)
             self.assertEqual(result["steps"], 1)
             self.assertEqual(str(worker.device), "cuda")
-            self.assertFalse(torch.equal(before, state.cpu_model.blocks[0].fc1.weight))
+            self.assertFalse(torch.equal(before, state.cpu_model.blocks[0].wi_0.weight))
         finally:
             worker.stop()
     def test_resize_repairs_stale_cpu_width(self):
@@ -202,7 +202,7 @@ class AgentIntegrationTests(unittest.TestCase):
             self.assertIsNot(left.optimizer, right.optimizer)
             self.assertIsNot(left.replay, right.replay)
             self.assertIsNot(left.debt, right.debt)
-            self.assertFalse(torch.equal(left.model.blocks[0].fc1.weight, right.model.blocks[0].fc1.weight))
+            self.assertFalse(torch.equal(left.model.blocks[0].wi_0.weight, right.model.blocks[0].wi_0.weight))
             calls = {"left": 0, "right": 0}
             handles = [
                 state.cpu_model.register_forward_hook(
