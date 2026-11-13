@@ -1,0 +1,13 @@
+{
+  "frames": 1,
+  "payload_bytes": 1024,
+  "encoded_bytes": 1292,
+  "chunks": 3,
+  "trained_steps": 1,
+  "elapsed_seconds": 1.580101099996682,
+  "payload_bytes_per_second": 648.0597982003495,
+  "trained_steps_per_second": 0.6328708966800288,
+  "state_dir": "O:\\Documents\\智能自学习AI（新）\\state_dataset_smoke",
+  "progress": "O:\\Documents\\智能自学习AI（新）\\state_dataset_smoke\\dataset_progress.json",
+  "source_access": "read-only (rb); no source writes in this program"
+}

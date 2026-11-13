@@ -1,0 +1,659 @@
+{
+  "jobs_by_kind": {
+    "train": 32,
+    "consolidate": 84,
+    "sync": 18,
+    "ttt": 118,
+    "snapshot": 1
+  },
+  "jobs_wait_false": [
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25477.516683,
+      "done": 25477.529559
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25477.546564,
+      "done": 25477.561593
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25477.626305,
+      "done": 25477.653189
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25477.672705,
+      "done": 25477.686699
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25477.750028,
+      "done": 25477.763917
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25477.777462,
+      "done": 25477.798062
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25477.818347,
+      "done": 25477.83282
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25477.894566,
+      "done": 25477.921318
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25477.979878,
+      "done": 25478.005855
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25478.025494,
+      "done": 25478.039466
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25478.103128,
+      "done": 25478.117159
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25478.129561,
+      "done": 25478.142368
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25478.212153,
+      "done": 25478.226787
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25478.244806,
+      "done": 25478.258467
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25478.271467,
+      "done": 25478.28495
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25478.355678,
+      "done": 25478.381208
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25478.44851,
+      "done": 25478.463176
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25478.476407,
+      "done": 25478.489809
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25478.513517,
+      "done": 25478.53005
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25478.606691,
+      "done": 25478.623429
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25478.639823,
+      "done": 25478.653029
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25478.73057,
+      "done": 25478.7458
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25478.76463,
+      "done": 25478.779298
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25478.791937,
+      "done": 25478.807145
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25478.863446,
+      "done": 25478.891575
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25478.965416,
+      "done": 25478.979891
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25478.993628,
+      "done": 25479.008513
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25479.030674,
+      "done": 25479.047075
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25479.120146,
+      "done": 25479.133433
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25479.14519,
+      "done": 25479.15875
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25479.231502,
+      "done": 25479.245419
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25479.263951,
+      "done": 25479.276963
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25479.28855,
+      "done": 25479.302863
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25479.370122,
+      "done": 25479.396138
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25479.466643,
+      "done": 25479.493497
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25479.513579,
+      "done": 25479.528375
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25479.592209,
+      "done": 25479.618231
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25479.684677,
+      "done": 25479.699411
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25479.722044,
+      "done": 25479.735607
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25479.749041,
+      "done": 25479.761802
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25479.835043,
+      "done": 25479.863233
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25479.902377,
+      "done": 25479.918241
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25479.931125,
+      "done": 25479.944775
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25479.964677,
+      "done": 25479.979562
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25480.046301,
+      "done": 25480.075957
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25480.151291,
+      "done": 25480.167613
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25480.186784,
+      "done": 25480.212453
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25480.281605,
+      "done": 25480.29522
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25480.306819,
+      "done": 25480.319838
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25480.387736,
+      "done": 25480.402485
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25480.424537,
+      "done": 25480.451172
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25480.523574,
+      "done": 25480.554048
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25480.620319,
+      "done": 25480.634128
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25480.652705,
+      "done": 25480.66616
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25480.678254,
+      "done": 25480.691127
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25480.730873,
+      "done": 25480.755947
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25480.808496,
+      "done": 25480.822705
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25480.841933,
+      "done": 25480.855935
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25480.869177,
+      "done": 25480.882027
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25480.947751,
+      "done": 25480.975289
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25481.011189,
+      "done": 25481.026146
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25481.044289,
+      "done": 25481.05759
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25481.071289,
+      "done": 25481.08506
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25481.158469,
+      "done": 25481.185299
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "left",
+      "exception": null,
+      "enqueue": 25481.258645,
+      "done": 25481.272383
+    },
+    {
+      "kind": "consolidate",
+      "hemisphere": "right",
+      "exception": null,
+      "enqueue": 25481.291819,
+      "done": 25481.30681
+    }
+  ],
+  "jobs_with_exception": [],
+  "wait_true_span": {
+    "count": 187,
+    "max": 0.286055,
+    "mean": 0.015729,
+    "p95": 0.02718
+  },
+  "compute_dur": {
+    "train": {
+      "count": 32,
+      "max": 0.2859,
+      "mean": 0.021319
+    },
+    "consolidate": {
+      "count": 84,
+      "max": 0.020487,
+      "mean": 0.013948
+    },
+    "ttt": {
+      "count": 118,
+      "max": 0.018502,
+      "mean": 0.012577
+    }
+  },
+  "drain": {
+    "count": 32,
+    "with_future": 32,
+    "no_future": 0,
+    "step_delta": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "dur_max": 0.020604,
+    "dur_mean": 0.013753,
+    "exc": []
+  },
+  "schedule": {
+    "count": 86,
+    "new_future": 66,
+    "deferred_pending_running": 20,
+    "by_thread": {
+      "MainThread": 82,
+      "homeostasis": 4
+    },
+    "exc": []
+  },
+  "maybe_switch": {
+    "total": 68,
+    "by_thread": {
+      "MainThread": {
+        "calls": 64,
+        "early_return": 0,
+        "switched": 18,
+        "should_switch": 18
+      },
+      "homeostasis": {
+        "calls": 4,
+        "early_return": 4,
+        "switched": 0,
+        "should_switch": 3
+      }
+    },
+    "early_return_after_monitor": []
+  },
+  "cycles": {
+    "total": 64,
+    "feed": 32,
+    "interact": 32,
+    "feed_dur_max": 0.316319,
+    "feed_dur_mean": 0.047241,
+    "interact_dur_max": 0.111578,
+    "interact_dur_mean": 0.079667,
+    "qsize_before_max": 1,
+    "qsize_after_max": 1,
+    "pending_at_cycle_end": {
+      "('left',)": 9,
+      "('right',)": 26,
+      "()": 6,
+      "('right', 'left')": 18,
+      "('left', 'right')": 5
+    },
+    "switches": 18
+  },
+  "samples": {
+    "count": 41,
+    "qsize_max": 1,
+    "pending_keys_seen": {
+      "()": 9,
+      "('left',)": 5,
+      "('right',)": 22,
+      "('right', 'left')": 4,
+      "('left', 'right')": 1
+    },
+    "threads_seen": [
+      "MainThread",
+      "audit-observer",
+      "audit-sampler",
+      "gpu-training",
+      "homeostasis"
+    ],
+    "thread_states": {
+      "MainThread": {
+        "n/a": 41
+      },
+      "gpu-training": {
+        "n/a": 41
+      },
+      "homeostasis": {
+        "n/a": 41
+      },
+      "audit-sampler": {
+        "n/a": 41
+      },
+      "audit-observer": {
+        "n/a": 40
+      }
+    }
+  },
+  "status_observer": {
+    "count": 22,
+    "max": 0.166629,
+    "mean": 0.040559,
+    "exc": []
+  },
+  "close": [
+    {
+      "close_dur": 0.055241,
+      "exc": null,
+      "final": {
+        "qsize": 0,
+        "pending": {},
+        "active": "left",
+        "steps": {
+          "left": 114,
+          "right": 120
+        },
+        "debt": {
+          "left": 16,
+          "right": 16
+        },
+        "replay": {
+          "left": 41,
+          "right": 55
+        },
+        "switches": 18,
+        "count": 64,
+        "threads": {
+          "MainThread": {
+            "alive": true,
+            "state": "n/a"
+          }
+        }
+      },
+      "fallback_used": false
+    }
+  ]
+}

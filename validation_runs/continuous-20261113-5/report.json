@@ -1,0 +1,248 @@
+{
+  "created_at": "2026-11-13T20:02:08.703268",
+  "all_measurable_criteria_passed": false,
+  "criteria": {
+    "cpu_inference_gpu_training": true,
+    "mixed_cycles_completed": true,
+    "both_hemispheres_trained": true,
+    "automatic_switching": true,
+    "ttt_weight_updates": true,
+    "passive_cpu_isolation": true,
+    "train_loss_finite": true,
+    "debt_bounded": true,
+    "replay_bounded": true,
+    "duplicate_cleaning": true,
+    "automatic_structure_events": false,
+    "restarts_exact": true,
+    "real_dataset_volume": true,
+    "real_dataset_resume": true,
+    "source_files_unchanged": true,
+    "queue_drained": true,
+    "learning_rate_in_bounds": true,
+    "host_memory_bounded": true,
+    "gpu_memory_bounded": true,
+    "no_runtime_errors": true
+  },
+  "mixed_cycles": 200,
+  "elapsed_seconds": 277.31174250000186,
+  "left_steps": 3003,
+  "right_steps": 8103,
+  "switches": 16,
+  "ttt_samples": 40,
+  "ttt_minimum_weight_l1_delta": 20.809267044067383,
+  "lr_values": {
+    "left": [
+      1e-05,
+      1.0500000000000001e-05,
+      1.1025000000000002e-05,
+      1.2407789013376048e-05,
+      2.0679648355626748e-05,
+      3.446608059271125e-05,
+      5.4708064432875e-05,
+      5.744346765451875e-05,
+      9.118010738812501e-05,
+      0.00013783840875,
+      0.00014473032918750002,
+      0.00015196684564687502,
+      0.00021879112500000002,
+      0.00022973068125000003,
+      0.0003,
+      0.00031499999999999996,
+      0.00033075,
+      0.0003472875,
+      0.00036465187500000004
+    ],
+    "right": [
+      1e-05,
+      1.0207918727999997e-05,
+      1.0500000000000001e-05,
+      2.835532979999999e-05,
+      7.876480499999999e-05,
+      0.00012502349999999997,
+      0.00013127467499999998,
+      0.00018899999999999996,
+      0.00019844999999999997,
+      0.00020837249999999997,
+      0.0003,
+      0.00031499999999999996
+    ]
+  },
+  "hidden_history": {
+    "left": [
+      [
+        256,
+        256
+      ],
+      [
+        256,
+        272
+      ],
+      [
+        256,
+        288
+      ],
+      [
+        272,
+        288
+      ],
+      [
+        288,
+        288
+      ],
+      [
+        288,
+        304
+      ],
+      [
+        304,
+        304
+      ],
+      [
+        320,
+        304
+      ],
+      [
+        320,
+        320
+      ],
+      [
+        320,
+        336
+      ]
+    ],
+    "right": [
+      [
+        256,
+        256
+      ],
+      [
+        256,
+        272
+      ],
+      [
+        256,
+        288
+      ],
+      [
+        272,
+        288
+      ],
+      [
+        288,
+        288
+      ],
+      [
+        288,
+        304
+      ],
+      [
+        304,
+        304
+      ],
+      [
+        320,
+        304
+      ],
+      [
+        320,
+        320
+      ],
+      [
+        320,
+        336
+      ]
+    ]
+  },
+  "automatic_structure": {
+    "growth_event": null,
+    "growth_dim": [
+      256,
+      256
+    ],
+    "prune_event": null,
+    "prune_dim": [
+      256,
+      256
+    ],
+    "passed": false
+  },
+  "cleaning": {
+    "unique_before": 429,
+    "unique_after": 430,
+    "increase": 1,
+    "minimum_feed_weight": 0.0283203125
+  },
+  "real_dataset": {
+    "requested_bytes": 20000000,
+    "payload_bytes": 20000000,
+    "frames": 26,
+    "resume_verified": true,
+    "source_unchanged": true,
+    "resume_offset": 16724230
+  },
+  "restarts": [
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 132,
+        "right": 130
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 275,
+        "right": 270
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 416,
+        "right": 414
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 562,
+        "right": 560
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 3003,
+        "right": 8103
+      }
+    }
+  ],
+  "memory": {
+    "rss_baseline_mb": 0.0,
+    "rss_final_mb": 0.0,
+    "gpu_baseline_bytes": 2920448,
+    "gpu_final_bytes": 44828672
+  },
+  "state_dir": "O:\\Documents\\智能自学习AI（新）\\validation_runs\\continuous-20261113-5\\state",
+  "scope": "Mechanism validation only; no claim of semantic understanding or consciousness."
+}

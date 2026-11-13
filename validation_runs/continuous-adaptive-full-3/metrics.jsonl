@@ -1,0 +1,1 @@
+{"stage": "cycle", "cycle": 0, "active_before": "left", "active_after": "left", "passive_before": "right", "calls_before": {"left": 0, "right": 0}, "calls_after": {"left": 9, "right": 0}, "interactions": 1, "switches": 0}

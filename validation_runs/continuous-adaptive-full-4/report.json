@@ -1,0 +1,10 @@
+{
+  "created_at": "2026-11-13T20:40:06.447732",
+  "all_measurable_criteria_passed": false,
+  "errors": [
+    "AssertionError('TTT did not publish changed CPU weights at cycle 0')",
+    "Traceback (most recent call last):\n  File \"O:\\Documents\\智能自学习AI（新）\\continuous_validation.py\", line 333, in main\n    raise AssertionError(f\"TTT did not publish changed CPU weights at cycle {cycle}\")\nAssertionError: TTT did not publish changed CPU weights at cycle 0\n"
+  ],
+  "elapsed_seconds": 2.4716872999997577,
+  "state_dir": "O:\\Documents\\智能自学习AI（新）\\validation_runs\\continuous-adaptive-full-4\\state"
+}

@@ -1,0 +1,63 @@
+{
+  "format_version": 2,
+  "active": "right",
+  "interaction_count": 261,
+  "switch_count": 61,
+  "adaptive_switch": {
+    "baseline_clean_pressure": 1875.1040682538846,
+    "baseline_active_work": 5548.0,
+    "baseline_passive_work": 5386.0
+  },
+  "hemispheres": {
+    "left": {
+      "global_step": 5558,
+      "last_event": "consolidate:loss=1.9969;lr=1.00e-05;hold",
+      "last_loss": 1.9969000816345215,
+      "hidden_dims": [
+        512,
+        512
+      ],
+      "replay_samples": 1024,
+      "debt_items": 512,
+      "debt_total_created": 20172,
+      "debt_total_repaid": 1704,
+      "debt_repayment_batches": 215,
+      "debt_repayment_capacity": 1.1702810017190954,
+      "debt_total_clean_added": 1957.3125997532711,
+      "debt_weight_min": 0.023463964462280273,
+      "debt_weight_max": 0.098876953125,
+      "debt_weight_mean": 0.05708402578155915,
+      "debt_backlog_recomputed": 28.44165877254856,
+      "optimizer_state_param_count": 28,
+      "optimizer_param_groups_lr": [
+        1e-05
+      ],
+      "debt_weights_over_cap4": 0
+    },
+    "right": {
+      "global_step": 5618,
+      "last_event": "train:loss=2.7168;lr=1.00e-05;loss_spike",
+      "last_loss": 2.7168099880218506,
+      "hidden_dims": [
+        512,
+        512
+      ],
+      "replay_samples": 1024,
+      "debt_items": 512,
+      "debt_total_created": 19952,
+      "debt_total_repaid": 1404,
+      "debt_repayment_batches": 178,
+      "debt_repayment_capacity": 1.2326226972696843,
+      "debt_total_clean_added": 1841.9512189542418,
+      "debt_weight_min": 0.098876953125,
+      "debt_weight_max": 0.230712890625,
+      "debt_weight_mean": 0.09950811043381691,
+      "debt_backlog_recomputed": 50.94815254211426,
+      "optimizer_state_param_count": 28,
+      "optimizer_param_groups_lr": [
+        1e-05
+      ],
+      "debt_weights_over_cap4": 0
+    }
+  }
+}

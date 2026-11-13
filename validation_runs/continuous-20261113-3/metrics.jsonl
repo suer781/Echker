@@ -1,0 +1,3 @@
+{"stage": "restart", "at_cycle": 50, "loaded": true, "active_match": true, "switches_match": true, "steps_match": true, "weights_match": true, "steps": {"left": 128, "right": 128}}
+{"stage": "restart", "at_cycle": 100, "loaded": true, "active_match": true, "switches_match": true, "steps_match": true, "weights_match": true, "steps": {"left": 259, "right": 238}}
+{"stage": "restart", "at_cycle": 150, "loaded": true, "active_match": true, "switches_match": true, "steps_match": true, "weights_match": true, "steps": {"left": 386, "right": 359}}

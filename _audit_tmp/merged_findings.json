@@ -1,0 +1,1147 @@
+{
+  "audit": "adaptive switch after feed/consolidate starvation fix",
+  "generated_at": "2026-11-13T21:35:52",
+  "project_root": "O:\\Documents\\智能自学习AI（新）",
+  "parts": [
+    {
+      "part": "concurrency",
+      "reviewer": "concurrency",
+      "count": 10,
+      "verdict": "不阻断当前小负载继续运行；建议合并前优先处理 CONC-02（快照前等待巩固）与 CONC-03（切换后 pending 角色校正），并补齐 CONC-01 的等待超时/失活看门狗与 CONC-04 的背景错误聚合。CONC-05 需在更高频 ttt / 更大批次负载下压测再定论；本次未跑 10 GiB 全量训练，大负载下的锁竞争与队列放大倍数未测量。",
+      "experiments": 2
+    },
+    {
+      "part": "math",
+      "reviewer": "switch_math",
+      "count": 10,
+      "verdict": "混合阶段 39 次可观测翻转间隔 ≥3 轮、无相邻连翻，现有证据不支持“切换—同步—立刻再切换”的自激环；61/200 的高频主要发生在缺少记录的灌入阶段，属未闭合盲区，不宜据此判定为抖动。优先修复 MATH-01（基线角色对齐）与 MATH-02（工作口径拆分），再补逐决策日志闭合 MATH-06；MATH-03/04 为阈值统计口径改进。不建议在缺少振荡证据时添加固定切换间隔定时器。",
+      "experiments": 5
+    },
+    {
+      "part": "persistence",
+      "reviewer": "persistence_verifier",
+      "count": 13,
+      "verdict": "不建议把现有 21/21 通过视为持久化一致性与验证器可信度的充分证据。阻断级问题：PERS-02（重启比对盲区导致还原错误不可见）、PERS-01/PERS-05（自动落盘边界与重复记账）；PERS-06 使 skip-real 运行的真实数据结论无效。建议先补齐全字段往返比对与决策/错误全程记录，再重跑验证。",
+      "experiments": 3
+    },
+    {
+      "part": "readiness",
+      "reviewer": "readiness",
+      "count": 23,
+      "verdict": "不具备直接启动 10.164 GiB 全量训练的前置条件。需先完成跨格式有界实测（吞吐/资源/边界）、补齐工程加固与上述并发/持久化回归测试，并按阶段1 门禁取得可复现指标后，再进入全量。",
+      "experiments": 4
+    },
+    {
+      "part": "novelty",
+      "reviewer": "novelty",
+      "count": 8,
+      "verdict": "本轮为设计边界审查，未改源码。结论：把现有重复降权表述为「模型厌恶/烦躁重复」缺乏可测机制支撑；现状是表层字节去重与低熵乘权。建议按「只记录 → 仅降权 → 附加门控」三阶段推进，先在固定种子对照实验中测得可复现的边际收益衰减曲线，再决定是否进入决策回路；梯度 SNR 暂缓，硬拒绝不允许进入准入路径。",
+      "experiments": 3
+    }
+  ],
+  "total_findings": 64,
+  "findings": [
+    {
+      "part": "concurrency",
+      "id": "CONC-01",
+      "title": "所有 future.result() 无超时：worker 崩溃或任务挂起时调用方与 close 永久阻塞",
+      "severity": "高",
+      "kind": "真实缺陷",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/agent.py:256",
+        "life_agent/agent.py:267",
+        "life_agent/agent.py:273",
+        "life_agent/worker.py:219",
+        "life_agent/agent.py:404-412"
+      ],
+      "evidence": "代码路径上 submit(wait=True)、_schedule 完成分支、_drain、_wait_consolidations 全部调用无 timeout 的 future.result()。worker._run 仅捕获 Exception 并 set_exception；若线程遭遇未被 Exception 覆盖的致命错误、或单个 job 在 GPU/CPU 内挂起（死锁、无限循环、CUDA 阻塞），对应 future 永不 resolve。close() 先 _wait_consolidations 再 worker.stop()，等待挂起时停止哨兵永远入队，close 无法解除挂起。两次健康实验中 wait=False future 全部 resolve、0 异常（audit1 66/66，audit2 56/56），挂起路径未做故障注入验证。",
+      "impact": "后台任务一旦挂起，feed/interact 调用方阻塞；agent.close() 同样挂死，进程无法干净退出，且没有超时上报或看门狗兜底。",
+      "recommendation": "为 result() 增加有界超时与看门狗；close 流程先停止 worker 再对背景 future 做有界等待，超时后上报而非无限阻塞；区分‘job 失败’与‘worker 失活’两类状态。",
+      "regression_test": "注入一个永不 resolve 的 future（或在 worker 内卡住的 job），断言 close 在有界时间内以明确错误返回，而不是无限挂死；并断言失活状态被可观测地上报。"
+    },
+    {
+      "part": "math",
+      "id": "MATH-01",
+      "title": "note_switch 工作基线按 left/right 硬编码传参，与实际 active/passive 角色错位",
+      "severity": "高",
+      "kind": "真实缺陷",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/agent.py:314-318",
+        "life_agent/agent.py:336-337",
+        "life_agent/store.py:118-122",
+        "life_agent/switching.py:81-82"
+      ],
+      "evidence": "decide() 按实际 active_name/passive_name 取 global_step（agent.py:336-337），但 note_switch 固定把 left.global_step 写入 baseline_active_work、right.global_step 写入 baseline_passive_work（agent.py:316-317），重载 fallback 同样硬编码左右（store.py:120-121）。仿真 C2：切换后 active=right(R0=200)/passive=left(L0=180)，记录基线 active=180/passive=200；后续 R1=230、L1=190 时错误映射得 active_delta=50、passive_delta=-10（被钳为 0），正确角色映射应为 active_delta=30、passive_delta=10；决策被误判为 'passive side has not yet carried measurable work' 而不切换。",
+      "impact": "工作增量对照错半球基线：被动侧增量可能被算成负数后钳 0（显得完全没工作），主动侧增量被高估或低估；在右半球为主动时工作判据系统性偏斜，可能错误放行或错误抑制切换。",
+      "recommendation": "note_switch 改传 state(active).global_step 与 state(passive).global_step，并在基线中记录半球标识；store.py 重载 fallback 同步按角色取值。",
+      "regression_test": "两次切换的集成测试：断言 baseline_active_work 等于新主动侧 global_step；右主动场景下 active_delta/passive_delta 与角色一致，不出现负 passive_delta。"
+    },
+    {
+      "part": "math",
+      "id": "MATH-02",
+      "title": "ttt/train/consolidate 三类 job 共用同一 global_step，被动侧巩固步数被计入 passive_delta",
+      "severity": "高",
+      "kind": "真实缺陷",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/worker.py:295",
+        "life_agent/worker.py:417-424",
+        "life_agent/agent.py:346",
+        "life_agent/switching.py:86"
+      ],
+      "evidence": "global_step 唯一递增点在 _train 第 295 行（state.global_step += 1），对 job.kind 无分支守卫；ttt/train/consolidate 均经 worker.py:417-421 进入 _train，因此 consolidate 的回放巩固步数同样累计。仿真 C1：主动 +3 步/轮、被动巩固 +5 步/轮，12 轮全部被 'passive side already carried at least as much recent work' 阻塞，首轮即 passive_delta=5 >= active_delta=3。已核实：ttt 同样计入 global_step（不存在“ttt 不算导致主动侧被低估”的反向问题）。",
+      "impact": "被动侧的回放巩固被计为“工作”。巩固密集时 passive_delta 可超过 active_delta，交接被工作判据抑制；若新主动侧在线更新步数少于被动侧回放步数，可能长期追不上，切换被永久抑制。docstring 原意是“被动侧确实工作过”，但巩固步数是债务回放而非新数据学习，口径与指标含义不一致。",
+      "recommendation": "拆分在线更新步数与巩固步数计数器，工作判据按选定口径分别累计；或在文档/注释中明确 passive_delta 包含回放巩固，并据此校准判据阈值。",
+      "regression_test": "向被动侧提交 consolidate job，断言工作增量口径与设计一致；主动在线步长小于被动巩固步长时的判据行为有固定断言（放行或抑制均需明确）。"
+    },
+    {
+      "part": "novelty",
+      "id": "NOV-05",
+      "title": "若未来对低新颖度信号做「硬拒绝/完全停止学习」，存在合法低熵数据误伤路径与缓冲/统计双重分布偏置；当前代码本身无硬拒绝路径",
+      "severity": "高",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/memory.py:111-124",
+        "life_agent/memory.py:81-95",
+        "life_agent/config.py:53-57",
+        "life_agent/agent.py:127-131"
+      ],
+      "evidence": "现状：ReplayBuffer.add 与 DebtLedger.add 始终入库，权重地板 0.001（115），源码注释 113-114 明示纯色图、静音、稀疏二进制格式不得硬拒。配置上限 replay_capacity=1024、debt_capacity=512、debt_retention=0.35、debt_decay=0.75、debt_min_weight=0.005。实测已落到地板的合法低熵样本：静音 PCM 256 零、纯色灰 256（quality 0.001）；表格重复行与周期流当前质量 1.0/0.78125，若改用熵/新颖度门控同样可能被误杀。误伤路径：静音 PCM、纯色帧、结构化表格、重复运行日志、协议固定帧头被直接丢弃。分布偏置机制：被拒样本永久缺席有界缓冲 → clean_pressure 少计（195 行 total_clean_added 只计入库项）→ sufficient_data 更难满足、切换节奏失真；StatisticalCleaner.loss_mean/loss_var 只在入库样本上按 0.02 EWMA 更新（89-93），选择偏置使 2.5-sigma 离群阈值被留在库内的高熵/高损样本带偏，robust_weight 校准失效；合法重复模式永远无法经 replay 巩固。",
+      "impact": "硬拒绝是单向门：缓冲满员后被驱逐的本就是低权项（126-129），再叠加准入拒绝会使低熵合法类在数据集中的占比单调归零，且事后无法从账本恢复证据。3GB 显存/CPU 在线条件下也没有重放被拒样本的旁路。",
+      "recommendation": "【尚未实现/设计建议】信号作用边界限定为：① 降低采样/巩固优先级（权重/抽签概率）；② 触发探索请求或作为切换的附加门控；不允许完全停止学习或丢弃样本。被降权样本仍保留在有界缓冲中可复访；准入层只保留现有 structural_quality 乘权与 digest 去重。任何硬拒绝提案需先补误伤清单与分布偏置度量。",
+      "regression_test": "test_low_entropy_legal_frames_not_hard_rejected：静音 PCM、纯色帧、表格重复行、重复日志各入库；断言四类样本均出现在 replay 与 debt 中、权重 ≥ 0.001；未来新增门控返回拒绝路径时该测试失败。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-01",
+      "title": "agent.save() 不等待在途 consolidation，monitor 自动落盘的检查点与调用方看到的内存状态处于不同作业边界",
+      "severity": "高",
+      "kind": "真实缺陷",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/agent.py:359-365",
+        "life_agent/agent.py:348-357",
+        "life_agent/agent.py:269-280",
+        "life_agent/agent.py:397-416"
+      ],
+      "evidence": "close() 顺序为 stop_event.set → monitor join(10) → with lock: _wait_consolidations → save → worker.stop（agent.py:400-413）；而 save() 自身只有 `with self.lock: StateStore.save`（agent.py:362-363），没有调用 _wait_consolidations。_monitor 每 checkpoint_interval_s(300s) 在同一把锁内直接调 self.save()（agent.py:351-355）。后台 consolidation 由 _schedule_passive_consolidation 以 wait=False 提交，future 留在 pending_consolidation 字典里（agent.py:257-262），不落盘。隔离实验 run1：在交互/喂数后取内存快照 live_before，随即 save()，最后 close() 等待合并后再次落盘；重载后与 live_before 比对，右半球出现 16 处差异：global_step 7→8、total_trained_bytes 440→508、last_loss 5.5135→5.1813、last_event 'reciprocal sync'→'consolidate:...'、replay cleaner count 12→14/mean/var 变化、lr best_loss/ema_loss/stale_updates 变化、structure losses_len 7→8、4 条 debt 样本 weight/loss 不同；pending 字段 live=['right'] 而 restored=[]。",
+      "impact": "monitor 周期触发的检查点可能对应一个尚未完成被动半球合并的作业边界；该在途 future 重启后丢失。若检查点先于合并落盘，债务样本仍在账本中但预选记账已发生（见 PERS-05），重启后可能被再次选中偿还，偿还计数重复；权重与债务账龄不处在同一语义点。",
+      "recommendation": "在 StateStore.save 之前（或 agent.save() 内）调用 _wait_consolidations()，与 close() 路径对齐；或在 payload 中持久化 pending consolidation 的样本快照与未完成标记，重启后据此决定是否补发合并。",
+      "regression_test": "构造：提交 wait=False 的 consolidate 后不 drain，直接调 agent.save()，重载后比对 debt 计数器、debt 样本 weight、replay cleaner、lr 与 structure 内部状态与 save 前一致；断言 pending 对应的债务批次在检查点中的记账与权重状态一致。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-02",
+      "title": "重启一致性比对只覆盖 active/switch_count/global_step/单层权重，债务、replay、cleaner、optimizer、lr、structure、历史均未参与；且权重比对是磁盘-磁盘循环验证",
+      "severity": "高",
+      "kind": "验证盲区",
+      "strength": "已实测证实",
+      "location": [
+        "continuous_validation.py:164-205",
+        "continuous_validation.py:180-186",
+        "life_agent/store.py:77-97"
+      ],
+      "evidence": "verify_restore 记录的字段只有 loaded/active_match/switches_match/steps_match/weights_match（continuous_validation.py:187-194）。weights_match 仅比较 `blocks.0.fc1.weight` 一个张量（180-186），其余层、token_embedding、lm_head、LayerNorm、buffer 均未比。对比两侧：payload 直接来自刚落盘的 latest.pt（170），restored 也是从同一个 latest.pt 加载（175-176），因此 weights_match 本质是磁盘文件→同文件重载的自洽性检查，并未与 close 前的实时内存状态比对。债务账本 items/weight/计数器、replay 样本与 StatisticalCleaner、optimizer AdamW 状态(exp_avg/exp_avg_sq)、lr 控制器(best_loss/ema_loss/stale_updates)、StructureController(losses 队列/last_change_step)、history、interaction_count、observed_frames、hidden_dims 全部未比对。full-7 restarts 5 条记录字段完全相同，无上述字段。",
+      "impact": "即使债务被错误清零/重复记账、replay cleaner 统计丢失、optimizer 动量错位、结构控制器队列丢失，现有 21/21 通过结论都不会失败。'4+1 次恢复完全一致'的说法不成立：被证明一致的仅是活动侧、切换次数、步数和一层权重。",
+      "recommendation": "在 verify_restore 中先对 close 前内存状态做完整快照（debt items+计数器、replay items+cleaner、optimizer state 摘要、lr/structure dict、history、计数、hidden_dims），落盘后重载再逐项比对；权重比对应遍历全部参数张量与 buffer，而非单层 fc1。",
+      "regression_test": "重载断言集应包含：debt digest→(weight,loss) 全量相等、五个计数器相等、replay digest 集合与 cleaner 三字段相等、optimizer state 键数与 exp_avg 形状/数值相等、lr/structure dict 相等、history 与计数相等、hidden_dims 相等。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-05",
+      "title": "队列优先级使 snapshot(2) 可先于排队中的 train(3)/consolidate(4) 执行；而 due() 在预选阶段就累计偿还计数，快照先于训练时计数与权重状态不一致",
+      "severity": "高",
+      "kind": "真实缺陷",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/worker.py:208",
+        "life_agent/memory.py:206-219",
+        "life_agent/worker.py:422-424",
+        "life_agent/agent.py:257-262"
+      ],
+      "evidence": "submit 优先级表：ttt=0, sync/resize=1, snapshot=2, train=3, consolidate=4（worker.py:208），PriorityQueue 数值小者先出。consolidate 由 _debt_training_samples → debt.due(limit) 预选，due() 在此时就 total_repaid += len(selected)、repayment_batches += 1、更新 repayment_capacity（memory.py:209-218），训练任务随后才在 worker 线程执行 _train，任务末尾再 decay_after_training（worker.py:421-424）。若 snapshot 在 consolidate 仍排队时入队，按优先级 snapshot 先被取出：检查点记录的是已 advance 的偿还计数 + 尚未训练/未衰减的债务权重，而该 consolidate future 不落盘（PERS-01）。",
+      "impact": "重启后债务样本仍在账本中，下一轮 due() 再次选中并再次记账，total_repaid/repayment_batches 重复累计；repayment_capacity 均值基于未训练批次计算，学习容量估计偏高。最小复现思路：先向 worker 队列填满 train/consolidate 作业占住队列，再以 wait=False 提交 consolidate，随后直接 submit('snapshot') wait=True；比对 payload.debt 计数器与该 future 完成后的实时计数/权重。",
+      "recommendation": "snapshot 提交前排空/等待已排队的 train 与 consolidate；或把偿还计数推迟到训练+衰减完成后再累计；检查点中记录 pending 批次并在重启后补偿。",
+      "regression_test": "在 consolidate 排队未执行时强制快照，断言 debt 计数器与债务权重同属一个训练后边界；重启后同一批次不得被二次记账。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-06",
+      "title": "--skip-real 时 real_dataset_volume / real_dataset_resume / source_files_unchanged 全部短路为 true，无真实数据证据也判通过",
+      "severity": "高",
+      "kind": "验证盲区",
+      "strength": "已实测证实",
+      "location": [
+        "continuous_validation.py:503-506",
+        "continuous_validation.py:407-413",
+        "continuous_validation.py:454-456"
+      ],
+      "evidence": "real_dataset_volume = `args.skip_real or real['payload_bytes'] >= min(...)`（503-504）；skip-real 分支直接 `real['resume_verified']=True; real['resume_offset']=0`（455-456）；source_unchanged 默认 True（412），仅在非 skip 循环内比对文件 size/mtime（429-433），skip 时永不校验。对照 validation_runs：continuous-adaptive-1 与 continuous-adaptive-2 的 real_dataset requested=0/payload=0/frames=0，但 criteria 中 real_dataset_volume、real_dataset_resume、source_files_unchanged 均为 true。",
+      "impact": "跳过真实数据集运行后，报告仍声称真实数据量、断点续读、源文件未改动三项成立；这些判据在 skip-real 运行中没有任何测量证据。",
+      "recommendation": "skip-real 时三项判据应为 null/skipped 而非 true；report 中明确区分 measured 与 skipped，all_measurable_criteria_passed 不应把 skipped 当作通过。",
+      "regression_test": "skip-real 运行输出 report 中 real_dataset 三项状态为 skipped；只有真实喂数时才置 true。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-01",
+      "title": "20 MB 真实样本仅覆盖 LogiQA 单目录 8 个文件，格式分布不代表全量",
+      "severity": "高",
+      "kind": "验证盲区",
+      "strength": "已实测证实",
+      "location": [
+        "validation_runs/continuous-adaptive-full-7/dataset_progress.json:5-53",
+        "dataset_inventory.json:14-87",
+        "continuous_validation.py:414-428"
+      ],
+      "evidence": "progress 文件记录 8 个被触碰文件，全部位于 01_LogiQA 目录；扩展名分布：.parquet 1 个/387,042 B，.txt 4 个/2,880,160 B，.md 2 个/8,568 B，.jsonl 1 个/16,840,405 B。源文件大小合计 20,116,175 B，仅占清单 10,913,873,703 B 的 0.184%，文件数占 8/760=1.05%；实际读取 payload 20,000,000 B、26 帧（report.json real_dataset）。全量清单含 .parquet 227 个/1.663 GiB、.json 238 个/1.336 GiB、.csv 136 个/0.746 GiB、.arrow 3 个/0.618 GiB、.zip 3 个/0.023 GiB、.png 7 个、.jpeg 2 个、.pdf 1 个、.ipynb 5 个，这些格式在已跑真实数据中一个都没有被喂入。",
+      "impact": "Parquet/Arrow/CSV/JSON/压缩包/图片/PDF 的分块行为、帧大小边界、CRC 与吞吐/内存表现均未在真实数据上验证；用 LogiQA 小文本段外推 10.164 GiB 全量不具备格式代表性。",
+      "recommendation": "全量前按格式分别跑有界小段（每种格式 --max-bytes 5 MB 量级），记录帧/块/步/字节/耗时/错误与 RSS、显存；冻结一份采样清单（含每文件大小、扩展名、sha256），再决定全量顺序。",
+      "regression_test": "test_inventory_format_coverage：在临时目录构造覆盖每种扩展名的文件，有界流式喂入，断言 visit 到的扩展名集合与预期一致，且任意帧不抛出未捕获异常。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-03",
+      "title": "验证路径先写进度偏移、后存检查点，崩溃窗口可丢帧；ingest 路径顺序相反，两条路径 durability 语义不一致",
+      "severity": "高",
+      "kind": "真实缺陷",
+      "strength": "代码推断",
+      "location": [
+        "continuous_validation.py:418-428",
+        "ingest_dataset.py:250-264",
+        "ingest_dataset.py:268-270"
+      ],
+      "evidence": "continuous_validation 真实数据循环：agent.feed_frame(frame) 后立即 progress.mark(record, next_offset)，agent.save() 每 4 帧才一次（426-428）。若在 mark 之后、save 之前崩溃，重启后进度偏移已前进，但该帧权重从未写入检查点，恢复时跳过该帧——学习丢失。ingest_dataset 主循环则相反：先 agent.save() 再 commit_progress()（260-264），注释明确“checkpoint committed before its dataset offsets”，崩溃只会重复最近未提交的帧，不会跳过。",
+      "impact": "长跑中按验证路径语义运行时，最近 ≤4 帧的学习可能被静默丢弃；两条路径恢复语义不统一，故障排查与幂等保证困难。",
+      "recommendation": "统一为“检查点持久化成功后再提交偏移”；progress 记录最后一次成功检查点标识；恢复时校验偏移不得超过检查点覆盖范围；失败帧进入重试队列而非直接标记完成。",
+      "regression_test": "test_progress_not_ahead_of_checkpoint：喂入 N 帧后在保存前模拟崩溃，从进度文件恢复，断言没有任何偏移领先于已持久化状态，且未保存帧被重放而非跳过。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-05",
+      "title": "吞吐无法从持久化产物中拆分出纯真实数据段，全量时长外推不确定性大",
+      "severity": "高",
+      "kind": "验证盲区",
+      "strength": "尚未验证",
+      "location": [
+        "validation_runs/continuous-adaptive-full-7/report.json:27-33",
+        "validation_runs/continuous-adaptive-full-7/metrics.jsonl",
+        "state_dataset_smoke/last_run.json"
+      ],
+      "evidence": "report 记录总耗时 275.716 s，混合了 200 次合成交互、5 次检查点重载/恢复、清洗阶段与 20 MB 真实数据；metrics.jsonl 只有 cycle/restart/cleaning 三类记录，没有分阶段或逐帧耗时字段。实测混合速率 20,000,000 B / 275.716 s = 72,538 B/s（约 70.8 KiB/s），按此外推 10,913,873,703 B 约 150,457 s = 41.8 h；README:146 称 2 MB 段实测 79.3 KB/s、外推约 38.2 h，但当前 state_dataset_smoke/last_run.json 只记录 1024 B / 1.580 s / 648 B/s，该 79.3 KB/s 段的产物在本环境中找不到，无法独立复核。合成与真实阶段的步数拆分也未持久化（总计 left 5558 + right 5618 = 11,176 步）。",
+      "impact": "全量运行窗口、检查点节奏、磁盘与人力安排缺少可靠依据；结构生长、离线巩固、双半球同步、保存开销在数十小时尺度下的累积效应未观测。",
+      "recommendation": "在 ingest 循环中逐帧记录 bytes/chunks/steps/elapsed 与阶段标记到 JSONL；先跑一个 100–200 MB 跨格式真实数据段，测纯数据吞吐、步数/字节比、RSS/显存曲线，再外推全量；不要沿用混合段速率直接排期。",
+      "regression_test": "test_frame_timing_metrics_recorded：断言每次 feed 落一条含 payload_bytes、chunks、steps、elapsed_ms 的记录，且可按阶段汇总出纯真实数据吞吐。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-06",
+      "title": "长程资源趋势未验证：RSS 422→1226 MB、检查点 18.1 MB×2、无轮转、无日志轮转、无磁盘配额检查",
+      "severity": "高",
+      "kind": "验证盲区",
+      "strength": "代码推断",
+      "location": [
+        "validation_runs/continuous-adaptive-full-7/report.json:329-333",
+        "life_agent/store.py:27-48",
+        "life_agent/agent.py:348-357",
+        "config.json:40"
+      ],
+      "evidence": "report 内存：RSS 基线 422.29 MB、结束 1225.69 MB（+803.4 MB）；GPU 2.92 MB→44.83 MB。检查点：冷启动轮次 latest.pt 约 8.8–10.8 MB，回放/债务填满后的 full-5/6/7 约 17.5–18.1 MB，且 latest.pt 与 latest.backup.pt 各一份；store.py 只保留这两份，无历史轮转。checkpoint_interval_s=300，monitor 线程到时保存；ingest 另每 10 帧保存一次。metrics.jsonl 在验证 harness 中 205 行/47,525 B（约 232 B/行），追加写无轮转；ingest_dataset 本身只向 stdout 打 JSON，无日志文件与轮转。代码中未检索到 quota/rotation/retry/磁盘余量检查逻辑。",
+      "impact": "数十小时运行中：RSS 是否在 replay/debt 容量饱和后趋平未验证；检查点随 hidden_dim 从 256 长到 416/400 已增大，到 512 上限的体积未知；旧检查点无法回滚到更早状态；日志无限增长；磁盘写满或内存触顶时无前置告警与降级。",
+      "recommendation": "全量前落实：检查点轮转策略（保留 N 份并自动清理）、日志按大小/行数轮转、运行前记录 RSS/显存/磁盘基线与上限告警；监控 replay/debt 饱和度与 hidden_dim 上限；先做长程（数小时）稳定性观察。",
+      "regression_test": "test_checkpoint_rotation_and_log_rollover：模拟多次保存，断言只保留配置份数的检查点、旧份被清理；日志超过阈值后滚动；磁盘余量低于阈值时进入告警/降级而非直接写满。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-12",
+      "title": "LR 上限 3e-3 从未被真实数据触碰；spike 降速分支原因未持久化，边界行为未验证",
+      "severity": "高",
+      "kind": "验证盲区",
+      "strength": "已实测证实",
+      "location": [
+        "validation_runs/continuous-adaptive-full-7/report.json:34-71",
+        "life_agent/worker.py:35-56",
+        "config.json:24-29"
+      ],
+      "evidence": "report lr_values：左侧 1e-5 → 3.15e-4，右侧 1e-5 → 3.473e-4；上限 3e-3 从未接近（峰值约为上限的 11.6%），下限 1e-5 仅在初值到达。metrics.jsonl 不记录 lr 更新原因（plateau/spike/hold）、ema_loss、stale_updates，无法从产物判断 loss_spike_ratio=1.35 分支是否真实触发。",
+      "impact": "上限钳位、spike 大幅降速、非有限损失降速这几条保护路径只在单元测试里走过小模型，未在真实数据流上验证；全量分布切换时 LR 振荡行为未知。",
+      "recommendation": "把 lr reason/ema_loss/stale_updates/grad_norm 写入 metrics；补上限/下限钳位与 spike 降速的单元测试；真实数据段观测 LR 轨迹是否贴近或越过边界。",
+      "regression_test": "test_lr_clamps_at_max_and_min：构造持续平台期逼 LR 到 max、构造 spike 逼到 min，断言被钳位且记录的 reason 正确；test_lr_spike_down_reason_recorded 断言 spike 分支落盘可查。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-15",
+      "title": "缺失测试：持续 feed 下 drain 被动巩固的锁持有时间",
+      "severity": "高",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/agent.py:205-228",
+        "life_agent/agent.py:264-267"
+      ],
+      "evidence": "feed_frame 在 self.lock 内 submit(train, wait=True)，随后 _drain_passive_consolidation 在同一把锁内 future.result() 等待被动巩固完成。现有 test_feed_frame_is_not_starved_by_passive_queue 只断言被动步数增加、pending 清空，没有测量持锁时长，也没有在 drain 期间并发观察 monitor/其他线程是否被阻塞。既有并发审计记录 drain 最长 0.0206 s、wait_true 最长 0.286 s（_audit_tmp/concurrency/audit_summary.json），但那是一次性观测，不是回归测试。",
+      "impact": "长程下若被动巩固队列变长，持锁等待会阻塞 monitor 与交互线程，放大尾延迟；无测试守护该边界。",
+      "recommendation": "测量 feed/interact 临界区持锁时长与 drain future 等待时长，设阈值告警；测试覆盖 drain 慢任务下其他线程不被无限期阻塞。",
+      "regression_test": "test_drain_lock_hold_time_bounded：注入慢巩固 future，记录持锁时长，断言低于阈值且 monitor 线程仍能按时获得锁。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-22",
+      "title": "缺失测试：pending future 异常在 schedule/drain 路径上的传播（现有覆盖仅限 close 路径）",
+      "severity": "高",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/agent.py:249-267",
+        "life_agent/agent.py:269-280",
+        "tests/test_integration.py:176-191"
+      ],
+      "evidence": "_schedule_passive_consolidation 对已完成但异常的 future 调 result() 重新抛出；_drain_passive_consolidation 同样 result()；_wait_consolidations 收集首个异常并在 close 时抛出。现有 test_running_load_rejected_and_background_failure_is_not_silent 只在 close() 路径塞入失败 future 并断言抛出；feed/interact/monitor 触发 schedule 或 drain 时 future 异常如何传播、agent 状态是否可恢复，没有测试。",
+      "impact": "后台巩固异常若在 feed 路径被吞或导致状态半初始化，长程运行可能静默退化；异常恢复路径未验证。",
+      "recommendation": "覆盖 schedule 复用旧异常 future、drain 等待异常 future、monitor 捕获异常三条路径，断言异常上抛、worker 状态一致、可选择重试或关闭。",
+      "regression_test": "test_pending_failure_propagates_in_schedule_and_drain：分别在 schedule/drain 前塞入失败 future，断言异常到达调用方且未污染另一半球状态。"
+    },
+    {
+      "part": "concurrency",
+      "id": "CONC-02",
+      "title": "monitor 触发的 save() 未等待待完成巩固，snapshot 优先级高于 consolidate，检查点先于被动巩固落盘",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/agent.py:354-355",
+        "life_agent/agent.py:359-365",
+        "life_agent/store.py:29",
+        "life_agent/worker.py:208",
+        "life_agent/worker.py:409-410"
+      ],
+      "evidence": "audit2（checkpoint_interval_s=2.0）两次 homeostasis 线程保存时，left 的 consolidate future 尚未完成：save 记录 pending_pending=[\"left\"]，快照 left step=32/debt=26、第二次 left step=74/debt=25。队列优先级 snapshot=2 高于 consolidate=4，即使 consolidate 先入队，snapshot 仍先执行。close 路径的 save 在 _wait_consolidations 之后执行，pending 为空，一致；问题仅限 monitor 周期保存。",
+      "impact": "检查点把‘已入台账但尚未被权重消化’的债务与滞后的模型权重一起持久化；重载后 checkpoint 记录的 step/debt 与权重不匹配，需要后续巩固重新补偿，极端情况下恢复出的语义滞后于台账记录。",
+      "recommendation": "monitor save 前先 _wait_consolidations()；或调整任务优先级使 consolidate 先于 snapshot 排队；或在检查点中记录未完成巩固清单，reload 后自动补偿。",
+      "regression_test": "在存在未完成 consolidate 时触发 monitor 保存，断言快照时刻无 pending future（或重载后未消化债务被补偿消化）；对照 close 路径保存的一致性。"
+    },
+    {
+      "part": "concurrency",
+      "id": "CONC-03",
+      "title": "pending_consolidation 以半球名为 key，切换后旧角色 future 残留双存留，失败异常被推迟暴露",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/agent.py:56",
+        "life_agent/agent.py:249-262",
+        "life_agent/agent.py:265",
+        "life_agent/agent.py:271",
+        "life_agent/agent.py:298-321"
+      ],
+      "evidence": "audit1 共 23/64 轮 pending 字典同时保留两个半球 key；例：cycle 11 interact 后 active=right、pending=[right,left]。audit2 phase B 结束 pending=[right,left]。切换 _switch_locked 末尾仅按新 passive 调 _schedule，未清理旧 key；_drain 只弹出当前 passive，旧 active 上的残留 future 当轮不被排空。该残留 future 若失败，要等到该半球再次成为 passive（_schedule 完成分支 result()）或 close 的 _wait_consolidations 才抛出。",
+      "impact": "字典语义与当前 active/passive 角色脱节；旧角色巩固结果/失败不被当轮处理，失败暴露被推迟，排障时容易误判为‘背景无失败’。",
+      "recommendation": "切换时按角色迁移或清理旧 key 的 future；drain 前按当前角色校正字典；把失败 future 写入独立错误槽，使其立即可见而不是挂在 pending 字典里等待下次命中。",
+      "regression_test": "连续自适应切换后断言 pending 只含当前 passive 条目；人为令旧 key future 失败，断言 close 抛出该失败且不被推迟到下一次切换。"
+    },
+    {
+      "part": "concurrency",
+      "id": "CONC-04",
+      "title": "monitor 路径的背景巩固失败被日志吞掉；_wait_consolidations 只保留首个异常，后续失败被丢弃",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/agent.py:255-256",
+        "life_agent/agent.py:269-280",
+        "life_agent/agent.py:351-357"
+      ],
+      "evidence": "_schedule 完成分支先 pop 再 future.result()；失败时 future 已从 pending_consolidation 移除。monitor 循环 except Exception 仅 LOG.exception，该失败不再进入 close 的 _wait_consolidations 视野。_wait_consolidations 用 first_error 只保留首个异常，同一轮第二个及以后的背景异常在 finally 弹出后被静默丢弃。现有测试 tests/test_integration.py:176-191 只覆盖 close 路径注入失败的场景，未覆盖 monitor 路径与多失败聚合。",
+      "impact": "后台巩固失败在 monitor 触发时仅留日志，其余调用方与 close 无感知；多笔失败时除首笔外全部丢失，违背‘背景失败不静默’的设计意图。",
+      "recommendation": "维护 background_errors 列表聚合所有背景异常，close 时统一抛出（或保留首笔并计数其余）；monitor 路径同样入槽，不只写日志。",
+      "regression_test": "注入两个失败的 background future，分别走 monitor 调度与 close 等待路径，断言失败不被静默、错误聚合可观测。"
+    },
+    {
+      "part": "concurrency",
+      "id": "CONC-05",
+      "title": "interact 路径只 schedule 不 drain，被动侧巩固依赖队列间隙与 1s monitor 重排，存在残余不对称饥饿风险",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "尚未验证",
+      "location": [
+        "life_agent/agent.py:182-197",
+        "life_agent/worker.py:208"
+      ],
+      "evidence": "feed_frame 在 schedule 后显式 _drain，interact_frame 仅 schedule 后 _maybe_switch。优先级 ttt=0 高于 consolidate=4。audit2 phase B 纯 interact 36 次：consolidate 40、ttt 114、train 0，队列峰值 qsize=1，步数增量 left=47/right=107，本小模型负载下未复现被动侧饥饿。更高频 ttt、更慢 GPU 或更大批次下优先级 4 被持续压制的情形未测量。",
+      "impact": "持续纯交互流中被动侧可能长期拿不到巩固步数，左右步数失衡，与本次修复要解决的旧饥饿属于不同路径上的残余风险。",
+      "recommendation": "为 interact 路径增加可选 drain，或按被动侧 debt 积压/passive step 增速做反压；监控被动侧巩固频率作为健康指标。",
+      "regression_test": "高频纯 interact 长跑压测，断言被动侧步数增速不低于阈值、debt 不无限积压；与 feed 路径的被动消化速率对照。"
+    },
+    {
+      "part": "math",
+      "id": "MATH-03",
+      "title": "repayment_capacity 为累计算术平均：top-weight 选样上偏，批次缩小时阈值不回退",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/memory.py:206-218",
+        "life_agent/agent.py:243-244"
+      ],
+      "evidence": "due() 按权重降序取前 limit 项（memory.py:207），batch_capacity 为所选样本质量和；repayment_capacity 是跨批次的累计算术平均（216-218），不随后续批次缩小而衰减。仿真 A1：批均质量 0.6598 vs 总体均值 oracle 0.4085（top-weight 选样上偏约 1.62x）；排空段运行均值/末批比 14.766。A2 稀疏补给（种群 1-6）：运行均值 0.4061 vs 小批均值 0.2852，滞后比 1.424。实测检查点：左 capacity 1.1703 / oracle 批 0.4444 = 2.633x；右 1.2326 / 0.7961 = 1.548x。",
+      "impact": "阈值在健康大批次上学到偏高，债务变薄后不随小批次回落，过度抑制切换；反之启动早期批次很小时容量被低估，又会过早切换。均值还受重复样本权重叠加（cap 4.0，实测运行未触顶）影响。",
+      "recommendation": "改用近期批次窗口或 EMA 估计单批偿还能力，并按实际批大小归一化；在指标中暴露当前种群大小，便于判断容量估计是否处于小样本区间。",
+      "regression_test": "饥饿序列（种群由满到 1-6）下断言 repayment_capacity 在容差内跟随近期批质量；对 top-weight 选样相对均匀抽样的上偏幅度设量化上限。"
+    },
+    {
+      "part": "math",
+      "id": "MATH-04",
+      "title": "due() 不移除样本，重复调用把同一 top-weight 视图重复计为还款批次",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/memory.py:206-219",
+        "life_agent/agent.py:240-247",
+        "life_agent/agent.py:301"
+      ],
+      "evidence": "due() 只返回克隆，不从 items 移除样本；repayment_batches 在每次 due() 时 +1（memory.py:215），衰减在 consolidate job 完成后才执行（worker.py:422-424）。仿真 A4：连续两次 due(8)，digest 重叠 8/8，repayment_batches 1 -> 2。实测运行：393 批次、3108 次抽取，均批 7.926/7.888 ≈ limit 8。_debt_training_samples 在调度巩固时调用一次，_switch_locked:301 在新主动侧巩固前又调用一次。",
+      "impact": "repayment_batches 计的是抽样视图次数而非已偿还样本数；容量均值混入重复视图；切换时刻的额外 due() 用刚注入的债务样本参与首批容量估计（与 MATH-05 叠加）。",
+      "recommendation": "仅在样本实际训练并衰减后计批次，或对“已选未衰减”项去重；明确 batches 语义为视图数还是偿还样本数。",
+      "regression_test": "未训练的连续 due() 不应抬高 repayment_batches（若保留现状，需在测试与文档中显式记录该语义）。"
+    },
+    {
+      "part": "math",
+      "id": "MATH-05",
+      "title": "exchange 双向 replay 入债：重复 digest 叠加权重并再次累计 clean mass；基线在注入之后取值",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/agent.py:282-290",
+        "life_agent/memory.py:192-201",
+        "life_agent/agent.py:311-318"
+      ],
+      "evidence": "正常流程无双计入：interact_frame 的 dialogue 与 observe 是两个不同样本，各入债一次（agent.py:188、190-192）；feed_frame 每个 chunk 一次（218-219）；ttt 样本只进主动侧 worker，不入债。exchange 每侧取 replay.latest(2) 克隆入对方债务，add() 第 195 行无条件累加 total_clean_added；digest 已存在时叠加权重（197-198，cap 4.0），同一 digest 的累计压力被重复计一次，而 clean_backlog 只按当前权重计一次。note_switch 在 exchange（300）与 consolidate/sync 之后才读被动侧压力（313），新→旧腿注入已计入基线：基线偏高、该注入的当轮增长被低估；旧→新腿注入留在未来主动侧债务，日后转为被动时计入其压力。仿真 B（61 次切换轨迹）exchange 占累计压力 0.3306（上界：仿真 replay 权重未被稳健损失衰减）；实测运行按添加条数上界 <= 244/40124 = 0.00608，质量占比无法从检查点事后分解。",
+      "impact": "压力口径混入“排练拷贝”；重复 digest 的累计压力可大于 backlog 质量。偏置方向：当次基线偏高偏保守（注入质量不计入下一轮增长），但注入样本会在另一侧未来压力中回涨，存在“切换动作给下一次切换添压力”的弱反馈路径。",
+      "recommendation": "为 exchange 来源债务打标，并从 clean_pressure 增长口径中剔除；或改为在 exchange 之前记录基线；补充分来源质量记账，以便实测 exchange 质量占比而非只估条数上界。",
+      "regression_test": "同一 digest 经 exchange 二次入债，断言压力/backlog 口径符合选定定义；基线取值点与 exchange 的先后顺序有固定测试。"
+    },
+    {
+      "part": "math",
+      "id": "MATH-06",
+      "title": "22/61 次切换在混合周期之后的灌入阶段，缺逐轮时间戳与压力日志，该阶段自激环无法证实或排除",
+      "severity": "中",
+      "kind": "验证盲区",
+      "strength": "尚未验证",
+      "location": [
+        "validation_runs/continuous-adaptive-full-7/metrics.jsonl",
+        "continuous_validation.py:365-370",
+        "continuous_validation.py:418-448"
+      ],
+      "evidence": "jsonl 200 条 cycle 记录仅见 39 次翻转（35 次轮内 + 4 次轮间）；report switches=61，余 22 次发生在循环后的真实数据/清洗/续灌阶段，无对应记录。混合阶段间隔：min 3、median 5.0、mean 5.68、max 12 轮；interval==1 立即连翻 0 次；被动 CPU 调用偏移 0 次。全程 275.7s / 61 ≈ 4.52s 每次，但 jsonl 无时间戳，无法还原逐次切换的墙钟间隔与切换前后 debt/step 变化。",
+      "impact": "混合阶段未见“切换—同步—立刻再切换”的自激环；循环后灌入/清洗/续灌阶段的 22 次切换缺少逐轮记录，既不能确认也不能排除振荡（该阶段调用次数与切换次数的对应关系无法从现有产物还原）。每次切换均 wait=True 做 consolidate(2 步)+sync，高频切换会重复支付这笔同步成本。",
+      "recommendation": "逐决策落盘 pressure_growth / learned_capacity / 两侧 delta / active 角色与时间戳，记录切换墙钟间隔；仅在数据证实振荡后再考虑最小驻留约束，不按口号添加任意固定定时器。",
+      "regression_test": "带插桩的持续灌入运行，断言相邻切换间隔不低于由数据标定的阈值；日志中可复现每次切换前后的 debt 质量与步数差。"
+    },
+    {
+      "part": "math",
+      "id": "SYNC-01",
+      "title": "_synchronize 先逐层对齐宽度再按模块顺序 zip 插值；名称/形状未显式校验，buffer 不参与同步",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/worker.py:333-346",
+        "life_agent/model.py:150-152"
+      ],
+      "evidence": "CPU 最小模型（d_model 64、1 层）实测：左侧加宽到 96 后、sync 前有 3 个参数形状不一致（fc1.weight/bias、fc2.weight）；sync 的 336-339 行先把两侧扩到 max 宽度，zip 插值后 0 处失配，16 个参数名称全匹配。若 resize 被 max_hidden_dim 截断或跳过，zip 会配对失配形状，lerp_ 抛 RuntimeError；异常经 future 上抛（worker.py:426-428）不被吞，但 _switch_locked 的 wait=True sync 会中止切换。activation_ema 等 buffer 不在 parameters() 中，不被插值。",
+      "impact": "当前上下界内形状安全；隐式耦合是两侧参数顺序必须一致。加宽侧新神经元的活动统计不同步，小侧 buffer 保留旧统计直到自身训练更新；若未来参数顺序调整或 resize 被边界截断，zip 静默截断风险存在。",
+      "recommendation": "改用 named_parameters 配对并断言形状相等、给出明确报错；显式同步或文档说明 activation_ema 排除；补一侧命中 max_hidden_dim 时的 sync 测试。",
+      "regression_test": "非对称 resize 后执行 sync，断言命名参数形状逐一相等、无静默截断；buffer 一致性有明确断言或注释。"
+    },
+    {
+      "part": "math",
+      "id": "SYNC-02",
+      "title": "resize/sync 均重建 AdamW 清空动量；会话内每次切换伴随动量重置，重载才恢复保存动量",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/worker.py:221-225",
+        "life_agent/worker.py:232-234",
+        "life_agent/worker.py:336-339",
+        "life_agent/store.py:87-88"
+      ],
+      "evidence": "_optimizer_reset 直接新建 AdamW，丢弃 exp_avg/exp_avg_sq（worker.py:221-225）；结构事件（232-234）与每次 sync 的双侧 resize（336-339）都会触发。CPU 实测 resize 后与 sync 后 optimizer.state 条目均为 0/0。重载路径先 reset 再 load_state_dict 恢复保存动量（store.py:87-88），故重启不丢动量，但会话内同步反复清零。",
+      "impact": "每次结构事件/切换后动量重新热身，AdamW 自适应矩估计丢失历史；实测 lr 从 1e-5 升到 3.15e-4 的振荡可能与此相关（相关而非因果，未单独验证）。",
+      "recommendation": "resize 时对幸存参数扩展/收缩动量状态（与权重复用同样的 split/keep 映射），避免全量重置；若重置为有意设计，需在文档中说明并度量收敛影响。",
+      "regression_test": "resize 后幸存参数的动量状态被保留；若按设计清零，测试需显式断言并记录理由。"
+    },
+    {
+      "part": "novelty",
+      "id": "NOV-01",
+      "title": "现有「重复处理」只覆盖字节级精确去重与单帧内部低熵惩罚，不建模「重复导致边际信息收益下降」；不存在习惯化/饱食度信号",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/memory.py:60-79",
+        "life_agent/memory.py:27-31",
+        "life_agent/memory.py:111-124",
+        "life_agent/memory.py:192-204",
+        "life_agent/memory.py:221-229"
+      ],
+      "evidence": "structural_quality(ids) 只在单条序列内部统计字节值频率熵、最长连续游程、unique 占比（memory.py:65-78），不跨帧比较、不读取模型损失或历史访问次数。Sample.digest 是 ids+labels 的 SHA256（27-31），去重只认完全相同的字节序列。ReplayBuffer.add 命中同 digest 时权重按 0.9*旧+0.1*新+0.02 混合（117-120）；DebtLedger.add 命中同 digest 时权重直接叠加并 cap 4.0（197-198）；decay_after_training 只是巩固后的乘性遗忘（221-229）。全仓 grep 无 entropy 滚动窗口、n-gram 记忆、熟悉度/饱食度字段。实测（probe_results.json quality_rows）：256 个 0 → quality 0.001；256 个 128 → 0.001；种子 7 随机 167 种取值/7.1932 bits → 1.0；单调 0..255（8.0 bits、完全可预测）→ 1.0；16 周期序列 → 0.78125；两值交替 → 0.097656；长度 8 短序列 → 1.0（n<16 直接放行，63-64 行）。",
+      "impact": "「模型厌恶烦躁重复」若被表述为已有机制，属于把表层去重/低熵降权包装成情绪或习惯化。代码内可观测的只是：相同字节序列合并、单帧分布过于集中时权重乘一个 0.001 地板因子；没有任何量回答「这条内容第二次、第十次出现时，对模型的边际改善是否趋零」。",
+      "recommendation": "【尚未实现/设计建议】对外表述应区分两层：已实现的是「分布重复度的静态结构惩罚 + 精确 digest 去重」；未实现的是「跨时间熟悉度/边际收益衰减」。任何习惯化信号需另立指标并单独测量，不得复用 structural_quality 或 debt 叠加权重充当。",
+      "regression_test": "test_repeated_digest_accumulates_not_familiarity：种子 7，同一 Sample 连续 add 5 次到 ReplayBuffer 与 DebtLedger；断言 replay unique=1、debt 同 digest 权重按叠加规则增长至 cap 4.0；断言样本/账本上不存在独立的 familiarity/satiation 字段被更新（防止后续把叠加权重误称为习惯化）。"
+    },
+    {
+      "part": "novelty",
+      "id": "NOV-02",
+      "title": "结构质量因子与序列长度、上下文包裹耦合：同一内容不同长度质量漂移；不同上下文包裹产生不同 digest 且质量均为 1.0；可预测序列被判为高质量",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/memory.py:60-79",
+        "life_agent/memory.py:27-31"
+      ],
+      "evidence": "实测同一 4 值块 [10,20,30,40] 重复到 32/64/128 长度，structural_quality 分别为 1.0 / 0.78125 / 0.390625——内容重复度相同，仅长度不同，质量因子随长度单调下降。同一 32 字节内块分别加前缀 [1,2]/后缀 254 与前缀 [9,99]/后缀 [250,251]，digest 不同（wrapped_a≠wrapped_b），质量均为 1.0，两条之间无任何重复关联。16×16 表格（末列逐行抖动，242 种取值、7.8906 bits、游程 1）质量 1.0；单调递增 0..255 质量 1.0。周期 16 循环（4.0 bits）质量 0.78125。",
+      "impact": "反例一：同一语义内容换长度/换上下文包裹后完全绕过跨帧重复识别；反例二：周期性但每帧有微小差异的流，每帧 digest 唯一，被当作新内容累计干净压力（实测 8 帧微差周期序列使 clean_pressure 0.138208→1.116678，unique 9）；反例三：结构化表格重复行因列值抖动获得高质量；反例四：单调可预测序列因取值分散被误判为干净样本。现有指标测的是「帧内分布离散度」，不是「可预测性/冗余度」。",
+      "recommendation": "【尚未实现/设计建议】① 把长度归一化（如按每字节熵、固定窗口）从质量因子中解耦；② 跨帧重复检测另立 n-gram/指纹近邻指标（见 NOV-04），不要期望 digest 或单帧熵承担；③ 在文档中明示 structural_quality 是分布离散度代理，不等于信息量大或可预测性低。",
+      "regression_test": "test_structural_quality_length_context_baseline：种子 7；锁定上述 32/64/128 长度质量基线 1.0/0.78125/0.390625、两种包裹 digest 不等且质量 1.0、短序列 n<16 质量 1.0；后续修改阈值时该测试暴露行为漂移。"
+    },
+    {
+      "part": "novelty",
+      "id": "NOV-03",
+      "title": "债务账本对同 digest 重复样本叠加权重，且 due() 按原始权重降序偿还；低质量重复债务反而被优先选中，与「重复应降权/缓学」方向相反",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/memory.py:197-198",
+        "life_agent/memory.py:206-219",
+        "life_agent/memory.py:180-186"
+      ],
+      "evidence": "DebtLedger.add：同 digest 执行 weight = min(4.0, weight + weight)（197-198）；due() 按 item.weight 降序取前 limit（207），排序键不含 structural_quality。实测：全 0 样本 retention 0.35 连续入账 5 次，权重 0.175781→0.351562→0.527344→0.703125→0.878906；clean_pressure 因 quality=0.001 乘子仅 0.000176→0.000879。排序探测：重复 3 次的全 0 债务 weight 0.527344 / quality 0.001 排在第 1 位，新随机债务 weight 0.175781 / quality 1.0 排第 2 位。loss_weight 路径（81-95）只是对高损失离群值做指数抑制：实测 9.0 离群损失权重 0.712114，典型 5.0 与低损 3.0 均为 1.0，与重复度无关。",
+      "impact": "重复字节在债务侧不是被降权缓学，而是被反复叠加成高权重债务项，并在巩固批次中优先偿还；clean mass（pressure/backlog）虽被 quality 地板压到接近 0，但偿还选择排序看的是原始权重。若未来以「重复=熟悉=少学」为目标，现有债务叠加方向与之冲突，需要先改排序/叠加规则。",
+      "recommendation": "【尚未实现/设计建议】评估 due() 排序键改为 clean mass（weight*structural_quality）或加入跨帧熟悉度项；明确重复叠加的语义是「未偿还积压加重」还是「熟悉度提高」，二者不应共用一个权重字段。",
+      "regression_test": "test_debt_due_order_uses_clean_mass_or_familiarity：种子 7；构造一条高权重低质量重复债务与一条低权重高质量新债务；断言偿还顺序符合设计约定的排序键；若保持原始权重排序，需在测试中显式注释该行为为已知方向并纳入 NOV-03 记录。"
+    },
+    {
+      "part": "novelty",
+      "id": "NOV-04",
+      "title": "五个候选「习惯化/饱食度」信号的可得性、成本与偏差评估；梯度 SNR 在当前 3GB 显存 + CPU 在线推理下不可行；现有 ttt_deltas 是权重 L1 位移而非收益差",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/worker.py:300-310",
+        "continuous_validation.py:125",
+        "continuous_validation.py:329-339",
+        "continuous_validation.py:479",
+        "life_agent/worker.py:285-296"
+      ],
+      "evidence": "(a) 滚动字节熵：现有 structural_quality 已在单帧内算熵（memory.py:65-69），跨帧滚动计数需新增有界滑动统计；纯 CPU、零模型前向反向；偏差：只测分布离散度，高熵噪声会被判为「新颖」，自然语言常用字节重复属正常。(b) n-gram 新颖度：需新增近期 n-gram 集合/计数衰减结构，代码中不存在；CPU 哈希 O(n)、内存有界；偏差：领域词表、常用短语、协议帧头/表头的合法重复会被误判为熟悉。(c) 边际损失改善：worker.py:300-309 已把 per-sample loss 按 0.9/0.1 写回 stored.loss，同 digest 复访可直接算前后差，零额外 forward/backward；偏差：loss 受 LR 调整（worker 291-293）、batch 组成、样本权重缩放、TTT/consolidate/train 共用 global_step（295）污染，首访无前值，噪声大。(d) 梯度信噪比：当前未记录任何梯度统计；需 backward 后累积梯度均值/方差或额外反向传播；逐样本梯度在 3GB 显存与 CPU 在线推理下不可行，且受 grad_clip=1.0 裁剪、AdamW 归一化、结构重尺寸干扰。(e) TTT 前后收益差：现有 ttt_deltas 记录的是 TTT 前后参数向量 abs().sum() 权重 L1 位移（continuous_validation.py:331,339,531），full-7 ttt_samples=40、min L1 delta=2.3564；这不是 loss 收益。真正的 loss-before/after 需在固定小探针集上 TTT 前后各做一次 CPU forward，无额外 backward；偏差：探针集分布偏移、样本量小。",
+      "impact": "可立即零成本记录的只有：(c) 基于已有 stored.loss EWMA 的复访边际差，以及 (a) 帧内熵的跨帧滚动汇总。(b) 需新增有界数据结构但仍在 CPU 预算内。(e) 可作为离线验证指标。(d) 在线不可行，暂缓。把权重 L1 位移当作「学到东西/有收益」的证据属于口径错误。",
+      "recommendation": "【尚未实现/设计建议】第一阶段只离线记录 (a)(b)(c) 三条序列与现有 stored.loss、lr、结构事件并列落盘；第二阶段再讨论降权使用；(e) 作为离线对照；(d) 不进入在线管线。每条信号必须带自身偏差注释与失效条件。",
+      "regression_test": "test_marginal_delta_uses_existing_ewma_no_extra_backward：构造两批复访样本，断言边际改善字段由 stored.loss 的 0.9/0.1 EWMA 前后差得出；loss 非有限或首访时边际差标记为缺失（None）而非 0；测试中统计 backward/forward 调用计数不增加。"
+    },
+    {
+      "part": "novelty",
+      "id": "NOV-06",
+      "title": "当前切换是数据挤压/偿还能力/步数工作量驱动，不含任何新颖度项；「压力驱动切换」与「无聊驱动切换」不可混称",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/switching.py:81-92",
+        "life_agent/agent.py:323-346",
+        "life_agent/memory.py:188-190",
+        "life_agent/memory.py:206-219"
+      ],
+      "evidence": "decide() 判据：active_delta/passive_delta 为步数基线差，pressure_growth = clean_pressure - baseline，sufficient_data = required>0 and pressure_growth >= required，sufficient_work = passive_delta>0 and active_delta>=passive_delta，should_switch = 二者 AND（switching.py:81-87）。clean_pressure 来自 total_clean_added（memory.py:188-190），learned_capacity 来自 due() 批次 clean mass 的累计平均（210-218）。代码与配置中无 novelty/boredom/satiation 项。纯 Python 回放（合成两侧步数各 +2/轮，非真实训练动力学）：全 0 重复流 12 轮切换 3 次，间隔 [1,2,5]，终态 pressure 0.002109、capacity 0.001143、unique 1；随机新颖流 12 轮切换 4 次，间隔 [1,2,3,4]，pressure 2.109375、capacity 0.615234、unique 12。重复流下 capacity EWMA 随压力一起收缩，阈值自校准到近零，仍会切换——证明现有机制不以「无聊」为驱动，也不阻止重复流入账。",
+      "impact": "两个问题正交：压力回答「积压待学的干净数据是否超过被动侧一次可消化量」；习惯化回答「当前流对模型边际改善是否趋零」。高熵噪声流压力大但无学习收益，低熵合法流压力小但可能已被掌握。若用新颖度替换 pressure 项：高熵噪声流新颖度高即触发切换，把「没见过」当成「该换边」，丢失已学量与偿还能力证据，噪声流会造成频繁切换振荡、双侧反复同步浪费预算。若作为附加门控（AND 条件或独立探索触发）：保留压力判据，仅在数据挤压条件已满足时用低边际改善/低新颖度辅助决定切去探索；风险是门过硬会延迟切换、积压增多。",
+      "recommendation": "【尚未实现/设计建议】未来若加入新颖度信号，定位为附加门控或探索触发器，不替换 pressure 项；决策记录需同时输出 pressure_growth、capacity、work deltas 与新颖度指标，便于区分切换由挤压还是由低收益触发。文档措辞沿用「数据压力/偿还容量」，不使用「无聊/厌恶」描述现有切换。",
+      "regression_test": "test_novelty_is_additional_gating_not_pressure_replacement：种子 7；纯 Python 回放控制器，构造高熵但边际收益为零的合成流；断言替换式门控会在 pressure_growth < capacity 时触发切换（记为反例基线），附加门控在压力条件未满足时不切换；decision 记录同时含压力项与新颖度项。"
+    },
+    {
+      "part": "novelty",
+      "id": "NOV-07",
+      "title": "现有验证链路没有边际收益/新颖度指标：stored.loss 不进 report，决策样本不落盘，事后无法判断「习惯化」是否发生",
+      "severity": "中",
+      "kind": "验证盲区",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/worker.py:300-309",
+        "continuous_validation.py:521-536",
+        "life_agent/switching.py:115-120",
+        "validation_runs/continuous-adaptive-full-7/report.json"
+      ],
+      "evidence": "worker 回写 stored.loss EWMA 与 robust_weight（305-309），但 _snapshot 只持久化样本 weight/loss 字典，report 层未输出 per-sample loss 轨迹或复访边际差；continuous_validation 报告字段含 ttt_samples/ttt_minimum_weight_l1_delta（权重位移），无 loss 改善曲线；switch_controller.to_dict 只存三个 baseline，last_decision 不持久化（switching.py:115-120），full-7 report adaptive_switch=null、61 次切换无决策样本。现有 cleaning 判据仅 unique_after-unique_before<=5 且 min_feed_weight<0.5（continuous_validation.py:492），不测量重复流的边际收益衰减。",
+      "impact": "即使未来加入习惯化信号，没有逐样本/逐轮的 loss 边际、权重分布、新颖度序列与决策上下文落盘，就无法区分「真习惯化」与 LR 触底、结构扩张/裁剪、batch 组成变化造成的 loss 下降假象；回归实验也缺少可对照的基线轨迹。",
+      "recommendation": "【尚未实现/设计建议】先补观测再谈控制：把复访边际 loss 差、帧内/滚动熵、n-gram 新颖度、决策 decision dict 按轮次写入 metrics.jsonl 并随检查点摘要持久化；report 增加这些序列的统计量（分位数、趋势斜率）。",
+      "regression_test": "test_metrics_record_novelty_and_marginal_series：一轮混合交互后，断言 metrics 记录含每轮边际 loss 改善、熵/新颖度字段与完整 decision dict；重载后这些序列摘要可恢复。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-03",
+      "title": "旧/缺字段检查点静默默认：debt 计数器、replay cleaner、切换基线被归零或用当前值重建，无任何告警",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/memory.py:247-256",
+        "life_agent/memory.py:157-163",
+        "life_agent/store.py:111-122",
+        "life_agent/switching.py:122-125"
+      ],
+      "evidence": "DebtLedger.load_dict 对 total_created/total_repaid/repayment_batches/repayment_capacity/total_clean_added 全部 `raw.get(..., 默认 0)`（memory.py:252-256）；ReplayBuffer.load_dict 对 cleaner 取 {} 后默认 count=0/mean=0/var=1.0（157-163, 99-102）；switch_controller.load_dict 三个 baseline 默认 0.0（switching.py:123-125）。store.py 在 payload 无 adaptive_switch 时用被动债务 clean_pressure() 与当前 global_step 调 note_switch 重建基线（115-122）。隔离实验 run3：从 run1 检查点剥离 adaptive_switch、四个 debt 计数器、replay cleaner 后重载：baseline_clean_pressure 由原 1.46875 变为 0.0；两侧 total_repaid/repayment_batches/repayment_capacity/total_clean_added 全为 0；cleaner count=0、loss_mean=0.0、loss_var=1.0。",
+      "impact": "total_clean_added 是 clean_pressure() 的唯一来源（memory.py:188-190），归零后自适应压力累计历史丢失，pressure_growth 从 0 重新起算；repayment_capacity 归零会让 sufficient_data 中 required=0（switching.py:84-85），决策阈值失真。重建基线发生在 worker.start() 之前（store._restore 在 LifeAgent.load 内，load 要求 worker 未启动，agent.py:370-371），但基线取的是重建时刻的当前债务/步数，不是重启前的基线值。",
+      "recommendation": "对缺失字段记录 warning 并在状态中标记 migrated；压力类累计值不应静默归零，应在检查点中保留版本与字段缺失标记；v1/v2 迁移应逐字段核对并在 report 中输出迁移明细。",
+      "regression_test": "构造缺字段 v2 检查点，断言加载后输出迁移告警；核对 total_clean_added/repayment_capacity 未被错误重置，或在缺失时明确拒绝加载而非默认。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-04",
+      "title": "切换决策 last_decision 不持久化，重载后 report.adaptive_switch 为 null；历史切换决策样本（pressure_growth/capacity/work_share）不落盘、不入 metrics",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/switching.py:115-120",
+        "life_agent/store.py:111-113",
+        "continuous_validation.py:535",
+        "continuous_validation.py:164-205"
+      ],
+      "evidence": "AdaptiveSwitchController.to_dict 只导出三个 baseline，不含 last_decision（switching.py:115-120）；load_dict 也不恢复 last_decision（122-125）。最终 verify_restore 会从磁盘重载 agent（continuous_validation.py:459, 175-176），重载后 last_decision 回到 None，status() 取 None → report.adaptive_switch=null（386-390, 535）。full-7 报告 61 次切换但 adaptive_switch=null；metrics.jsonl 205 行中 grep pressure_growth/capacity/work_share/baseline 命中 0 条，没有任何一次切换的决策入参/结论被记录。",
+      "impact": "事后无法回溯某次切换是否真由自适应条件触发；报告里的切换结论缺乏可审计证据，只能看到计数。",
+      "recommendation": "每次 decide 产生 SwitchDecision 后追加一条决策记录到环形日志并随检查点持久化；report 输出最近若干条 decision 样本（clean_pressure/baseline/growth/capacity/work_share/reason）。",
+      "regression_test": "重载后 status().adaptive_switch 不应为 null（或持久化最近决策）；metrics 中每条切换 cycle 附带 decision dict。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-07",
+      "title": "自动/自适应切换判据只统计 switches 次数 ≥8，不校验决策依据；报告缺少切换决策样本，存在计数型假阳性空间",
+      "severity": "中",
+      "kind": "验证盲区",
+      "strength": "代码推断",
+      "location": [
+        "continuous_validation.py:473-478",
+        "life_agent/switching.py:76-113",
+        "life_agent/agent.py:292-321"
+      ],
+      "evidence": "automatic_switching = `status['switches'] >= 8`（473）；adaptive_switch_without_fixed_countdown = 配置中不存在 switch_interactions/switch_interval_s 属性 且 switches>=8（474-478）。两条判据都不读取 decide() 的 pressure_growth/learned_capacity/work_share/should_switch 理由。代码中切换入口有两条：_switch_locked 被 _maybe_switch 调用（自适应）和公开 switch()（agent.py:292-296）；验证器本身未直接调 switch()，但判据没有排除任何非自适应来源产生的计数。full-7 共 61 次切换（约每 3.3 轮一次），report 与 metrics 均无决策样本可佐证每次切换都满足 sufficient_data and sufficient_work。",
+      "impact": "任何能抬高 switch_count 的路径（手动切换、结构事件间接触发、未来新增路径）都可能让两条判据通过；'自适应、无固定倒计时'的结论实际只被'配置里没有倒计时字段 + 次数够多'支持。",
+      "recommendation": "判据应要求抽样/全部切换决策记录中 reason='new clean data exceeded learned repayment capacity'，且 pressure_growth >= learned_capacity、passive_delta>0、active_delta>=passive_delta；排除手动切换计数。",
+      "regression_test": "注入一次手动 switch()，断言自适应判据不计入；构造 has_debt=False/压力不足场景，断言不产生切换计数。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-08",
+      "title": "TTT 权重探针只在前 40 轮采样，未分离 sync 插值对嵌入向量的贡献；探针能排除形状重建，但不能严格归因于 TTT 梯度更新",
+      "severity": "中",
+      "kind": "验证盲区",
+      "strength": "代码推断",
+      "location": [
+        "continuous_validation.py:80-83",
+        "continuous_validation.py:291",
+        "continuous_validation.py:329-339",
+        "life_agent/worker.py:340-354"
+      ],
+      "evidence": "parameter_vector 固定取 token_embedding.weight（80-83），该层不参与 resize_hidden，因此结构生长/裁剪不会改变其形状，规避了'不同形状比 L1'与'重采样重建模型'的问题；before_weight 仅在 cycle<40 采集（291），200 轮中后 160 轮无探针。同一轮窗口内除 TTT 梯度外，_synchronize 的双向 lerp 也会改写嵌入权重（worker.py:342-346），切换轮次的 delta 混入 sync_mix 贡献；判据 ttt_weight_updates 只要求 min(delta)>0（479），没有无 TTT 对照批。full-7 ttt_samples=40、min L1=2.3564。",
+      "impact": "delta>0 证明探针张量在窗口内被改写，但不能证明改写来自 TTT 优化步；后 160 轮 TTT 是否持续改权重无证据。初始化随机性不解释同一张量前后差值（前后为同一模型），这一点探针是成立的。",
+      "recommendation": "全程采样嵌入向量；在切换/sync 窗口外单独测量 TTT delta；增加关闭 TTT 的对照批确认基准 delta≈0；记录每轮 delta 来源（ttt/sync）。",
+      "regression_test": "禁用 TTT_steps 后同窗口 delta 应接近 0；sync 轮次的 delta 单独标注，不计入 TTT 最小 L1。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-09",
+      "title": "清洗判据不校验重复 digest 是否真正合并，仅要求净增量 ≤5 且最小喂入权重 <0.5；unique_after 反超 unique_before 仍可通过",
+      "severity": "中",
+      "kind": "验证盲区",
+      "strength": "已实测证实",
+      "location": [
+        "continuous_validation.py:380-402",
+        "continuous_validation.py:492",
+        "life_agent/memory.py:111-124",
+        "life_agent/memory.py:59-79"
+      ],
+      "evidence": "cleaning 块记录 unique_before/after/increase/minimum_feed_weight（397-402）；duplicate_cleaning = `increase <= 5 and minimum_feed_weight < 0.5`（492），没有统计重复 digest 合并条数、没有比对喂入前后同一 digest 的权重聚合。full-7：unique_before=429、unique_after=430、increase=1、minimum_feed_weight=0.00557。五帧全零重复帧 digest 相同，理论上应合并为一条；唯一数反而 +1，说明新增了其它样本，判据对此不敏感。全零样本 structural_quality 因零熵/超长重复被压到约 0.001 下限（memory.py:60-79），weight 下限 0.001，weight<0.5 几乎必然成立。",
+      "impact": "去重逻辑失效（重复样本被重复加入）只要净增长 ≤5 就通过；低权重结论主要由质量下限保证，不能证明统计清洗器按损失离群度工作。",
+      "recommendation": "显式统计同一 digest 重复喂入后的合并次数与权重聚合（0.9*old+0.1*new+0.02）；判据增加重复组数量为 1、离群样本权重低于中位数等条件；报告区分'结构质量降权'与'损失离群降权'。",
+      "regression_test": "连续喂同一 digest 5 次，断言 replay/debt 中该 digest 仅一条且权重按聚合公式更新；构造高熵离群损失样本，断言 cleaner 离群降权生效。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-10",
+      "title": "内存判据使用固定绝对阈值，不随模型规模/运行时长缩放；Windows RSS 取工作集（含共享页），非私有工作集",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "continuous_validation.py:513-518",
+        "continuous_validation.py:51-77",
+        "continuous_validation.py:466-467"
+      ],
+      "evidence": "host_memory_bounded 要求 final_rss - baseline_rss < 2048 MB（513-517），绝对差值阈值，未按参数总量/样本容量归一；gpu_memory_bounded 要求 final_gpu <= baseline_gpu + 512MB（518）。rss_megabytes 优先 psutil memory_info().rss（55），回退 ctypes GetProcessMemoryInfo 的 WorkingSetSize（73-75）；两者都是工作集，包含映射共享页，不是私有工作集（私有字节/PrivateUsage 未读取）。full-7：RSS 422.29→1225.69 MB（约 2.91 倍，增长 803MB，远低于 2048MB 阈值）；GPU 2.92→44.83MB。基线 RSS 在 agent 创建前采样（280），GPU 基线在创建后采样（284），两者口径不一致。",
+      "impact": "长时间运行/结构持续生长时，固定 2GB/512MB 余量可能掩盖缓增泄漏；工作集口径把共享库/映射页计入，可能高估私有占用，也无法反映提交字节增长。",
+      "recommendation": "阈值按模型参数量与 replay/debt 容量归一；Windows 下补充 PrivateUsage/私有工作集读数；统一 RSS 与 GPU 基线采样时点；报告同时给出峰值与增量。",
+      "regression_test": "长跑后对比私有工作集与工作集增量；结构生长到上限时复核 GPU 增量是否仍在按比例预算内。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-11",
+      "title": "queue_drained/train_loss_finite/both_hemispheres_trained/no_runtime_errors 均为终点瞬时采样；后台 future 异常只进日志不进 run.errors",
+      "severity": "中",
+      "kind": "验证盲区",
+      "strength": "代码推断",
+      "location": [
+        "continuous_validation.py:507",
+        "continuous_validation.py:481-483",
+        "continuous_validation.py:472",
+        "continuous_validation.py:519",
+        "life_agent/agent.py:356-357",
+        "life_agent/worker.py:426-428"
+      ],
+      "evidence": "queue_drained 只在终点取 status()['queued_jobs']==0（507），monitor 每秒都可能新排 consolidation，采样前后入队都会漏报；train_loss_finite 只检查两侧 last_loss（481-483），非有限批次在 _train 中被跳过并 continue（worker.py:280-289），last_loss 保留更早的有限值；both_hemispheres_trained 只看终点步数 ≥20（472）。run.errors 仅在 main 的 except 中追加（553-555）；worker 作业异常存入 future（worker.py:427-428），monitor 捕获后只 LOG.exception（agent.py:356-357），除非未来被 result() 取出，否则不会进入 run.errors，no_runtime_errors（519）仍为 true。",
+      "impact": "训练中途出现的瞬时损失非有限、梯度 NaN、后台合并失败、队列瞬时积压，终点判据可能全部通过；错误被静默到日志。",
+      "recommendation": "全程记录每步 loss/grad 是否有限与跳过原因；周期性（而非仅终点）检查队列长度；把 monitor/worker future 异常汇总到 run.errors；判据基于全程事件流而非单点快照。",
+      "regression_test": "注入一次后台 consolidate 抛异常，断言 no_runtime_errors=false；构造非有限 batch，断言 train_loss_finite 能捕获中途事件而非仅终点 last_loss。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-02",
+      "title": "1% 保留集按相对路径哈希划分，不是内容去重，也不跨格式识别重复",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "ingest_dataset.py:92-95",
+        "ingest_dataset.py:119-126",
+        "dataset_inventory.json:88"
+      ],
+      "evidence": "_holdout 对 relative 路径字符串做 sha256 取前 8 字节归一化比较；不读文件内容，不计算文件级校验和，不比对不同格式中的同源数据。清单 note 自述“no claim about semantic quality or duplicate content across formats”，README:142 也承认跨来源近重复不会自动去重。",
+      "impact": "同一语料以 jsonl/parquet/arrow 多份存在时会被重复学习；保留集可能与训练集内容重复，无法作为泛化留出评估。",
+      "recommendation": "全量前生成文件级内容 sha256 清单，按内容哈希（而非路径）去重并标注跨格式同源；保留集划分记录到冻结清单中。",
+      "regression_test": "test_holdout_hash_is_path_based_and_content_checksum_recorded：断言同内容不同路径会进入不同侧，并在清单中记录文件哈希。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-04",
+      "title": "断点续训只比对 size 与 mtime_ns，无文件内容校验和；源文件变动即整文件回零重读",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "strength": "代码推断",
+      "location": [
+        "ingest_dataset.py:43-49",
+        "ingest_dataset.py:158-160"
+      ],
+      "evidence": "ProgressStore.offset 在 size 或 mtime_ns 不一致时返回 0（整文件重读）；progress 中只存 size/mtime_ns/next_offset/complete，没有文件级哈希。帧内虽有 chunk_sha256（ingest_dataset.py:181），但不落进度文件、不用于恢复校验。",
+      "impact": "源文件被替换/截断/局部改动而 mtime 巧合变化时，要么整文件重读浪费算力，要么（若只改内容不动大小）无法发现损坏；损坏字节在读取前无任何检测。",
+      "recommendation": "记录文件级 sha256（或首尾块哈希），恢复时核对；校验失败列入错误清单并跳过/重试，而不是静默从 0 重读。",
+      "regression_test": "test_resume_detects_modified_file_by_hash：构造同长度不同内容文件，断言恢复时检测到哈希不一致并报错/回退，而不是沿用旧偏移。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-07",
+      "title": "max_frame_bytes=1 MiB 为拒绝式上限；大二进制在 960 KiB 处硬切，feed_file 路径会整文件读入内存",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/agent.py:119-125",
+        "life_agent/byte_codec.py:132-137",
+        "ingest_dataset.py:169-183",
+        "life_agent/byte_codec.py:114-118"
+      ],
+      "evidence": "边界实验实测：BLF1 头 20 B，典型 ingest 元数据 262 B；payload 恰好 1,048,576 B 时编码后 1,048,858 B，超过 1,048,576 上限，agent._validate_frame 会抛 ValueError；带典型元数据时能放下的最大 payload 为 1,048,294 B。流式 ingest 路径按 chunk_bytes=960,000 切片，帧不会超限；但 996.31 MiB 等大文件被无格式感知地按 960 KiB 硬切，Parquet row group、Arrow record batch、ZIP/压缩块、PNG/PDF 结构跨帧断裂。ByteFrame.from_file（feed_file 路径）path.read_bytes() 整文件读入，对近 1 GiB 文件有 OOM 风险。",
+      "impact": "大二进制格式边界字节语义丢失；超限帧在喂入路径会直接抛错中断整流；feed_file 处理大文件不可用。",
+      "recommendation": "明确大二进制策略：记录分块大小与格式边界探测结果；超限/损坏帧计数并跳过（带告警）而不是中断全量流；feed_file 增加大小预检与流式分片。",
+      "regression_test": "test_oversize_frame_recorded_and_skipped_not_fatal：构造超过限长的帧，断言流式循环记录跳过原因、继续处理后续帧，整体不失败。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-08",
+      "title": "observation_chunks 按 509 token 切分，跨块前驱上下文缺失，块头每块重置 BOS/USER",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/byte_codec.py:252-260",
+        "tests/test_byte_frame.py:66-75"
+      ],
+      "evidence": "chunk 宽度 = max_seq_len - 3 = 509；每块 ids=[BOS, USER, *payload[start:start+509], EOS]，labels 与 ids 相同。实验对 1244 B 编码帧得到 3 块，字节可完整重建，但每块都以 BOS/USER 重新开头；上一块末尾字节不会出现在下一块上下文中。现有测试 test_streaming_chunks_cover_every_frame_byte 只校验字节全覆盖，不校验跨块建模。",
+      "impact": "跨 509 字节边界的字节依赖（含 BLF1 头跨块、UTF-8 多字节字符跨块）在同一条序列里学不到；长文件边界段的预测质量无保证。",
+      "recommendation": "在报告中声明该不可学习范围；评估重叠块或跨块状态携带；至少把跨块边界列为已知设计限制写入运行手册。",
+      "regression_test": "test_chunk_boundary_context_isolated：断言相邻块之间不存在共享前驱 token，并统计跨块边界字节数供观测。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-09",
+      "title": "全量前工程前置项尚未成套落实：格式探测、清单冻结、校验和、磁盘配额、检查点/日志轮转、失败重试、进度原子写校验、断点幂等",
+      "severity": "中",
+      "kind": "验证盲区",
+      "strength": "代码推断",
+      "location": [
+        "ingest_dataset.py:197-283",
+        "life_agent/agent.py:359-373",
+        "life_agent/store.py:27-48"
+      ],
+      "evidence": "进度文件本身经 .tmp + os.replace 原子写（ingest_dataset.py:61-65, 190-194），这一点已具备；但其余前置项在代码中未见对应机制：无文件格式探测/魔数识别、无冻结采样清单产物、无文件内容校验和、无磁盘配额/余量检查、无检查点历史轮转、无日志轮转、无失败帧重试/死信队列、无“重复偏移重放是否幂等”的校验。重放同一帧时 replay 按 digest 去重，但 debt.add 会在同 digest 上叠加权重（memory.py:197-199），崩溃重复帧可能造成债务权重膨胀。",
+      "impact": "长跑中遇到单个损坏文件、磁盘波动或进程崩溃时，恢复与重试语义不完整，可能重复训练或静默丢帧。",
+      "recommendation": "按前置清单逐项补齐并形成运行手册；幂等性校验：同一 offset 重放后 replay 数量与债务权重增幅在有界范围内。",
+      "regression_test": "test_resume_replay_is_bounded_idempotent：同一有界目录连续跑两遍，比对 replay/debt 数量与权重，断言重复帧不会导致债务权重无界叠加。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-10",
+      "title": "仍为常量的控制量分级：①资源安全上限保持常量 / ②工程节流可半自适应 / ③适合在线学习（护栏内）",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "config.json:2-53",
+        "life_agent/config.py:34-88",
+        "life_agent/worker.py:27-114"
+      ],
+      "evidence": "逐条分类（依据见 recommendation）：\n① 资源安全上限（应保持常量）：min_learning_rate 1e-5、max_learning_rate 3e-3（钳位安全网）；grad_clip 1.0（梯度爆炸防线）；weight_decay 0.01（与任务无关的正则先验）；min/max_hidden_dim 128/512（结构硬边界）；max_seq_len 512（位置嵌入维度绑定，改动需重训嵌入）；max_frame_bytes 1,048,576（帧内存/编码上限）；max_new_tokens 96（生成长度边界）；debt_min_weight 0.005（防权重退化到 0 的淘汰下限）；context_turns 6（上下文窗口策略）。\n② 工程节流参数（可半自适应，测量值驱动 + 硬上限）：structure_interval 32、structure_warmup 64（事件冷却/预热）；growth_size 16、prune_size 8（结构步长）；checkpoint_interval_s 300（按磁盘余量/帧速率调）；idle_sleep_s 0.1（空转轮询）；batch_size 4、feed_steps 1、consolidation_steps 2、ttt_steps 1、ttt_chunk_tokens 8（吞吐-稳定性折中，受显存上限约束）；replay_capacity 1024、debt_capacity 512（内存预算，按 RSS 调，设硬顶）；sync_mix 0.02（双半球插值，保守起步）；replay_probability 0.35（回放混合比例）；temperature 0.8 / top_k 40 / top_p 0.95（推理采样策略）。\n③ 真正适合在线学习（在①②护栏内）：learning_rate 初值 3e-4（已有 LR 控制器界内自适应）；lr_up_factor 1.05、lr_down_factor 0.6（控制器增益，长程可按损失统计调）；loss_spike_ratio 1.35（可由损失方差/EMA 动态估计）；debt_retention 0.35、debt_decay 0.75（债务准入/遗忘，按债务压力与偿还容量调，约束在 (0,1]）；结构生长/剪枝的相对改善阈值 0.002 / 0.01（由损失曲线统计自适应，事件频率仍受②冷却约束）。",
+      "impact": "若把①类安全上限也交给在线控制，可能在分布突变时失控；把③类长期钉死常量又浪费自适应空间。分级不清会导致过早在线化。",
+      "recommendation": "按上述分级落地：①只允许人工评审改动；②先接入测量值与硬上限、保留回退；③在阶段2稳定性证据充分后再开放在线调节。",
+      "regression_test": "test_config_classification_guardrails：断言①类参数不存在在线更新路径，②③类参数的任何自适应输出都被夹在配置硬边界内。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-11",
+      "title": "结构生长/剪枝由损失阈值 + 固定周期双门控；同模型“生长后立刻剪枝”的震荡未在真实长跑中验证",
+      "severity": "中",
+      "kind": "验证盲区",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/worker.py:83-107",
+        "life_agent/model.py:61-110",
+        "continuous_validation.py:217-259",
+        "validation_runs/continuous-adaptive-full-7/report.json:72-256"
+      ],
+      "evidence": "consider() 门控顺序：step < warmup(64) 或距上次变更 < interval(32) 直接返回；step 不是 interval(32) 整数倍、损失不足 24 条或非有限值也返回。阈值：相对改善 <0.002 且未到 max_hidden_dim 时生长 +16；相对改善 >0.01 且最低重要度 < 中位数 2% 时剪枝 -8。报告 hidden_history 左右两侧均为 256 单调升至 416/400；剪枝事件只在 validate_automatic_structure 的独立新模型上触发（continuous_validation.py:235-246），没有在同一模型上经历生长→冷却→剪枝→再生长的序列。optimizer 在每次结构变化后重建（worker.py:221-225），EMA 激活统计在剪枝后按保留神经元重算。",
+      "impact": "长程下生长-剪枝来回震荡、optimizer 重建频率、新神经元 EMA 冷启动对损失的影响均未观测；若生长后损失短暂改善触发剪枝，可能反复折损刚分裂的高重要度神经元。",
+      "recommendation": "阶段1 记录每次事件的损失窗口、重要度分布、变更前后维度与输出差异；阶段2 步长按当前 dim 比例并设最小冷却；阶段3 在线控制前先证明震荡率有界、功能保持在噪声界内。",
+      "regression_test": "test_grow_then_prune_oscillation_bounded：同一模型先逼出生长、再逼出改善后剪枝，断言维度始终在 [min,max]、前向输出有限、冷却期内不发生第二次事件，且无连续反复横跳。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-13",
+      "title": "自适应分阶段路线：阶段1 常量+可观测 → 阶段2 半自适应带硬上限 → 阶段3 在线控制，各阶段附可验证判据",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/worker.py:27-114",
+        "life_agent/switching.py:67-113",
+        "config.json:2-53"
+      ],
+      "evidence": "阶段1（保持常量 + 可观测）：所有控制量维持现状；逐帧/逐步记录 loss、lr、reason、ema、结构事件、replay/debt 饱和度、RSS、显存、磁盘、每帧字节/块/步/耗时。判据：至少一个 100–200 MB 跨格式真实段可复现；loss 全有限；债务/回放不越容量；检查点可恢复；无未捕获异常；LR 与维度轨迹有完整记录。\n阶段2（半自适应，测量驱动 + 硬上限 + 可回退）：容量、检查点间隔、批大小、结构步长按测量值调整，全部夹在①类硬边界内，异常时回退常量。判据：调整窗口内 loss 不发散、不越 RSS/显存/磁盘上限；回退后状态可恢复；同种子分段 A/B 对照指标不劣化。\n阶段3（在线控制）：增益、spike 阈值、债务 retention/decay、结构阈值在线学习。前提：阶段2 稳定性证据齐备；具备震荡率/发散检测与自动回退；有多格式长程观测；结构功能保持（atol 噪声界内）有持续验证；在线策略永远不能突破①类上限。",
+      "impact": "避免在证据不足时把不稳定项硬改成在线控制；每阶段退出条件可机器检查，而不是凭感觉推进。",
+      "recommendation": "按阶段设门禁：阶段1 指标未达标不进阶段2；阶段2 对照不达标不进阶段3。",
+      "regression_test": "test_stage_gate_criteria_measurable：把每阶段判据实现为可执行检查（容量边界、loss 有限、可恢复、回退成功、对照不劣化），未满足时阻断进入下一阶段。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-14",
+      "title": "指定 pytest 命令在当前环境无法运行（pytest 未安装）；改用标准库 unittest 实测 38 个用例全部通过",
+      "severity": "中",
+      "kind": "验证盲区",
+      "strength": "已实测证实",
+      "location": [
+        "tests/",
+        ".venv-life/Scripts/python.exe"
+      ],
+      "evidence": "按任务给定命令执行：.venv-life python -m pytest tests -q -p no:cacheprovider 报错 ModuleNotFoundError: No module named 'pytest'；.venv 已损坏（基础 Python 路径缺失），系统 Python 3.12 同样无 pytest。.venv-life 内 torch 2.8.0+cu126、CUDA 可用。改用 python -m unittest discover -s tests -p test_*.py -v 实测：Ran 38 tests in 4.218s，OK，0 failed；两个 CUDA 用例因 cuda 可用实际执行（未 skip）。逐文件：test_byte_codec.py 5、test_byte_frame.py 8、test_controllers.py 3、test_dataset_ingest.py 2、test_integration.py 12（WorkerTests 3 + AgentIntegrationTests 9）、test_memory.py 5、test_model.py 3。",
+      "impact": "测试运行依赖未在环境中固化；pytest 专属特性（标记、参数化、插件）无法使用；本报告用例数来自 unittest 重新收集，不引用 README 中的历史数字。",
+      "recommendation": "在隔离环境中补装 pytest 并锁定版本到 requirements；保持 unittest 可运行作为兜底。",
+      "regression_test": "environment check：断言 pytest 可导入且版本记录在依赖清单中。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-16",
+      "title": "缺失测试：monitor 线程与 feed/interact 的 _maybe_switch 竞争",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/agent.py:323-346",
+        "life_agent/agent.py:348-357"
+      ],
+      "evidence": "_monitor 每 1 s 在 self.lock 内调用 _schedule_passive_consolidation 与 _maybe_switch；feed_frame/interact_frame 也在 self.lock 内调用同一对方法。RLock 序列化调用，但没有测试构造 monitor 恰好在 feed 中途触发的交错场景；既有审计显示 homeostasis 线程 4 次 maybe_switch 全部 early_return，主链路 64 次切换 18 次，未覆盖竞争交错。",
+      "impact": "切换基线、债务台账在两条线程间的读写时序若有漏同步，可能出现重复切换或漏切换；当前无并发回归保护。",
+      "recommendation": "用可控屏障模拟 monitor 与 feed 同时进入临界区，断言切换计数、active 状态、基线一致且无重复切换。",
+      "regression_test": "test_monitor_feed_maybe_switch_race：屏障对齐两线程同时调用，重复 N 轮，断言 switch_count 与 active 在所有交错下一致。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-17",
+      "title": "缺失测试：save 期间存在 pending consolidate 时的快照一致性",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/agent.py:359-365",
+        "life_agent/store.py:27-48",
+        "life_agent/worker.py:357-385"
+      ],
+      "evidence": "save() 在 self.lock 内提交 snapshot 任务并 wait=True；pending_consolidation 中的后台 future 不会被先等待。snapshot 在 worker 线程读 replay/debt（state.lock 保护），但债务偿还衰减发生在 consolidate 任务里；既有持久化审计已观测到 live→restored 之间债务权重、global_step、last_loss、cleaner 统计存在差异（_audit_tmp/persistence/audit_results.json:383-399），部分原因正是快照时后台巩固仍在进行。",
+      "impact": "检查点可能落在巩固中途：恢复后部分债务/步骤回退；该行为是否可接受没有测试界定，也没有在保存前排空或标记未完成任务。",
+      "recommendation": "明确快照语义：保存前等待 pending consolidate 完成，或在检查点中标记未完成任务并在恢复后续做；测试两种语义下的恢复一致性。",
+      "regression_test": "test_save_with_pending_consolidation：保存前塞入未完成巩固 future，断言恢复后债务/步骤与快照时刻一致，或未完成任务被正确标记续做。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-18",
+      "title": "缺失测试：切换时 debt exchange 造成的重复训练与权重叠加",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/agent.py:282-290",
+        "life_agent/memory.py:192-204"
+      ],
+      "evidence": "_exchange_switch_debt 把两侧 replay 最新 2 条克隆到对方债务台账；debt.add 遇到同 digest 时权重叠加（min(4.0, 旧权重+新权重)）。快速连续切换会反复交换同样的最新样本，债务权重可能堆积到 4.0 上限。现有双半球测试只断言两侧债务非空，不统计交换次数与权重叠加幅度。",
+      "impact": "反复切换时少量热门样本被反复当作债务训练，挤占其他样本的巩固容量；权重上限行为无测试。",
+      "recommendation": "统计每样本被交换次数与债务权重分布；测试连续多次切换后权重有界、重复样本不无限膨胀。",
+      "regression_test": "test_switch_debt_exchange_weight_bounded：连续切换 N 次，断言任一债务样本权重 ≤ 4.0，且重复交换带来的权重增幅在预期范围内。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-19",
+      "title": "缺失测试：重载检查点后立即触发自适应切换的基线恢复",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/store.py:111-122",
+        "life_agent/switching.py:57-65",
+        "tests/test_integration.py:94-124"
+      ],
+      "evidence": "恢复时若检查点带 adaptive_switch 则载入基线，否则用被动侧债务压力补记基线。现有手动切换恢复测试只校验 active、interaction_count、hidden_dims、history，没有在重载后立即喂入数据并评估首次自适应切换决策是否基于恢复后的正确基线。",
+      "impact": "基线恢复错误可能导致重载后立刻误切换或长时间不切换；该路径无回归保护。",
+      "recommendation": "重载后构造压力/容量条件，断言首次 decide 的 baseline 与保存时一致，切换决策方向正确。",
+      "regression_test": "test_post_restore_immediate_switch_baseline：保存前记录基线，恢复后调用 decide，断言 baseline 三字段一致且切换判据与保存前等价。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-20",
+      "title": "缺失测试：空债务 / 零容量 / 空样本巩固路径",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/agent.py:240-247",
+        "life_agent/worker.py:258-260",
+        "life_agent/memory.py:206-219"
+      ],
+      "evidence": "_debt_training_samples 在无债务且回放未命中时返回空列表；_train 对空样本返回 no_samples、steps=0。decide 在 has_debt=False 时不切换（switching.py:76-79），但空债务下提交 consolidate 任务、due(limit) 空列表、容量压到 0 等组合路径没有测试覆盖。",
+      "impact": "边界空输入下若未来改动提交空作业或除零，不会被测试拦住；偿还容量/压力为 0 时的切换行为未界定。",
+      "recommendation": "补空债务、零容量、空样本作业的用例，断言 steps=0、不抛异常、切换决策为不切换。",
+      "regression_test": "test_consolidate_with_empty_debt_and_zero_capacity：空债务下提交巩固，断言结果 no_samples、队列清空、decide 不切换。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-21",
+      "title": "缺失测试：resize 结构变更与 sync 同步的并发/交错",
+      "severity": "中",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/worker.py:227-242",
+        "life_agent/worker.py:333-355",
+        "tests/test_integration.py:65-73"
+      ],
+      "evidence": "resize 与 sync 都经单写者队列（优先级同为 1），_resize_both 同时改 GPU 模型与 CPU 模型；_synchronize 先把两侧 MLP 宽对齐到 max 再插值。现有 test_resize_repairs_stale_cpu_width 只测单步 resize 修复 CPU 宽度，没有交错 resize 与 sync，也没有验证 sync 对齐宽度时两侧维度一致、插值权重有限。",
+      "impact": "结构生长/剪枝与双半球同步交错时，若宽度对齐或权重拷贝有遗漏，可能出现形状不一致或 NaN；无并发回归保护。",
+      "recommendation": "在队列中交错提交 resize 与 sync，断言两侧 hidden_dims 一致、参数有限、CPU/GPU 快照一致。",
+      "regression_test": "test_resize_sync_interleave_consistent：交替 resize 左右层与 sync，断言每步结束两侧维度相同、权重有限、CPU 快照可加载。"
+    },
+    {
+      "part": "concurrency",
+      "id": "CONC-06",
+      "title": "submit 的 stop_event 检查与 jobs.put 之间存在竞态，停止后入队的 job future 永久 pending",
+      "severity": "低",
+      "kind": "真实缺陷",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/worker.py:206-219",
+        "life_agent/worker.py:432-441"
+      ],
+      "evidence": "submit 先检查 stop_event.is_set() 再 put；stop() 置位 stop_event 并投递 stop 哨兵。若 check 与 put 之间 worker 已退出循环，新 job 进入空队列，其 future 永不 resolve；wait=True 调用方在 result() 阻塞。窗口很窄，正常单调用方流程不易命中。",
+      "impact": "窄竞态窗口内产生悬挂 future，对应调用方阻塞；与 CONC-01 的无超时等待叠加会放大为挂死。",
+      "recommendation": "用锁保护 check-and-put；worker 停止后新提交直接 set_exception 而不是入队。",
+      "regression_test": "并发 stop/submit 压测，断言不存在悬挂 future、停止后提交得到明确错误而非阻塞。"
+    },
+    {
+      "part": "concurrency",
+      "id": "CONC-07",
+      "title": "drain 在持有 agent RLock 期间阻塞等待被动巩固，monitor 调度与其他调用方在临界区内被串行化",
+      "severity": "低",
+      "kind": "设计边界",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/agent.py:205-228",
+        "life_agent/agent.py:264-267"
+      ],
+      "evidence": "feed_frame 整段在 with self.lock 内，_drain 在持锁状态下 future.result()。audit1 drain 均值 13.75ms、最大 20.6ms；独立 observer 线程轮询 status()（同样取 agent 锁）均值 40.6ms、最大 166.6ms，反映临界区被占用时长。小模型/小批次下代价有限；大批次或慢硬件下 drain 等待与临界区会被拉长，monitor 的 schedule/_maybe_switch 与并发调用在此期间排队。",
+      "impact": "吞吐与并发度受 agent 粗粒度锁限制；被动巩固耗时被计入每次 feed 的关键路径。",
+      "recommendation": "评估改为先取 future 引用、释放 agent 锁后再 result()；评估缩短 interact_frame 整段持锁范围，将 CPU 推理移出 agent 锁。",
+      "regression_test": "高负载下测量 drain 期间 monitor 调度延迟、status 阻塞时长与 feed 关键路径中被动巩固占比。"
+    },
+    {
+      "part": "concurrency",
+      "id": "CONC-08",
+      "title": "monitor 的 _maybe_switch 探针守卫在正常流程下总是提前返回，monitor 侧每秒兜底切换评估实际不触发",
+      "severity": "低",
+      "kind": "验证盲区",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/agent.py:323-326",
+        "life_agent/agent.py:348-353"
+      ],
+      "evidence": "_maybe_switch 首句 if interaction_count == last_switch_probe: return。main 路径在同一锁段内完成 interaction_count 自增与 _maybe_switch，monitor 每秒 tick 时 count 必然已等于探针，拿不到新鲜探针。audit1 homeostasis 4 次调用全部 early_return、0 次 monitor 切换；记录中残留的 should_switch=true 是上一次 main decide 留下的 last_decision，monitor 并未重新评估。未观测到‘monitor 改写探针导致 feed 后检查被跳过’（early_return_after_monitor=0）。",
+      "impact": "设计上期望的 monitor 兜底切换评估不生效，切换决策只由 main 路径触发；若 main 路径长时间不被调用，monitor 无法独立发起切换。",
+      "recommendation": "明确 monitor 是否应参与切换决策；若需要独立兜底，放宽/去除探针守卫或让 monitor 基于债务压力独立评估。",
+      "regression_test": "阻断 main 调用后观察 monitor 是否能独立触发切换；验证探针守卫不会吞掉 monitor 侧决策。"
+    },
+    {
+      "part": "concurrency",
+      "id": "CONC-09",
+      "title": "单写者假设、CPU/GPU 更新窗口与快照拷贝复核：未见缺陷（安全项记录）",
+      "severity": "低",
+      "kind": "设计边界",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/worker.py:258-327",
+        "life_agent/worker.py:333-355",
+        "life_agent/worker.py:357-395",
+        "life_agent/agent.py:99-117",
+        "life_agent/agent.py:127-131"
+      ],
+      "evidence": "模型参数/optimizer/global_step 仅 worker 线程写，agent.py 不直接写模型或优化器；replay/debt 双写但变更均在对应 state.lock 内。CPU 推理读 cpu_model 持 state.lock，worker 发布 cpu_model（load_state_dict/resize）同样持锁；resize 先改 GPU 再改 CPU，推理不会读到半更新的 CPU 权重。snapshot 模型权重与 optimizer 状态经 detach().cpu()（_to_cpu）拷贝，未发现张量引用逃逸；_synchronize 在 worker 单线程内串行两侧 GPU 插值。两次实验无半更新读取、无引用逃逸、无 job 异常。",
+      "impact": "无缺陷；记录为本次审查通过的并发边界。后续若新增主线程模型写路径或跨线程共享 optimizer 状态，需重新评审。",
+      "recommendation": "保持现有 state.lock 划分；在代码注释中明确单写者边界，防止后续迭代破坏。",
+      "regression_test": "保留现有 CPU 权重发布与快照一致性测试（tests/test_integration.py:50-73 等），新增并发推理与训练交错时的权重一致性断言。"
+    },
+    {
+      "part": "concurrency",
+      "id": "CONC-10",
+      "title": "drain 完成当轮巩固后不补排剩余 due 样本；同半球 pending 在跑时新巩固延迟合并，样本不丢弃",
+      "severity": "低",
+      "kind": "设计边界",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/agent.py:227",
+        "life_agent/agent.py:249-262"
+      ],
+      "evidence": "audit1 共 20 次 schedule 因同半球 pending 仍在跑而延迟合并（未提交新 job），样本保留在 debt 台账不丢弃；drain 结束后若 debt 仍有 due 样本，要等下一次 feed/interact 或 1s monitor tick 才补排。连续 feed 下下次调用即补排，monitor 兜底。",
+      "impact": "被动侧消化节奏依赖触发频率；触发稀疏时剩余债务消化滞后，但不丢数据。",
+      "recommendation": "可选：drain 后检查 debt 仍有 due 样本时补排一次巩固；或在 monitor 调度中保证被动侧持续有在途 job。",
+      "regression_test": "构造 debt 积压大于单批容量的场景，断言延迟合并期间样本不丢失、后续触发后被消化。"
+    },
+    {
+      "part": "math",
+      "id": "MATH-07",
+      "title": "空债务/零容量/基线高于当前压力/重载基线重建边界均安全；债务先于基线恢复",
+      "severity": "低",
+      "kind": "设计边界",
+      "strength": "已实测证实",
+      "location": [
+        "life_agent/switching.py:76,85",
+        "life_agent/memory.py:256",
+        "life_agent/store.py:87-90",
+        "life_agent/store.py:111-122"
+      ],
+      "evidence": "仿真 D：空债务 → 'disabled or no unlearned data'；有债务但 repayment_capacity=0 → 'insufficient new clean data pressure'；重载 fallback pressure_growth=0 不切换；基线高于当前压力时 growth 钳 0。恢复顺序：debt.load_dict 先恢复 total_clean_added（store.py:90 → memory.py:256），controller 基线后重建（store.py:111-122），不会因基线缺失立刻满足切换条件。",
+      "impact": "未发现“重载即切换”缺陷。残留边界：旧基线在债务被驱逐/衰减后偏高时，growth 钳 0，直到新质量累计超过旧基线才可能再次切换；version-1 或缺 adaptive_switch 载荷走 fallback 重建，口径正确。",
+      "recommendation": "补充缺失 adaptive_switch 载荷的重载单测；基线按半球标识持久化（与 MATH-01 一并修复）。",
+      "regression_test": "v1/缺控制器载荷检查点重载，断言 pressure_growth 初始为 0、首周期不自动切换。"
+    },
+    {
+      "part": "math",
+      "id": "SYNC-03",
+      "title": "切换顺序 exchange→巩固新主动→同步：无样本丢失/乱序，但首批巩固混入刚注入的对侧样本",
+      "severity": "低",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/agent.py:298-306",
+        "life_agent/worker.py:305-309",
+        "life_agent/worker.py:422-424"
+      ],
+      "evidence": "旧主动最新 2 条入新主动债务并随即被其巩固；新侧最新 2 条入旧被动债务留待后续巩固。同一 digest 可在两侧各训练一遍（跨侧排练，符合 worker.py:335 注释“语义迁移主要靠 debt replay”）；digest 键控的权重/loss 更新保持两侧一致（worker.py:305-309）。该路径无样本丢弃；顺序风险在于首批批次构成与容量测量（见 MATH-04/MATH-05），而非丢样本或训练乱序。",
+      "impact": "转移排练样本占用新主动首批巩固批次与首次容量估计；样本跨侧重复训练是设计使然，当前无证据表明同一批数据在同一侧被重复训练。",
+      "recommendation": "首批巩固区分新注入转移样本与自有未学债务；记录批次来源占比，便于评估排练稀释效应。",
+      "regression_test": "切换后新主动首批批次的来源拆分被记录并可断言；两侧 replay/debt 同 digest 权重一致性有测试。"
+    },
+    {
+      "part": "novelty",
+      "id": "NOV-08",
+      "title": "分阶段落地建议与最小对照实验设计（仅设计建议，尚未实现）",
+      "severity": "低",
+      "kind": "设计边界",
+      "strength": "尚未验证",
+      "location": [
+        "life_agent/worker.py:258-328",
+        "life_agent/switching.py:67-113",
+        "life_agent/memory.py:105-124",
+        "life_agent/memory.py:166-229"
+      ],
+      "evidence": "阶段一（只记录，不改决策）：在入库与复访路径旁记录帧内熵、滚动字节熵、n-gram 新颖度、stored.loss 复访前后差，与 lr、global_step、结构事件并列落盘；判据：序列可复现（同种子两次运行一致）、额外 CPU 开销可测且不阻塞在线推理。阶段二（仅降权，不拒绝、不门控）：经统计验证后用边际改善/新颖度调整 replay 抽签权重与 debt 巩固优先级，样本仍入库；判据：低熵合法类入库率不下降，权重分布变化与边际改善相关而非与帧内熵单因子相关。阶段三（附加门控/探索触发）：在现有 pressure AND work 判据之外接低收益门控或探索请求，不替换 pressure 项；判据：高熵噪声流不触发额外切换，重复流在边际改善趋零时出现探索/切换倾向，切换间隔与压力容量曲线可解释。最小对照实验：同一初始权重、同一 token 预算、固定种子 7，A 高重复流（固定块+微差周期）、B 高新颖流（种子固定的随机/异质帧）；测量采样权重分布（分位数、降权比例）、切换次数/间隔与 reason 分布、每字节边际 loss 改善曲线、clean_pressure 与 repayment_capacity 走势、TTT 权重位移与探针集 loss 前后差。排除假象：同步记录 LR 轨迹与结构事件（growth/prune），边际改善趋零须在 LR 未下调、隐藏维度未变、整体 loss 基线未下移时成立；同种子重复跑核对可复现。",
+      "impact": "在观测与对照实验完成前，任何「模型会厌烦重复」的结论都不具备可测量支撑；分阶段可避免在信号偏差未校准时把噪声流误判为新颖、把合法低熵数据误杀。",
+      "recommendation": "【尚未实现/设计建议】按阶段一→二→三推进，每阶段设独立判据与回滚开关；信号定义、阈值、偏差注释随指标一并入文档；本轮不写生产代码。",
+      "regression_test": "见 NOV-01/02/03/05/06/07 对应测试；另补 test_control_variables_held_constant：对照实验中固定种子 7，断言两次重复运行的 lr 轨迹与结构事件序列一致，边际改善曲线差异才可归因于流重复度。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-12",
+      "title": "Python RNG 与 torch 生成器状态不持久化，重启后采样/采样序列不可复现",
+      "severity": "低",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/agent.py:53-55",
+        "life_agent/store.py:30-42"
+      ],
+      "evidence": "self.random = random.Random(seed)、self.torch_random = torch.Generator 并 manual_seed（53-55）；StateStore.save 的 payload（30-42）不包含两者状态，_restore 也不恢复。replay.choose 用 self.random 加权抽样（memory.py:131-142），生成用 self.torch_random 多项式采样（agent.py:96）。",
+      "impact": "重启后即使权重/账本完全一致，重放选择与生成 token 序列也会偏离重启前；依赖固定随机序列的回归实验不可复现。",
+      "recommendation": "持久化 random.getstate() 与 torch_random.get_state()，加载后恢复；或在报告中声明 RNG 未恢复。",
+      "regression_test": "save/load 后断言 random.getstate() 与 generator state 一致。"
+    },
+    {
+      "part": "persistence",
+      "id": "PERS-13",
+      "title": "快照中 optimizer state_dict 在 state.lock 之外读取，与权重/账本快照非同锁",
+      "severity": "低",
+      "kind": "设计边界",
+      "strength": "代码推断",
+      "location": [
+        "life_agent/worker.py:359-374"
+      ],
+      "evidence": "_snapshot 在 `with state.lock:` 内复制 cpu 权重、replay、debt、metrics（360-373），锁释放后才 `self._to_cpu(state.optimizer.state_dict())`（374）。当前 worker 是单写者线程，optimizer 仅在该线程内变更，实际并发窗口很小；但锁的覆盖范围不一致，未来若有旁路优化器访问会产生动量与权重不一致的快照。",
+      "impact": "低风险：单写者模型下未观察到实际错位；属于快照事务边界不完整。",
+      "recommendation": "将 optimizer.state_dict() 的读取移入 state.lock 临界区，与权重/账本同锁快照。",
+      "regression_test": "并发训练负载下快照，核对 optimizer exp_avg 与权重属于同一训练步。"
+    },
+    {
+      "part": "readiness",
+      "id": "READY-23",
+      "title": "dataset_inventory.json 与当前目录存在小幅不一致，全量前应重新生成冻结清单",
+      "severity": "低",
+      "kind": "真实缺陷",
+      "strength": "已实测证实",
+      "location": [
+        "dataset_inventory.json:14-87",
+        "O:\\数据集（只读遍历）"
+      ],
+      "evidence": "只读遍历当前目录：总计 760 文件、10,913,873,703 B（与清单总量一致）。分项差异：清单 .zip 2 个而实测 3 个（24,823,192 B）；清单 <none> 6 个而实测 3 个（4,856 B）；实测另有 .gitattributes 1 个/1,174 B、.gitignore 1 个/837 B 未列入清单。清单生成后目录内容有过小改动。",
+      "impact": "以旧清单为准做排除/保留决策时，可能漏算新增的点配置文件；保留集哈希划分基于旧路径集合。",
+      "recommendation": "全量前重跑 inventory（不训练），把新清单与冻结采样清单一并归档；显式排除 .gitattributes/.gitignore 等非数据文件。",
+      "regression_test": "test_inventory_matches_current_tree：清单文件数/字节数/扩展名分布与目录遍历结果一致（除显式排除项外）。"
+    }
+  ]
+}

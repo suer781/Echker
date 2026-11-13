@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "root": "O:\\数据集",
+  "files": {
+    "01_LogiQA/AGIEval-LogiQA-zh/test.parquet": {
+      "size": 387042,
+      "mtime_ns": 1790967795398502700,
+      "next_offset": 387042,
+      "complete": true,
+      "last_chunk_sha256": "445fd72ace339836a0cf33c44cfb9383708e779db9f6e4f33a777f398ed9406e",
+      "last_chunk_bytes": 387042
+    },
+    "01_LogiQA/LogiQA-1.0/LogiQA-dataset-master/Eval.txt": {
+      "size": 550021,
+      "mtime_ns": 1790967815831177500,
+      "next_offset": 550021,
+      "complete": true,
+      "last_chunk_sha256": "4c49e6753b7262c001506b9151135abf722247035ab075dad93acdea5789c01f",
+      "last_chunk_bytes": 550021
+    },
+    "01_LogiQA/LogiQA-1.0/LogiQA-dataset-master/README.md": {
+      "size": 556,
+      "mtime_ns": 1790967815832130100,
+      "next_offset": 556,
+      "complete": true,
+      "last_chunk_sha256": "68ec8dcd923e7ffaa5047ca34b504e4c296d34d33a857753c3c0d7656c32f8f8",
+      "last_chunk_bytes": 556
+    },
+    "01_LogiQA/LogiQA-1.0/LogiQA-dataset-master/Test.txt": {
+      "size": 559060,
+      "mtime_ns": 1790967815834129900,
+      "next_offset": 559060,
+      "complete": true,
+      "last_chunk_sha256": "359acb78c37802208f7fde9e2f6574b8526527c63d6a336f90a53f1932cb4701",
+      "last_chunk_bytes": 559060
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/README.md": {
+      "size": 8012,
+      "mtime_ns": 1790967857911850700,
+      "next_offset": 8012,
+      "complete": true,
+      "last_chunk_sha256": "5ed037a47c3f3aaa7a136dd7884e2416f8176bd9cf68ca8fbcfcf2ef08b81cc3",
+      "last_chunk_bytes": 8012
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/datasource.txt": {
+      "size": 315,
+      "mtime_ns": 1790967857914093400,
+      "next_offset": 315,
+      "complete": true,
+      "last_chunk_sha256": "c25927ef6b1229b4957b55b65e8bade028a26ba982f62ce0c7d0e9dcf447da29",
+      "last_chunk_bytes": 315
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/dev.txt": {
+      "size": 1770764,
+      "mtime_ns": 1790967857919135900,
+      "next_offset": 1770764,
+      "complete": true,
+      "last_chunk_sha256": "cc6430364fce09de520054b000eab32f6609fdb3f460b64e9af2f15511952368",
+      "last_chunk_bytes": 810764
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/dev_fol.jsonl": {
+      "size": 16840405,
+      "mtime_ns": 1790967857960458100,
+      "next_offset": 7680000,
+      "complete": false,
+      "last_chunk_sha256": "eb5187b43f59c8c53930e8d5af41bc6cb3469d36129e989b9432856a01cd3f47",
+      "last_chunk_bytes": 960000
+    }
+  },
+  "frames": 16
+}

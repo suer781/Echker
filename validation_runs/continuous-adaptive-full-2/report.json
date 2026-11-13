@@ -1,0 +1,10 @@
+{
+  "created_at": "2026-11-13T20:39:03.602777",
+  "all_measurable_criteria_passed": false,
+  "errors": [
+    "RuntimeError('The size of tensor a (368400) must match the size of tensor b (364288) at non-singleton dimension 0')",
+    "Traceback (most recent call last):\n  File \"O:\\Documents\\智能自学习AI（新）\\continuous_validation.py\", line 329, in main\n    delta = float((after_weight - before_weight).abs().sum().item())\n                   ~~~~~~~~~~~~~^~~~~~~~~~~~~~~\nRuntimeError: The size of tensor a (368400) must match the size of tensor b (364288) at non-singleton dimension 0\n"
+  ],
+  "elapsed_seconds": 9.02299530000164,
+  "state_dir": "O:\\Documents\\智能自学习AI（新）\\validation_runs\\continuous-adaptive-full-2\\state"
+}

@@ -1,0 +1,125 @@
+{
+  "reviewer": "novelty",
+  "generated_at": "2026-11-13T21:29:29+08:00",
+  "scope": "只读审查 life_agent/memory.py 全文、life_agent/worker.py 258-328、life_agent/switching.py 67-113、life_agent/agent.py 127-131/240-247/323-346、continuous_validation.py 113-128/329-346/378-404/468-531、config.json；对照 validation_runs/continuous-adaptive-full-7/report.json。未修改 life_agent/、tests/、validation_runs/、state_dataset_smoke/；探测脚本与结果仅写入 _audit_tmp/novelty/；未训练模型、未跑全量数据集。本轮定位为设计边界审查：所有新增机制均标注「尚未实现/设计建议」。",
+  "findings": [
+    {
+      "id": "NOV-01",
+      "title": "现有「重复处理」只覆盖字节级精确去重与单帧内部低熵惩罚，不建模「重复导致边际信息收益下降」；不存在习惯化/饱食度信号",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "已实测证实",
+      "location": ["life_agent/memory.py:60-79", "life_agent/memory.py:27-31", "life_agent/memory.py:111-124", "life_agent/memory.py:192-204", "life_agent/memory.py:221-229"],
+      "evidence": "structural_quality(ids) 只在单条序列内部统计字节值频率熵、最长连续游程、unique 占比（memory.py:65-78），不跨帧比较、不读取模型损失或历史访问次数。Sample.digest 是 ids+labels 的 SHA256（27-31），去重只认完全相同的字节序列。ReplayBuffer.add 命中同 digest 时权重按 0.9*旧+0.1*新+0.02 混合（117-120）；DebtLedger.add 命中同 digest 时权重直接叠加并 cap 4.0（197-198）；decay_after_training 只是巩固后的乘性遗忘（221-229）。全仓 grep 无 entropy 滚动窗口、n-gram 记忆、熟悉度/饱食度字段。实测（probe_results.json quality_rows）：256 个 0 → quality 0.001；256 个 128 → 0.001；种子 7 随机 167 种取值/7.1932 bits → 1.0；单调 0..255（8.0 bits、完全可预测）→ 1.0；16 周期序列 → 0.78125；两值交替 → 0.097656；长度 8 短序列 → 1.0（n<16 直接放行，63-64 行）。",
+      "impact": "「模型厌恶烦躁重复」若被表述为已有机制，属于把表层去重/低熵降权包装成情绪或习惯化。代码内可观测的只是：相同字节序列合并、单帧分布过于集中时权重乘一个 0.001 地板因子；没有任何量回答「这条内容第二次、第十次出现时，对模型的边际改善是否趋零」。",
+      "recommendation": "【尚未实现/设计建议】对外表述应区分两层：已实现的是「分布重复度的静态结构惩罚 + 精确 digest 去重」；未实现的是「跨时间熟悉度/边际收益衰减」。任何习惯化信号需另立指标并单独测量，不得复用 structural_quality 或 debt 叠加权重充当。",
+      "regression_test": "test_repeated_digest_accumulates_not_familiarity：种子 7，同一 Sample 连续 add 5 次到 ReplayBuffer 与 DebtLedger；断言 replay unique=1、debt 同 digest 权重按叠加规则增长至 cap 4.0；断言样本/账本上不存在独立的 familiarity/satiation 字段被更新（防止后续把叠加权重误称为习惯化）。"
+    },
+    {
+      "id": "NOV-02",
+      "title": "结构质量因子与序列长度、上下文包裹耦合：同一内容不同长度质量漂移；不同上下文包裹产生不同 digest 且质量均为 1.0；可预测序列被判为高质量",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "evidence_strength": "已实测证实",
+      "location": ["life_agent/memory.py:60-79", "life_agent/memory.py:27-31"],
+      "evidence": "实测同一 4 值块 [10,20,30,40] 重复到 32/64/128 长度，structural_quality 分别为 1.0 / 0.78125 / 0.390625——内容重复度相同，仅长度不同，质量因子随长度单调下降。同一 32 字节内块分别加前缀 [1,2]/后缀 254 与前缀 [9,99]/后缀 [250,251]，digest 不同（wrapped_a≠wrapped_b），质量均为 1.0，两条之间无任何重复关联。16×16 表格（末列逐行抖动，242 种取值、7.8906 bits、游程 1）质量 1.0；单调递增 0..255 质量 1.0。周期 16 循环（4.0 bits）质量 0.78125。",
+      "impact": "反例一：同一语义内容换长度/换上下文包裹后完全绕过跨帧重复识别；反例二：周期性但每帧有微小差异的流，每帧 digest 唯一，被当作新内容累计干净压力（实测 8 帧微差周期序列使 clean_pressure 0.138208→1.116678，unique 9）；反例三：结构化表格重复行因列值抖动获得高质量；反例四：单调可预测序列因取值分散被误判为干净样本。现有指标测的是「帧内分布离散度」，不是「可预测性/冗余度」。",
+      "recommendation": "【尚未实现/设计建议】① 把长度归一化（如按每字节熵、固定窗口）从质量因子中解耦；② 跨帧重复检测另立 n-gram/指纹近邻指标（见 NOV-04），不要期望 digest 或单帧熵承担；③ 在文档中明示 structural_quality 是分布离散度代理，不等于信息量大或可预测性低。",
+      "regression_test": "test_structural_quality_length_context_baseline：种子 7；锁定上述 32/64/128 长度质量基线 1.0/0.78125/0.390625、两种包裹 digest 不等且质量 1.0、短序列 n<16 质量 1.0；后续修改阈值时该测试暴露行为漂移。"
+    },
+    {
+      "id": "NOV-03",
+      "title": "债务账本对同 digest 重复样本叠加权重，且 due() 按原始权重降序偿还；低质量重复债务反而被优先选中，与「重复应降权/缓学」方向相反",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "evidence_strength": "已实测证实",
+      "location": ["life_agent/memory.py:197-198", "life_agent/memory.py:206-219", "life_agent/memory.py:180-186"],
+      "evidence": "DebtLedger.add：同 digest 执行 weight = min(4.0, weight + weight)（197-198）；due() 按 item.weight 降序取前 limit（207），排序键不含 structural_quality。实测：全 0 样本 retention 0.35 连续入账 5 次，权重 0.175781→0.351562→0.527344→0.703125→0.878906；clean_pressure 因 quality=0.001 乘子仅 0.000176→0.000879。排序探测：重复 3 次的全 0 债务 weight 0.527344 / quality 0.001 排在第 1 位，新随机债务 weight 0.175781 / quality 1.0 排第 2 位。loss_weight 路径（81-95）只是对高损失离群值做指数抑制：实测 9.0 离群损失权重 0.712114，典型 5.0 与低损 3.0 均为 1.0，与重复度无关。",
+      "impact": "重复字节在债务侧不是被降权缓学，而是被反复叠加成高权重债务项，并在巩固批次中优先偿还；clean mass（pressure/backlog）虽被 quality 地板压到接近 0，但偿还选择排序看的是原始权重。若未来以「重复=熟悉=少学」为目标，现有债务叠加方向与之冲突，需要先改排序/叠加规则。",
+      "recommendation": "【尚未实现/设计建议】评估 due() 排序键改为 clean mass（weight*structural_quality）或加入跨帧熟悉度项；明确重复叠加的语义是「未偿还积压加重」还是「熟悉度提高」，二者不应共用一个权重字段。",
+      "regression_test": "test_debt_due_order_uses_clean_mass_or_familiarity：种子 7；构造一条高权重低质量重复债务与一条低权重高质量新债务；断言偿还顺序符合设计约定的排序键；若保持原始权重排序，需在测试中显式注释该行为为已知方向并纳入 NOV-03 记录。"
+    },
+    {
+      "id": "NOV-04",
+      "title": "五个候选「习惯化/饱食度」信号的可得性、成本与偏差评估；梯度 SNR 在当前 3GB 显存 + CPU 在线推理下不可行；现有 ttt_deltas 是权重 L1 位移而非收益差",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/worker.py:300-310", "continuous_validation.py:125", "continuous_validation.py:329-339", "continuous_validation.py:479", "life_agent/worker.py:285-296"],
+      "evidence": "(a) 滚动字节熵：现有 structural_quality 已在单帧内算熵（memory.py:65-69），跨帧滚动计数需新增有界滑动统计；纯 CPU、零模型前向反向；偏差：只测分布离散度，高熵噪声会被判为「新颖」，自然语言常用字节重复属正常。(b) n-gram 新颖度：需新增近期 n-gram 集合/计数衰减结构，代码中不存在；CPU 哈希 O(n)、内存有界；偏差：领域词表、常用短语、协议帧头/表头的合法重复会被误判为熟悉。(c) 边际损失改善：worker.py:300-309 已把 per-sample loss 按 0.9/0.1 写回 stored.loss，同 digest 复访可直接算前后差，零额外 forward/backward；偏差：loss 受 LR 调整（worker 291-293）、batch 组成、样本权重缩放、TTT/consolidate/train 共用 global_step（295）污染，首访无前值，噪声大。(d) 梯度信噪比：当前未记录任何梯度统计；需 backward 后累积梯度均值/方差或额外反向传播；逐样本梯度在 3GB 显存与 CPU 在线推理下不可行，且受 grad_clip=1.0 裁剪、AdamW 归一化、结构重尺寸干扰。(e) TTT 前后收益差：现有 ttt_deltas 记录的是 TTT 前后参数向量 abs().sum() 权重 L1 位移（continuous_validation.py:331,339,531），full-7 ttt_samples=40、min L1 delta=2.3564；这不是 loss 收益。真正的 loss-before/after 需在固定小探针集上 TTT 前后各做一次 CPU forward，无额外 backward；偏差：探针集分布偏移、样本量小。",
+      "impact": "可立即零成本记录的只有：(c) 基于已有 stored.loss EWMA 的复访边际差，以及 (a) 帧内熵的跨帧滚动汇总。(b) 需新增有界数据结构但仍在 CPU 预算内。(e) 可作为离线验证指标。(d) 在线不可行，暂缓。把权重 L1 位移当作「学到东西/有收益」的证据属于口径错误。",
+      "recommendation": "【尚未实现/设计建议】第一阶段只离线记录 (a)(b)(c) 三条序列与现有 stored.loss、lr、结构事件并列落盘；第二阶段再讨论降权使用；(e) 作为离线对照；(d) 不进入在线管线。每条信号必须带自身偏差注释与失效条件。",
+      "regression_test": "test_marginal_delta_uses_existing_ewma_no_extra_backward：构造两批复访样本，断言边际改善字段由 stored.loss 的 0.9/0.1 EWMA 前后差得出；loss 非有限或首访时边际差标记为缺失（None）而非 0；测试中统计 backward/forward 调用计数不增加。"
+    },
+    {
+      "id": "NOV-05",
+      "title": "若未来对低新颖度信号做「硬拒绝/完全停止学习」，存在合法低熵数据误伤路径与缓冲/统计双重分布偏置；当前代码本身无硬拒绝路径",
+      "severity": "高",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/memory.py:111-124", "life_agent/memory.py:81-95", "life_agent/config.py:53-57", "life_agent/agent.py:127-131"],
+      "evidence": "现状：ReplayBuffer.add 与 DebtLedger.add 始终入库，权重地板 0.001（115），源码注释 113-114 明示纯色图、静音、稀疏二进制格式不得硬拒。配置上限 replay_capacity=1024、debt_capacity=512、debt_retention=0.35、debt_decay=0.75、debt_min_weight=0.005。实测已落到地板的合法低熵样本：静音 PCM 256 零、纯色灰 256（quality 0.001）；表格重复行与周期流当前质量 1.0/0.78125，若改用熵/新颖度门控同样可能被误杀。误伤路径：静音 PCM、纯色帧、结构化表格、重复运行日志、协议固定帧头被直接丢弃。分布偏置机制：被拒样本永久缺席有界缓冲 → clean_pressure 少计（195 行 total_clean_added 只计入库项）→ sufficient_data 更难满足、切换节奏失真；StatisticalCleaner.loss_mean/loss_var 只在入库样本上按 0.02 EWMA 更新（89-93），选择偏置使 2.5-sigma 离群阈值被留在库内的高熵/高损样本带偏，robust_weight 校准失效；合法重复模式永远无法经 replay 巩固。",
+      "impact": "硬拒绝是单向门：缓冲满员后被驱逐的本就是低权项（126-129），再叠加准入拒绝会使低熵合法类在数据集中的占比单调归零，且事后无法从账本恢复证据。3GB 显存/CPU 在线条件下也没有重放被拒样本的旁路。",
+      "recommendation": "【尚未实现/设计建议】信号作用边界限定为：① 降低采样/巩固优先级（权重/抽签概率）；② 触发探索请求或作为切换的附加门控；不允许完全停止学习或丢弃样本。被降权样本仍保留在有界缓冲中可复访；准入层只保留现有 structural_quality 乘权与 digest 去重。任何硬拒绝提案需先补误伤清单与分布偏置度量。",
+      "regression_test": "test_low_entropy_legal_frames_not_hard_rejected：静音 PCM、纯色帧、表格重复行、重复日志各入库；断言四类样本均出现在 replay 与 debt 中、权重 ≥ 0.001；未来新增门控返回拒绝路径时该测试失败。"
+    },
+    {
+      "id": "NOV-06",
+      "title": "当前切换是数据挤压/偿还能力/步数工作量驱动，不含任何新颖度项；「压力驱动切换」与「无聊驱动切换」不可混称",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "已实测证实",
+      "location": ["life_agent/switching.py:81-92", "life_agent/agent.py:323-346", "life_agent/memory.py:188-190", "life_agent/memory.py:206-219"],
+      "evidence": "decide() 判据：active_delta/passive_delta 为步数基线差，pressure_growth = clean_pressure - baseline，sufficient_data = required>0 and pressure_growth >= required，sufficient_work = passive_delta>0 and active_delta>=passive_delta，should_switch = 二者 AND（switching.py:81-87）。clean_pressure 来自 total_clean_added（memory.py:188-190），learned_capacity 来自 due() 批次 clean mass 的累计平均（210-218）。代码与配置中无 novelty/boredom/satiation 项。纯 Python 回放（合成两侧步数各 +2/轮，非真实训练动力学）：全 0 重复流 12 轮切换 3 次，间隔 [1,2,5]，终态 pressure 0.002109、capacity 0.001143、unique 1；随机新颖流 12 轮切换 4 次，间隔 [1,2,3,4]，pressure 2.109375、capacity 0.615234、unique 12。重复流下 capacity EWMA 随压力一起收缩，阈值自校准到近零，仍会切换——证明现有机制不以「无聊」为驱动，也不阻止重复流入账。",
+      "impact": "两个问题正交：压力回答「积压待学的干净数据是否超过被动侧一次可消化量」；习惯化回答「当前流对模型边际改善是否趋零」。高熵噪声流压力大但无学习收益，低熵合法流压力小但可能已被掌握。若用新颖度替换 pressure 项：高熵噪声流新颖度高即触发切换，把「没见过」当成「该换边」，丢失已学量与偿还能力证据，噪声流会造成频繁切换振荡、双侧反复同步浪费预算。若作为附加门控（AND 条件或独立探索触发）：保留压力判据，仅在数据挤压条件已满足时用低边际改善/低新颖度辅助决定切去探索；风险是门过硬会延迟切换、积压增多。",
+      "recommendation": "【尚未实现/设计建议】未来若加入新颖度信号，定位为附加门控或探索触发器，不替换 pressure 项；决策记录需同时输出 pressure_growth、capacity、work deltas 与新颖度指标，便于区分切换由挤压还是由低收益触发。文档措辞沿用「数据压力/偿还容量」，不使用「无聊/厌恶」描述现有切换。",
+      "regression_test": "test_novelty_is_additional_gating_not_pressure_replacement：种子 7；纯 Python 回放控制器，构造高熵但边际收益为零的合成流；断言替换式门控会在 pressure_growth < capacity 时触发切换（记为反例基线），附加门控在压力条件未满足时不切换；decision 记录同时含压力项与新颖度项。"
+    },
+    {
+      "id": "NOV-07",
+      "title": "现有验证链路没有边际收益/新颖度指标：stored.loss 不进 report，决策样本不落盘，事后无法判断「习惯化」是否发生",
+      "severity": "中",
+      "kind": "验证盲区",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/worker.py:300-309", "continuous_validation.py:521-536", "life_agent/switching.py:115-120", "validation_runs/continuous-adaptive-full-7/report.json"],
+      "evidence": "worker 回写 stored.loss EWMA 与 robust_weight（305-309），但 _snapshot 只持久化样本 weight/loss 字典，report 层未输出 per-sample loss 轨迹或复访边际差；continuous_validation 报告字段含 ttt_samples/ttt_minimum_weight_l1_delta（权重位移），无 loss 改善曲线；switch_controller.to_dict 只存三个 baseline，last_decision 不持久化（switching.py:115-120），full-7 report adaptive_switch=null、61 次切换无决策样本。现有 cleaning 判据仅 unique_after-unique_before<=5 且 min_feed_weight<0.5（continuous_validation.py:492），不测量重复流的边际收益衰减。",
+      "impact": "即使未来加入习惯化信号，没有逐样本/逐轮的 loss 边际、权重分布、新颖度序列与决策上下文落盘，就无法区分「真习惯化」与 LR 触底、结构扩张/裁剪、batch 组成变化造成的 loss 下降假象；回归实验也缺少可对照的基线轨迹。",
+      "recommendation": "【尚未实现/设计建议】先补观测再谈控制：把复访边际 loss 差、帧内/滚动熵、n-gram 新颖度、决策 decision dict 按轮次写入 metrics.jsonl 并随检查点摘要持久化；report 增加这些序列的统计量（分位数、趋势斜率）。",
+      "regression_test": "test_metrics_record_novelty_and_marginal_series：一轮混合交互后，断言 metrics 记录含每轮边际 loss 改善、熵/新颖度字段与完整 decision dict；重载后这些序列摘要可恢复。"
+    },
+    {
+      "id": "NOV-08",
+      "title": "分阶段落地建议与最小对照实验设计（仅设计建议，尚未实现）",
+      "severity": "低",
+      "kind": "设计边界",
+      "evidence_strength": "尚未验证",
+      "location": ["life_agent/worker.py:258-328", "life_agent/switching.py:67-113", "life_agent/memory.py:105-124", "life_agent/memory.py:166-229"],
+      "evidence": "阶段一（只记录，不改决策）：在入库与复访路径旁记录帧内熵、滚动字节熵、n-gram 新颖度、stored.loss 复访前后差，与 lr、global_step、结构事件并列落盘；判据：序列可复现（同种子两次运行一致）、额外 CPU 开销可测且不阻塞在线推理。阶段二（仅降权，不拒绝、不门控）：经统计验证后用边际改善/新颖度调整 replay 抽签权重与 debt 巩固优先级，样本仍入库；判据：低熵合法类入库率不下降，权重分布变化与边际改善相关而非与帧内熵单因子相关。阶段三（附加门控/探索触发）：在现有 pressure AND work 判据之外接低收益门控或探索请求，不替换 pressure 项；判据：高熵噪声流不触发额外切换，重复流在边际改善趋零时出现探索/切换倾向，切换间隔与压力容量曲线可解释。最小对照实验：同一初始权重、同一 token 预算、固定种子 7，A 高重复流（固定块+微差周期）、B 高新颖流（种子固定的随机/异质帧）；测量采样权重分布（分位数、降权比例）、切换次数/间隔与 reason 分布、每字节边际 loss 改善曲线、clean_pressure 与 repayment_capacity 走势、TTT 权重位移与探针集 loss 前后差。排除假象：同步记录 LR 轨迹与结构事件（growth/prune），边际改善趋零须在 LR 未下调、隐藏维度未变、整体 loss 基线未下移时成立；同种子重复跑核对可复现。",
+      "impact": "在观测与对照实验完成前，任何「模型会厌烦重复」的结论都不具备可测量支撑；分阶段可避免在信号偏差未校准时把噪声流误判为新颖、把合法低熵数据误杀。",
+      "recommendation": "【尚未实现/设计建议】按阶段一→二→三推进，每阶段设独立判据与回滚开关；信号定义、阈值、偏差注释随指标一并入文档；本轮不写生产代码。",
+      "regression_test": "见 NOV-01/02/03/05/06/07 对应测试；另补 test_control_variables_held_constant：对照实验中固定种子 7，断言两次重复运行的 lr 轨迹与结构事件序列一致，边际改善曲线差异才可归因于流重复度。"
+    }
+  ],
+  "experiments": [
+    {
+      "name": "probe-cleaner-structural-quality-corpora",
+      "command": "$env:PYTHONDONTWRITEBYTECODE=1; python -B _audit_tmp\\novelty\\probe_novelty.py（importlib 直载 life_agent/memory.py 与 switching.py，不拉起 torch；构造 13 类帧内样本 + 8 帧微差周期流，打印 structural_quality/熵/游程/distinct）",
+      "result": "quality：静音 PCM 256 零=0.001，纯色灰=0.001，随机 167 取值 7.1932 bits=1.0，两值交替=0.097656，单调 0..255=1.0，16 周期=0.78125，长度 8 短序列=1.0，同内容块 32/64/128=1.0/0.78125/0.390625，两种上下文包裹均=1.0，16×16 抖动表格=1.0。digest：完全重复相等，两种包裹不等。",
+      "artifact_dir": "_audit_tmp/novelty/probe_results.json"
+    },
+    {
+      "name": "probe-replay-debt-repeat-and-due-order",
+      "command": "同脚本：ReplayBuffer(1024) 对全 0 样本连入 5 次；DebtLedger(512,0.75,0.005) retention 0.35 连入 5 次后再入 8 帧微差序列，due(4) 后两次 decay；另造 3 次重复债务 + 1 条新债务检查 due() 排序；loss_weight 暖机 20 条后测典型/离群/低损。",
+      "result": "Replay 5 次后 unique=1，权重 0.001→0.021→0.039→0.0552→0.06978（上升）；Debt 重复 5 次权重 0.175781→0.878906，clean_pressure 0.000176→0.000879；8 帧微差后 pressure 1.116678、unique 9；due(4) 后 repayment_capacity 0.412866；排序首位为重复债务 weight 0.527344/quality 0.001，新债务 0.175781/quality 1.0 次之；loss_weight：9.0 离群=0.712114，5.0/3.0=1.0。",
+      "artifact_dir": "_audit_tmp/novelty/probe_results.json"
+    },
+    {
+      "name": "probe-switch-controller-pressure-replay",
+      "command": "同脚本：AdaptiveSwitchController 纯 Python 回放，重复全 0 流与种子 7 随机流各 12 轮；每轮 debt.add + due(4)，两侧合成步数各 +2；切换后按 _switch_locked 语义 note_switch 重置基线。",
+      "result": "重复流 3 次切换、间隔 [1,2,5]，终态 pressure 0.002109/capacity 0.001143/unique 1；新颖流 4 次切换、间隔 [1,2,3,4]，pressure 2.109375/capacity 0.615234/unique 12。注意：步数为合成计数、无真实训练损失，本回放只验证压力/容量公式与决策 reason，不代表真实切换节奏。",
+      "artifact_dir": "_audit_tmp/novelty/probe_results.json"
+    }
+  ],
+  "summary": "现有代码不存在「厌恶烦躁重复」的情绪或习惯化机制：可测的只有 digest 精确去重、单帧分布离散度的结构质量乘权、高损失离群值抑制，以及债务叠加/乘性遗忘。实测证实结构质量与长度、上下文耦合，单调可预测序列被判高质量，重复债务反而在 due() 中优先偿还。五个候选信号中，帧内/滚动熵与基于已有 stored.loss EWMA 的复访边际差可零模型成本记录，n-gram 新颖度需新增有界 CPU 结构，TTT 收益差需额外探针集前后向，梯度 SNR 在当前硬件下不可行；现有 ttt_deltas 是权重 L1 位移而非收益差。切换判据纯由数据挤压、偿还容量与步数工作量构成，与新颖度正交，不能混称「无聊驱动」；新颖度若引入应做附加门控而非替换压力项。硬拒绝会误伤静音/纯色/表格/日志等合法低熵数据，并造成缓冲永久缺席与 cleaner 统计选择偏置。所有新增机制均为尚未实现的设计建议，需先补观测与对照实验再谈降权与门控。",
+  "verdict": "本轮为设计边界审查，未改源码。结论：把现有重复降权表述为「模型厌恶/烦躁重复」缺乏可测机制支撑；现状是表层字节去重与低熵乘权。建议按「只记录 → 仅降权 → 附加门控」三阶段推进，先在固定种子对照实验中测得可复现的边际收益衰减曲线，再决定是否进入决策回路；梯度 SNR 暂缓，硬拒绝不允许进入准入路径。"
+}

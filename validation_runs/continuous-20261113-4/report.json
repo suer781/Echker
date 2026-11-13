@@ -1,0 +1,9 @@
+{
+  "created_at": "2026-11-13T19:55:42.924840",
+  "all_measurable_criteria_passed": false,
+  "errors": [
+    "AssertionError(\"passive CPU inference occurred: {'cycle': 56, 'active_before': 'left', 'passive_before': 'right', 'active_after': 'right', 'passive_after': 'left', 'interactions_before': 64, 'interactions_after': 65, 'switches_before': 4, 'switches_after': 5, 'calls_before': {'left': 0, 'right': 84}, 'calls_after': {'left': 0, 'right': 95}}\")"
+  ],
+  "elapsed_seconds": 12.253551300000254,
+  "state_dir": "O:\\Documents\\智能自学习AI（新）\\validation_runs\\continuous-20261113-4\\state"
+}

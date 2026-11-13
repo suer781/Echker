@@ -1,0 +1,89 @@
+{
+  "root": "O:\\数据集",
+  "total_files": 760,
+  "total_bytes": 10913873703,
+  "training_files": 41,
+  "training_bytes": 6126284498,
+  "holdout_files": 0,
+  "holdout_bytes": 0,
+  "holdout_fraction": 0.01,
+  "includes": [
+    "*.jsonl"
+  ],
+  "excludes": [],
+  "extensions": {
+    ".jsonl": {
+      "files": 41,
+      "bytes": 6126284498
+    },
+    ".parquet": {
+      "files": 227,
+      "bytes": 1785374876
+    },
+    ".json": {
+      "files": 238,
+      "bytes": 1435021168
+    },
+    ".csv": {
+      "files": 136,
+      "bytes": 800641819
+    },
+    ".arrow": {
+      "files": 3,
+      "bytes": 663529912
+    },
+    ".txt": {
+      "files": 17,
+      "bytes": 64835810
+    },
+    ".zip": {
+      "files": 2,
+      "bytes": 24823034
+    },
+    ".ipynb": {
+      "files": 5,
+      "bytes": 7514755
+    },
+    ".png": {
+      "files": 7,
+      "bytes": 3977514
+    },
+    ".pdf": {
+      "files": 1,
+      "bytes": 702343
+    },
+    ".jpeg": {
+      "files": 2,
+      "bytes": 574072
+    },
+    ".py": {
+      "files": 39,
+      "bytes": 449266
+    },
+    ".md": {
+      "files": 19,
+      "bytes": 126306
+    },
+    ".sh": {
+      "files": 14,
+      "bytes": 10383
+    },
+    "<none>": {
+      "files": 6,
+      "bytes": 7025
+    },
+    ".example": {
+      "files": 1,
+      "bytes": 454
+    },
+    ".yml": {
+      "files": 1,
+      "bytes": 256
+    },
+    ".yaml": {
+      "files": 1,
+      "bytes": 212
+    }
+  },
+  "note": "Inventory only; no claim about semantic quality or duplicate content across formats."
+}

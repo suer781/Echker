@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "root": "O:\\数据集",
+  "files": {
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/dev_fol.jsonl": {
+      "size": 16840405,
+      "mtime_ns": 1790967857960458100,
+      "next_offset": 2263168,
+      "complete": false
+    }
+  },
+  "frames": 5
+}

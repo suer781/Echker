@@ -1,0 +1,967 @@
+{
+  "roundtrip": {
+    "live_snapshot": {
+      "active": "left",
+      "switch_count": 2,
+      "interaction_count": 4,
+      "observed_frames": 1,
+      "history_len": 2,
+      "switch_controller": {
+        "baseline_clean_pressure": 1.46875,
+        "baseline_active_work": 7,
+        "baseline_passive_work": 7
+      },
+      "pending": [
+        "right"
+      ],
+      "hemispheres": {
+        "left": {
+          "metrics": {
+            "global_step": 7,
+            "total_trained_bytes": 240,
+            "last_loss": 5.608602046966553,
+            "last_event": "reciprocal sync mix=0.02"
+          },
+          "hidden_dims": [
+            64
+          ],
+          "debt_items": {
+            "8dac096701c7546ff5fd26a3d449772e8a255fda815c7839784578d78656eb0c": [
+              0.158203,
+              0.541606,
+              "debt:dialogue:1"
+            ],
+            "2c82b8b395ef21d36292135d021dbc15755284568585aedb34a7c7793a913a39": [
+              0.04834,
+              0.545545,
+              "debt:observe:1"
+            ],
+            "12fa297d78cc8b693af48fee1125f1a1227aadb4564e5a3dfb1fc1a93562a430": [
+              0.098877,
+              5.50401,
+              "debt:feed:1"
+            ],
+            "68be868c6c0e7a2282c84823bee84285707793e4f73cc0b9382b0a9687cde37a": [
+              0.230713,
+              5.551943,
+              "debt:feed:1"
+            ],
+            "22e6574ab64264a9496d04891d9d09d3633a427d8d89c096252aff7d0bedca77": [
+              0.230713,
+              5.531637,
+              "debt:feed:1"
+            ]
+          },
+          "debt_counters": {
+            "total_created": 7,
+            "total_repaid": 4,
+            "repayment_batches": 2,
+            "repayment_capacity": 0.491211,
+            "total_clean_added": 1.246094
+          },
+          "replay_items": {
+            "836fb2673b88c6e49718df300890ffda9879c3a3f819c0a881e5fa2fb6d870df": [
+              0.8,
+              0.52069,
+              "dialogue:1"
+            ],
+            "dd68965a8dd69eacf60aaf876d68e662b942e501cfb0197a58841780f1c853cd": [
+              0.25,
+              0.0,
+              "observe:1"
+            ],
+            "92a82f7cf7eb42db50587fa108ccf819514fd430da06b60d33f21c4b234249f4": [
+              0.8,
+              0.0,
+              "dialogue:1"
+            ],
+            "61a39e91e702acdfe34468c108d05bc9da3621825901d01af10b27bdb406ac99": [
+              0.25,
+              0.0,
+              "observe:1"
+            ]
+          },
+          "replay_cleaner": {
+            "count": 9,
+            "loss_mean": 0.9048328689209327,
+            "loss_var": 5.02783171398378
+          },
+          "lr": {
+            "value": 0.0003,
+            "best_loss": 5.206902980804443,
+            "ema_loss": 5.6065507877274,
+            "stale_updates": 2
+          },
+          "structure": {
+            "losses_len": 7,
+            "last_change_step": -1000000000
+          },
+          "optimizer": {
+            "param_groups": 1,
+            "state_keys": 16,
+            "exp_avg_numel": 48256
+          }
+        },
+        "right": {
+          "metrics": {
+            "global_step": 7,
+            "total_trained_bytes": 440,
+            "last_loss": 5.513460159301758,
+            "last_event": "reciprocal sync mix=0.02"
+          },
+          "hidden_dims": [
+            64
+          ],
+          "debt_items": {
+            "836fb2673b88c6e49718df300890ffda9879c3a3f819c0a881e5fa2fb6d870df": [
+              0.118652,
+              1.465021,
+              "debt:dialogue:1"
+            ],
+            "dd68965a8dd69eacf60aaf876d68e662b942e501cfb0197a58841780f1c853cd": [
+              0.036255,
+              0.55367,
+              "debt:observe:1"
+            ],
+            "92a82f7cf7eb42db50587fa108ccf819514fd430da06b60d33f21c4b234249f4": [
+              0.597656,
+              1.028462,
+              "debt:dialogue:1"
+            ],
+            "61a39e91e702acdfe34468c108d05bc9da3621825901d01af10b27bdb406ac99": [
+              0.182617,
+              0.0,
+              "debt:observe:1"
+            ]
+          },
+          "debt_counters": {
+            "total_created": 8,
+            "total_repaid": 8,
+            "repayment_batches": 4,
+            "repayment_capacity": 0.603271,
+            "total_clean_added": 1.46875
+          },
+          "replay_items": {
+            "8dac096701c7546ff5fd26a3d449772e8a255fda815c7839784578d78656eb0c": [
+              0.8,
+              0.0,
+              "dialogue:1"
+            ],
+            "2c82b8b395ef21d36292135d021dbc15755284568585aedb34a7c7793a913a39": [
+              0.25,
+              0.0,
+              "observe:1"
+            ],
+            "12fa297d78cc8b693af48fee1125f1a1227aadb4564e5a3dfb1fc1a93562a430": [
+              0.5,
+              5.50401,
+              "feed:1"
+            ],
+            "68be868c6c0e7a2282c84823bee84285707793e4f73cc0b9382b0a9687cde37a": [
+              0.5,
+              5.545823,
+              "feed:1"
+            ],
+            "22e6574ab64264a9496d04891d9d09d3633a427d8d89c096252aff7d0bedca77": [
+              0.5,
+              5.522911,
+              "feed:1"
+            ]
+          },
+          "replay_cleaner": {
+            "count": 12,
+            "loss_mean": 1.1732701214725154,
+            "loss_var": 5.9064967735950855
+          },
+          "lr": {
+            "value": 0.0003,
+            "best_loss": 5.3127241134643555,
+            "ema_loss": 5.5105198463380995,
+            "stale_updates": 2
+          },
+          "structure": {
+            "losses_len": 7,
+            "last_change_step": -1000000000
+          },
+          "optimizer": {
+            "param_groups": 1,
+            "state_keys": 16,
+            "exp_avg_numel": 48256
+          }
+        }
+      }
+    },
+    "restored_snapshot": {
+      "active": "left",
+      "switch_count": 2,
+      "interaction_count": 4,
+      "observed_frames": 1,
+      "history_len": 2,
+      "switch_controller": {
+        "baseline_clean_pressure": 1.46875,
+        "baseline_active_work": 7.0,
+        "baseline_passive_work": 7.0
+      },
+      "pending": [],
+      "hemispheres": {
+        "left": {
+          "metrics": {
+            "global_step": 7,
+            "total_trained_bytes": 240,
+            "last_loss": 5.608602046966553,
+            "last_event": "reciprocal sync mix=0.02"
+          },
+          "hidden_dims": [
+            64
+          ],
+          "debt_items": {
+            "8dac096701c7546ff5fd26a3d449772e8a255fda815c7839784578d78656eb0c": [
+              0.158203,
+              0.541606,
+              "debt:dialogue:1"
+            ],
+            "2c82b8b395ef21d36292135d021dbc15755284568585aedb34a7c7793a913a39": [
+              0.04834,
+              0.545545,
+              "debt:observe:1"
+            ],
+            "12fa297d78cc8b693af48fee1125f1a1227aadb4564e5a3dfb1fc1a93562a430": [
+              0.098877,
+              5.50401,
+              "debt:feed:1"
+            ],
+            "68be868c6c0e7a2282c84823bee84285707793e4f73cc0b9382b0a9687cde37a": [
+              0.230713,
+              5.551943,
+              "debt:feed:1"
+            ],
+            "22e6574ab64264a9496d04891d9d09d3633a427d8d89c096252aff7d0bedca77": [
+              0.230713,
+              5.531637,
+              "debt:feed:1"
+            ]
+          },
+          "debt_counters": {
+            "total_created": 7,
+            "total_repaid": 4,
+            "repayment_batches": 2,
+            "repayment_capacity": 0.491211,
+            "total_clean_added": 1.246094
+          },
+          "replay_items": {
+            "836fb2673b88c6e49718df300890ffda9879c3a3f819c0a881e5fa2fb6d870df": [
+              0.8,
+              0.52069,
+              "dialogue:1"
+            ],
+            "dd68965a8dd69eacf60aaf876d68e662b942e501cfb0197a58841780f1c853cd": [
+              0.25,
+              0.0,
+              "observe:1"
+            ],
+            "92a82f7cf7eb42db50587fa108ccf819514fd430da06b60d33f21c4b234249f4": [
+              0.8,
+              0.0,
+              "dialogue:1"
+            ],
+            "61a39e91e702acdfe34468c108d05bc9da3621825901d01af10b27bdb406ac99": [
+              0.25,
+              0.0,
+              "observe:1"
+            ]
+          },
+          "replay_cleaner": {
+            "count": 9,
+            "loss_mean": 0.9048328689209327,
+            "loss_var": 5.02783171398378
+          },
+          "lr": {
+            "value": 0.0003,
+            "best_loss": 5.206902980804443,
+            "ema_loss": 5.6065507877274,
+            "stale_updates": 2
+          },
+          "structure": {
+            "losses_len": 7,
+            "last_change_step": -1000000000
+          },
+          "optimizer": {
+            "param_groups": 1,
+            "state_keys": 16,
+            "exp_avg_numel": 48256
+          }
+        },
+        "right": {
+          "metrics": {
+            "global_step": 8,
+            "total_trained_bytes": 508,
+            "last_loss": 5.181286334991455,
+            "last_event": "consolidate:loss=5.1813;lr=3.00e-04;hold"
+          },
+          "hidden_dims": [
+            64
+          ],
+          "debt_items": {
+            "836fb2673b88c6e49718df300890ffda9879c3a3f819c0a881e5fa2fb6d870df": [
+              0.088989,
+              1.465021,
+              "debt:dialogue:1"
+            ],
+            "dd68965a8dd69eacf60aaf876d68e662b942e501cfb0197a58841780f1c853cd": [
+              0.027191,
+              0.55367,
+              "debt:observe:1"
+            ],
+            "92a82f7cf7eb42db50587fa108ccf819514fd430da06b60d33f21c4b234249f4": [
+              0.448242,
+              1.435096,
+              "debt:dialogue:1"
+            ],
+            "61a39e91e702acdfe34468c108d05bc9da3621825901d01af10b27bdb406ac99": [
+              0.136963,
+              0.546432,
+              "debt:observe:1"
+            ]
+          },
+          "debt_counters": {
+            "total_created": 8,
+            "total_repaid": 8,
+            "repayment_batches": 4,
+            "repayment_capacity": 0.603271,
+            "total_clean_added": 1.46875
+          },
+          "replay_items": {
+            "8dac096701c7546ff5fd26a3d449772e8a255fda815c7839784578d78656eb0c": [
+              0.8,
+              0.0,
+              "dialogue:1"
+            ],
+            "2c82b8b395ef21d36292135d021dbc15755284568585aedb34a7c7793a913a39": [
+              0.25,
+              0.0,
+              "observe:1"
+            ],
+            "12fa297d78cc8b693af48fee1125f1a1227aadb4564e5a3dfb1fc1a93562a430": [
+              0.5,
+              5.50401,
+              "feed:1"
+            ],
+            "68be868c6c0e7a2282c84823bee84285707793e4f73cc0b9382b0a9687cde37a": [
+              0.5,
+              5.545823,
+              "feed:1"
+            ],
+            "22e6574ab64264a9496d04891d9d09d3633a427d8d89c096252aff7d0bedca77": [
+              0.5,
+              5.522911,
+              "feed:1"
+            ]
+          },
+          "replay_cleaner": {
+            "count": 14,
+            "loss_mean": 1.3359531448495818,
+            "loss_var": 6.328939580886905
+          },
+          "lr": {
+            "value": 0.0003,
+            "best_loss": 5.181286334991455,
+            "ema_loss": 5.494058170770767,
+            "stale_updates": 0
+          },
+          "structure": {
+            "losses_len": 8,
+            "last_change_step": -1000000000
+          },
+          "optimizer": {
+            "param_groups": 1,
+            "state_keys": 16,
+            "exp_avg_numel": 48256
+          }
+        }
+      }
+    },
+    "live_vs_restored_issues": [
+      "live→restored.pending: A=['right'] B=[]",
+      "live→restored.hemispheres.right.debt_items.92a82f7cf7eb42db50587fa108ccf819514fd430da06b60d33f21c4b234249f4: A=[0.597656, 1.028462, 'debt:dialogue:1'] B=[0.448242, 1.435096, 'debt:dialogue:1']",
+      "live→restored.hemispheres.right.debt_items.836fb2673b88c6e49718df300890ffda9879c3a3f819c0a881e5fa2fb6d870df: A=[0.118652, 1.465021, 'debt:dialogue:1'] B=[0.088989, 1.465021, 'debt:dialogue:1']",
+      "live→restored.hemispheres.right.debt_items.dd68965a8dd69eacf60aaf876d68e662b942e501cfb0197a58841780f1c853cd: A=[0.036255, 0.55367, 'debt:observe:1'] B=[0.027191, 0.55367, 'debt:observe:1']",
+      "live→restored.hemispheres.right.debt_items.61a39e91e702acdfe34468c108d05bc9da3621825901d01af10b27bdb406ac99: A=[0.182617, 0.0, 'debt:observe:1'] B=[0.136963, 0.546432, 'debt:observe:1']",
+      "live→restored.hemispheres.right.structure.losses_len: A=7 B=8",
+      "live→restored.hemispheres.right.lr.best_loss: A=5.3127241134643555 B=5.181286334991455",
+      "live→restored.hemispheres.right.lr.stale_updates: A=2 B=0",
+      "live→restored.hemispheres.right.lr.ema_loss: A=5.5105198463380995 B=5.494058170770767",
+      "live→restored.hemispheres.right.metrics.last_event: A='reciprocal sync mix=0.02' B='consolidate:loss=5.1813;lr=3.00e-04;hold'",
+      "live→restored.hemispheres.right.metrics.last_loss: A=5.513460159301758 B=5.181286334991455",
+      "live→restored.hemispheres.right.metrics.total_trained_bytes: A=440 B=508",
+      "live→restored.hemispheres.right.metrics.global_step: A=7 B=8",
+      "live→restored.hemispheres.right.replay_cleaner.loss_var: A=5.9064967735950855 B=6.328939580886905",
+      "live→restored.hemispheres.right.replay_cleaner.count: A=12 B=14",
+      "live→restored.hemispheres.right.replay_cleaner.loss_mean: A=1.1732701214725154 B=1.3359531448495818"
+    ],
+    "disk_vs_restored_issues": [
+      "disk→restored.pending: A='<not persisted>' B=[]",
+      "disk→restored.hemispheres.right.optimizer.exp_avg_numel: missing in A (B=48256)",
+      "disk→restored.hemispheres.right.optimizer.param_groups: missing in A (B=1)",
+      "disk→restored.hemispheres.left.optimizer.exp_avg_numel: missing in A (B=48256)",
+      "disk→restored.hemispheres.left.optimizer.param_groups: missing in A (B=1)"
+    ],
+    "note": "live_vs_restored is the real consistency check; disk_vs_restored replicates the validator's circular disk-to-disk comparison."
+  },
+  "race": {
+    "passive": "left",
+    "consolidation_samples": 2,
+    "checkpoint_snapshot": {
+      "active": "right",
+      "switch_count": 1,
+      "interaction_count": 3,
+      "observed_frames": 1,
+      "history_len": 2,
+      "switch_controller": {
+        "baseline_clean_pressure": 0.0,
+        "baseline_active_work": 4,
+        "baseline_passive_work": 3
+      },
+      "pending": "<not persisted>",
+      "hemispheres": {
+        "left": {
+          "metrics": {
+            "global_step": 6,
+            "total_trained_bytes": 179,
+            "last_loss": 5.555849552154541,
+            "last_event": "consolidate:loss=5.5558;lr=3.00e-04;hold"
+          },
+          "hidden_dims": [
+            64
+          ],
+          "debt_items": {
+            "83fa4e4dd7666d3e694fb7ca194db6322997800bf7a223e166c90833560e8308": [
+              0.098877,
+              5.536962,
+              "debt:feed:1"
+            ],
+            "0448cb8ba2089fe210b3f51169939c3646885ad9327027082719f9cf42c28457": [
+              0.098877,
+              5.563134,
+              "debt:feed:1"
+            ]
+          },
+          "debt_counters": {
+            "total_created": 2,
+            "total_repaid": 2,
+            "repayment_batches": 1,
+            "repayment_capacity": 0.263672,
+            "total_clean_added": 0.351562
+          },
+          "replay_items": {
+            "b6e3ba6a7380e53856c3ab66bbe51ef5808ee7fed6aebd943936890764f208a1": [
+              0.8,
+              0.505457,
+              "dialogue:1"
+            ],
+            "a21e88380bd47f9e379ccb771a8126db56224bbbda5a0c9c50d649bff8d32db2": [
+              0.25,
+              0.0,
+              "observe:1"
+            ],
+            "97abfc490c5ae704b45274737d8fede00d9a3ce1234f4ad38e097574d3375a37": [
+              0.8,
+              0.0,
+              "dialogue:1"
+            ],
+            "3b0b3b751d2a9f690c6608dd5669c9594ee981ae9896eee335fa1fb01c31c19a": [
+              0.25,
+              0.0,
+              "observe:1"
+            ]
+          },
+          "replay_cleaner": {
+            "count": 7,
+            "loss_mean": 0.7093193020042954,
+            "loss_var": 4.251698156117087
+          },
+          "lr": {
+            "value": 0.0003,
+            "best_loss": 5.054569244384766,
+            "ema_loss": 5.467678135047852,
+            "stale_updates": 1
+          },
+          "structure": {
+            "losses_len": 6,
+            "last_change_step": -1000000000
+          },
+          "optimizer": {
+            "state_keys": 16
+          }
+        },
+        "right": {
+          "metrics": {
+            "global_step": 4,
+            "total_trained_bytes": 240,
+            "last_loss": 5.549403667449951,
+            "last_event": "train:loss=5.5494;lr=3.00e-04;hold"
+          },
+          "hidden_dims": [
+            64
+          ],
+          "debt_items": {
+            "b6e3ba6a7380e53856c3ab66bbe51ef5808ee7fed6aebd943936890764f208a1": [
+              0.118652,
+              1.433516,
+              "debt:dialogue:1"
+            ],
+            "a21e88380bd47f9e379ccb771a8126db56224bbbda5a0c9c50d649bff8d32db2": [
+              0.036255,
+              0.55072,
+              "debt:observe:1"
+            ],
+            "97abfc490c5ae704b45274737d8fede00d9a3ce1234f4ad38e097574d3375a37": [
+              0.316406,
+              1.055978,
+              "debt:dialogue:1"
+            ],
+            "3b0b3b751d2a9f690c6608dd5669c9594ee981ae9896eee335fa1fb01c31c19a": [
+              0.09668,
+              0.0,
+              "debt:observe:1"
+            ]
+          },
+          "debt_counters": {
+            "total_created": 6,
+            "total_repaid": 6,
+            "repayment_batches": 3,
+            "repayment_capacity": 0.544271,
+            "total_clean_added": 1.101562
+          },
+          "replay_items": {
+            "83fa4e4dd7666d3e694fb7ca194db6322997800bf7a223e166c90833560e8308": [
+              0.5,
+              5.53633,
+              "feed:1"
+            ],
+            "0448cb8ba2089fe210b3f51169939c3646885ad9327027082719f9cf42c28457": [
+              0.5,
+              5.562477,
+              "feed:1"
+            ]
+          },
+          "replay_cleaner": {
+            "count": 8,
+            "loss_mean": 0.8137708070709672,
+            "loss_var": 4.705986201260472
+          },
+          "lr": {
+            "value": 0.0003,
+            "best_loss": 5.426262855529785,
+            "ema_loss": 5.460483223378658,
+            "stale_updates": 1
+          },
+          "structure": {
+            "losses_len": 4,
+            "last_change_step": -1000000000
+          },
+          "optimizer": {
+            "state_keys": 16
+          }
+        }
+      }
+    },
+    "post_consolidation_live": {
+      "active": "right",
+      "switch_count": 1,
+      "interaction_count": 3,
+      "observed_frames": 1,
+      "history_len": 2,
+      "switch_controller": {
+        "baseline_clean_pressure": 0.0,
+        "baseline_active_work": 4,
+        "baseline_passive_work": 3
+      },
+      "pending": [
+        "right"
+      ],
+      "hemispheres": {
+        "left": {
+          "metrics": {
+            "global_step": 6,
+            "total_trained_bytes": 179,
+            "last_loss": 5.555849552154541,
+            "last_event": "consolidate:loss=5.5558;lr=3.00e-04;hold"
+          },
+          "hidden_dims": [
+            64
+          ],
+          "debt_items": {
+            "83fa4e4dd7666d3e694fb7ca194db6322997800bf7a223e166c90833560e8308": [
+              0.098877,
+              5.536962,
+              "debt:feed:1"
+            ],
+            "0448cb8ba2089fe210b3f51169939c3646885ad9327027082719f9cf42c28457": [
+              0.098877,
+              5.563134,
+              "debt:feed:1"
+            ]
+          },
+          "debt_counters": {
+            "total_created": 2,
+            "total_repaid": 2,
+            "repayment_batches": 1,
+            "repayment_capacity": 0.263672,
+            "total_clean_added": 0.351562
+          },
+          "replay_items": {
+            "b6e3ba6a7380e53856c3ab66bbe51ef5808ee7fed6aebd943936890764f208a1": [
+              0.8,
+              0.505457,
+              "dialogue:1"
+            ],
+            "a21e88380bd47f9e379ccb771a8126db56224bbbda5a0c9c50d649bff8d32db2": [
+              0.25,
+              0.0,
+              "observe:1"
+            ],
+            "97abfc490c5ae704b45274737d8fede00d9a3ce1234f4ad38e097574d3375a37": [
+              0.8,
+              0.0,
+              "dialogue:1"
+            ],
+            "3b0b3b751d2a9f690c6608dd5669c9594ee981ae9896eee335fa1fb01c31c19a": [
+              0.25,
+              0.0,
+              "observe:1"
+            ]
+          },
+          "replay_cleaner": {
+            "count": 7,
+            "loss_mean": 0.7093193020042954,
+            "loss_var": 4.251698156117087
+          },
+          "lr": {
+            "value": 0.0003,
+            "best_loss": 5.054569244384766,
+            "ema_loss": 5.467678135047852,
+            "stale_updates": 1
+          },
+          "structure": {
+            "losses_len": 6,
+            "last_change_step": -1000000000
+          },
+          "optimizer": {
+            "param_groups": 1,
+            "state_keys": 16,
+            "exp_avg_numel": 48256
+          }
+        },
+        "right": {
+          "metrics": {
+            "global_step": 4,
+            "total_trained_bytes": 240,
+            "last_loss": 5.549403667449951,
+            "last_event": "train:loss=5.5494;lr=3.00e-04;hold"
+          },
+          "hidden_dims": [
+            64
+          ],
+          "debt_items": {
+            "b6e3ba6a7380e53856c3ab66bbe51ef5808ee7fed6aebd943936890764f208a1": [
+              0.118652,
+              1.433516,
+              "debt:dialogue:1"
+            ],
+            "a21e88380bd47f9e379ccb771a8126db56224bbbda5a0c9c50d649bff8d32db2": [
+              0.036255,
+              0.55072,
+              "debt:observe:1"
+            ],
+            "97abfc490c5ae704b45274737d8fede00d9a3ce1234f4ad38e097574d3375a37": [
+              0.316406,
+              1.055978,
+              "debt:dialogue:1"
+            ],
+            "3b0b3b751d2a9f690c6608dd5669c9594ee981ae9896eee335fa1fb01c31c19a": [
+              0.09668,
+              0.0,
+              "debt:observe:1"
+            ]
+          },
+          "debt_counters": {
+            "total_created": 6,
+            "total_repaid": 6,
+            "repayment_batches": 3,
+            "repayment_capacity": 0.544271,
+            "total_clean_added": 1.101562
+          },
+          "replay_items": {
+            "83fa4e4dd7666d3e694fb7ca194db6322997800bf7a223e166c90833560e8308": [
+              0.5,
+              5.53633,
+              "feed:1"
+            ],
+            "0448cb8ba2089fe210b3f51169939c3646885ad9327027082719f9cf42c28457": [
+              0.5,
+              5.562477,
+              "feed:1"
+            ]
+          },
+          "replay_cleaner": {
+            "count": 8,
+            "loss_mean": 0.8137708070709672,
+            "loss_var": 4.705986201260472
+          },
+          "lr": {
+            "value": 0.0003,
+            "best_loss": 5.426262855529785,
+            "ema_loss": 5.460483223378658,
+            "stale_updates": 1
+          },
+          "structure": {
+            "losses_len": 4,
+            "last_change_step": -1000000000
+          },
+          "optimizer": {
+            "param_groups": 1,
+            "state_keys": 16,
+            "exp_avg_numel": 48256
+          }
+        }
+      }
+    },
+    "checkpoint_vs_post_issues": [
+      "checkpoint→post-consolidation-live.pending: A='<not persisted>' B=['right']",
+      "checkpoint→post-consolidation-live.hemispheres.right.optimizer.exp_avg_numel: missing in A (B=48256)",
+      "checkpoint→post-consolidation-live.hemispheres.right.optimizer.param_groups: missing in A (B=1)",
+      "checkpoint→post-consolidation-live.hemispheres.left.optimizer.exp_avg_numel: missing in A (B=48256)",
+      "checkpoint→post-consolidation-live.hemispheres.left.optimizer.param_groups: missing in A (B=1)"
+    ],
+    "pending_persisted": false
+  },
+  "migration": {
+    "original_controller_baseline": {
+      "baseline_clean_pressure": 1.46875,
+      "baseline_active_work": 7.0,
+      "baseline_passive_work": 7.0
+    },
+    "restored_controller_baseline": {
+      "baseline_clean_pressure": 0.0,
+      "baseline_active_work": 7,
+      "baseline_passive_work": 8
+    },
+    "restored_debt_counters": {
+      "left": {
+        "total_created": 7,
+        "total_repaid": 0,
+        "repayment_batches": 0,
+        "repayment_capacity": 0.0,
+        "total_clean_added": 0.0
+      },
+      "right": {
+        "total_created": 8,
+        "total_repaid": 0,
+        "repayment_batches": 0,
+        "repayment_capacity": 0.0,
+        "total_clean_added": 0.0
+      }
+    },
+    "restored_replay_cleaner": {
+      "left": {
+        "count": 0,
+        "loss_mean": 0.0,
+        "loss_var": 1.0
+      },
+      "right": {
+        "count": 0,
+        "loss_mean": 0.0,
+        "loss_var": 1.0
+      }
+    },
+    "post_start_snapshot": {
+      "active": "left",
+      "switch_count": 2,
+      "interaction_count": 4,
+      "observed_frames": 1,
+      "history_len": 2,
+      "switch_controller": {
+        "baseline_clean_pressure": 0.0,
+        "baseline_active_work": 7,
+        "baseline_passive_work": 8
+      },
+      "pending": [],
+      "hemispheres": {
+        "left": {
+          "metrics": {
+            "global_step": 7,
+            "total_trained_bytes": 240,
+            "last_loss": 5.608602046966553,
+            "last_event": "reciprocal sync mix=0.02"
+          },
+          "hidden_dims": [
+            64
+          ],
+          "debt_items": {
+            "8dac096701c7546ff5fd26a3d449772e8a255fda815c7839784578d78656eb0c": [
+              0.158203,
+              0.541606,
+              "debt:dialogue:1"
+            ],
+            "2c82b8b395ef21d36292135d021dbc15755284568585aedb34a7c7793a913a39": [
+              0.04834,
+              0.545545,
+              "debt:observe:1"
+            ],
+            "12fa297d78cc8b693af48fee1125f1a1227aadb4564e5a3dfb1fc1a93562a430": [
+              0.098877,
+              5.50401,
+              "debt:feed:1"
+            ],
+            "68be868c6c0e7a2282c84823bee84285707793e4f73cc0b9382b0a9687cde37a": [
+              0.230713,
+              5.551943,
+              "debt:feed:1"
+            ],
+            "22e6574ab64264a9496d04891d9d09d3633a427d8d89c096252aff7d0bedca77": [
+              0.230713,
+              5.531637,
+              "debt:feed:1"
+            ]
+          },
+          "debt_counters": {
+            "total_created": 7,
+            "total_repaid": 0,
+            "repayment_batches": 0,
+            "repayment_capacity": 0.0,
+            "total_clean_added": 0.0
+          },
+          "replay_items": {
+            "836fb2673b88c6e49718df300890ffda9879c3a3f819c0a881e5fa2fb6d870df": [
+              0.8,
+              0.52069,
+              "dialogue:1"
+            ],
+            "dd68965a8dd69eacf60aaf876d68e662b942e501cfb0197a58841780f1c853cd": [
+              0.25,
+              0.0,
+              "observe:1"
+            ],
+            "92a82f7cf7eb42db50587fa108ccf819514fd430da06b60d33f21c4b234249f4": [
+              0.8,
+              0.0,
+              "dialogue:1"
+            ],
+            "61a39e91e702acdfe34468c108d05bc9da3621825901d01af10b27bdb406ac99": [
+              0.25,
+              0.0,
+              "observe:1"
+            ]
+          },
+          "replay_cleaner": {
+            "count": 0,
+            "loss_mean": 0.0,
+            "loss_var": 1.0
+          },
+          "lr": {
+            "value": 0.0003,
+            "best_loss": 5.206902980804443,
+            "ema_loss": 5.6065507877274,
+            "stale_updates": 2
+          },
+          "structure": {
+            "losses_len": 7,
+            "last_change_step": -1000000000
+          },
+          "optimizer": {
+            "param_groups": 1,
+            "state_keys": 16,
+            "exp_avg_numel": 48256
+          }
+        },
+        "right": {
+          "metrics": {
+            "global_step": 8,
+            "total_trained_bytes": 508,
+            "last_loss": 5.181286334991455,
+            "last_event": "consolidate:loss=5.1813;lr=3.00e-04;hold"
+          },
+          "hidden_dims": [
+            64
+          ],
+          "debt_items": {
+            "836fb2673b88c6e49718df300890ffda9879c3a3f819c0a881e5fa2fb6d870df": [
+              0.088989,
+              1.465021,
+              "debt:dialogue:1"
+            ],
+            "dd68965a8dd69eacf60aaf876d68e662b942e501cfb0197a58841780f1c853cd": [
+              0.027191,
+              0.55367,
+              "debt:observe:1"
+            ],
+            "92a82f7cf7eb42db50587fa108ccf819514fd430da06b60d33f21c4b234249f4": [
+              0.448242,
+              1.435096,
+              "debt:dialogue:1"
+            ],
+            "61a39e91e702acdfe34468c108d05bc9da3621825901d01af10b27bdb406ac99": [
+              0.136963,
+              0.546432,
+              "debt:observe:1"
+            ]
+          },
+          "debt_counters": {
+            "total_created": 8,
+            "total_repaid": 0,
+            "repayment_batches": 0,
+            "repayment_capacity": 0.0,
+            "total_clean_added": 0.0
+          },
+          "replay_items": {
+            "8dac096701c7546ff5fd26a3d449772e8a255fda815c7839784578d78656eb0c": [
+              0.8,
+              0.0,
+              "dialogue:1"
+            ],
+            "2c82b8b395ef21d36292135d021dbc15755284568585aedb34a7c7793a913a39": [
+              0.25,
+              0.0,
+              "observe:1"
+            ],
+            "12fa297d78cc8b693af48fee1125f1a1227aadb4564e5a3dfb1fc1a93562a430": [
+              0.5,
+              5.50401,
+              "feed:1"
+            ],
+            "68be868c6c0e7a2282c84823bee84285707793e4f73cc0b9382b0a9687cde37a": [
+              0.5,
+              5.545823,
+              "feed:1"
+            ],
+            "22e6574ab64264a9496d04891d9d09d3633a427d8d89c096252aff7d0bedca77": [
+              0.5,
+              5.522911,
+              "feed:1"
+            ]
+          },
+          "replay_cleaner": {
+            "count": 0,
+            "loss_mean": 0.0,
+            "loss_var": 1.0
+          },
+          "lr": {
+            "value": 0.0003,
+            "best_loss": 5.181286334991455,
+            "ema_loss": 5.494058170770767,
+            "stale_updates": 0
+          },
+          "structure": {
+            "losses_len": 8,
+            "last_change_step": -1000000000
+          },
+          "optimizer": {
+            "param_groups": 1,
+            "state_keys": 16,
+            "exp_avg_numel": 48256
+          }
+        }
+      }
+    }
+  }
+}

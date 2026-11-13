@@ -1,0 +1,292 @@
+{
+  "created_at": "2026-11-13T20:07:46.491709",
+  "all_measurable_criteria_passed": true,
+  "criteria": {
+    "cpu_inference_gpu_training": true,
+    "mixed_cycles_completed": true,
+    "both_hemispheres_trained": true,
+    "automatic_switching": true,
+    "ttt_weight_updates": true,
+    "passive_cpu_isolation": true,
+    "train_loss_finite": true,
+    "debt_bounded": true,
+    "replay_bounded": true,
+    "duplicate_cleaning": true,
+    "automatic_structure_events": true,
+    "restarts_exact": true,
+    "real_dataset_volume": true,
+    "real_dataset_resume": true,
+    "source_files_unchanged": true,
+    "queue_drained": true,
+    "learning_rate_in_bounds": true,
+    "host_memory_bounded": true,
+    "gpu_memory_bounded": true,
+    "no_runtime_errors": true
+  },
+  "mixed_cycles": 200,
+  "elapsed_seconds": 252.86659449999934,
+  "left_steps": 2988,
+  "right_steps": 8074,
+  "switches": 16,
+  "ttt_samples": 40,
+  "ttt_minimum_weight_l1_delta": 15.944541931152344,
+  "lr_values": {
+    "left": [
+      1e-05,
+      1.0500000000000001e-05,
+      1.1025000000000002e-05,
+      1.1816941917500999e-05,
+      1.8757050662699998e-05,
+      1.9694903195834998e-05,
+      2.977309629e-05,
+      3.12617511045e-05,
+      4.962182715e-05,
+      7.8764805e-05,
+      8.270304525e-05,
+      0.0001250235,
+      0.000131274675,
+      0.0002083725,
+      0.0003,
+      0.00031499999999999996,
+      0.00033075,
+      0.0003472875
+    ],
+    "right": [
+      1e-05,
+      1.0500000000000001e-05,
+      1.0718314664399998e-05,
+      1.1025000000000002e-05,
+      1.7863857773999997e-05,
+      2.977309629e-05,
+      8.270304525e-05,
+      0.000131274675,
+      0.00013783840875,
+      0.00017999999999999998,
+      0.00018899999999999999,
+      0.00019845,
+      0.0002083725,
+      0.00021879112500000002,
+      0.0003
+    ]
+  },
+  "hidden_history": {
+    "left": [
+      [
+        256,
+        256
+      ],
+      [
+        272,
+        256
+      ],
+      [
+        288,
+        272
+      ],
+      [
+        304,
+        272
+      ],
+      [
+        304,
+        288
+      ],
+      [
+        320,
+        288
+      ],
+      [
+        336,
+        304
+      ],
+      [
+        336,
+        320
+      ],
+      [
+        336,
+        336
+      ],
+      [
+        352,
+        336
+      ],
+      [
+        368,
+        352
+      ],
+      [
+        384,
+        352
+      ],
+      [
+        384,
+        368
+      ]
+    ],
+    "right": [
+      [
+        256,
+        256
+      ],
+      [
+        272,
+        256
+      ],
+      [
+        272,
+        272
+      ],
+      [
+        288,
+        272
+      ],
+      [
+        288,
+        288
+      ],
+      [
+        304,
+        288
+      ],
+      [
+        320,
+        288
+      ],
+      [
+        336,
+        288
+      ],
+      [
+        336,
+        304
+      ],
+      [
+        336,
+        320
+      ],
+      [
+        336,
+        336
+      ],
+      [
+        352,
+        336
+      ],
+      [
+        352,
+        352
+      ],
+      [
+        368,
+        352
+      ],
+      [
+        368,
+        368
+      ],
+      [
+        384,
+        368
+      ]
+    ]
+  },
+  "automatic_structure": {
+    "growth_event": {
+      "layer": 0,
+      "new_dim": 272
+    },
+    "growth_dim": [
+      272,
+      256
+    ],
+    "prune_event": {
+      "layer": 0,
+      "new_dim": 248
+    },
+    "prune_dim": [
+      248,
+      256
+    ],
+    "passed": true
+  },
+  "cleaning": {
+    "unique_before": 429,
+    "unique_after": 430,
+    "increase": 1,
+    "minimum_feed_weight": 0.0283203125
+  },
+  "real_dataset": {
+    "requested_bytes": 20000000,
+    "payload_bytes": 20000000,
+    "frames": 26,
+    "resume_verified": true,
+    "source_unchanged": true,
+    "resume_offset": 16724230
+  },
+  "restarts": [
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 131,
+        "right": 136
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 275,
+        "right": 275
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 410,
+        "right": 419
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 547,
+        "right": 561
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 2988,
+        "right": 8074
+      }
+    }
+  ],
+  "memory": {
+    "rss_baseline_mb": 422.4609375,
+    "rss_final_mb": 1226.66796875,
+    "gpu_baseline_bytes": 2920448,
+    "gpu_final_bytes": 44828672
+  },
+  "state_dir": "O:\\Documents\\智能自学习AI（新）\\validation_runs\\continuous-20261113-6\\state",
+  "scope": "Mechanism validation only; no claim of semantic understanding or consciousness."
+}

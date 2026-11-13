@@ -1,0 +1,58 @@
+{
+  "left": {
+    "global_step": 5558,
+    "debt_items": 512,
+    "backlog": 28.4417,
+    "total_clean_added": 1957.3126,
+    "backlog_share_of_cumulative": 0.0145,
+    "repayment_batches": 215,
+    "repayment_capacity": 1.1703,
+    "oracle_batch_mass": 0.4444,
+    "capacity_over_oracle_ratio": 2.633,
+    "total_created": 20172,
+    "total_repaid": 1704,
+    "avg_repaid_per_batch": 7.926
+  },
+  "right": {
+    "global_step": 5618,
+    "debt_items": 512,
+    "backlog": 50.9482,
+    "total_clean_added": 1841.9512,
+    "backlog_share_of_cumulative": 0.0277,
+    "repayment_batches": 178,
+    "repayment_capacity": 1.2326,
+    "oracle_batch_mass": 0.7961,
+    "capacity_over_oracle_ratio": 1.548,
+    "total_created": 19952,
+    "total_repaid": 1404,
+    "avg_repaid_per_batch": 7.888
+  },
+  "run_level": {
+    "switches": 61,
+    "total_debt_created": 40124,
+    "exchange_adds_upper_bound": 244,
+    "exchange_add_share_upper_bound": 0.00608,
+    "mixed_phase_observable_flips": 39,
+    "post_mixed_switches_unobserved": 22,
+    "elapsed_seconds": 275.7164018000003,
+    "seconds_per_switch_avg": 4.52,
+    "mixed_interval_cycles": {
+      "min": 3,
+      "max": 12,
+      "mean": 5.676470588235294,
+      "median": 5.0,
+      "histogram": {
+        "3": 12,
+        "4": 1,
+        "5": 5,
+        "6": 6,
+        "7": 1,
+        "8": 2,
+        "9": 5,
+        "12": 2
+      }
+    },
+    "immediate_reswitch_count": 0,
+    "passive_cpu_violations": 0
+  }
+}

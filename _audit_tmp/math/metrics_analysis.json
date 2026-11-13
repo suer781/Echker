@@ -1,0 +1,521 @@
+{
+  "total_cycles": 200,
+  "switches": 35,
+  "switch_cycles": [
+    1,
+    4,
+    7,
+    15,
+    18,
+    21,
+    27,
+    30,
+    33,
+    38,
+    45,
+    51,
+    54,
+    63,
+    69,
+    73,
+    79,
+    82,
+    94,
+    100,
+    103,
+    112,
+    117,
+    122,
+    127,
+    130,
+    136,
+    139,
+    147,
+    156,
+    168,
+    177,
+    180,
+    189,
+    194
+  ],
+  "directions": [
+    "left->right",
+    "right->left",
+    "left->right",
+    "right->left",
+    "left->right",
+    "right->left",
+    "left->right",
+    "right->left",
+    "left->right",
+    "right->left",
+    "left->right",
+    "right->left",
+    "left->right",
+    "left->right",
+    "right->left",
+    "left->right",
+    "right->left",
+    "left->right",
+    "left->right",
+    "right->left",
+    "left->right",
+    "left->right",
+    "right->left",
+    "left->right",
+    "right->left",
+    "left->right",
+    "right->left",
+    "left->right",
+    "right->left",
+    "left->right",
+    "left->right",
+    "right->left",
+    "left->right",
+    "right->left",
+    "left->right"
+  ],
+  "interval_cycles": {
+    "min": 3,
+    "max": 12,
+    "mean": 5.676470588235294,
+    "median": 5.0,
+    "histogram": {
+      "3": 12,
+      "4": 1,
+      "5": 5,
+      "6": 6,
+      "7": 1,
+      "8": 2,
+      "9": 5,
+      "12": 2
+    }
+  },
+  "immediate_reswitch_count": 0,
+  "immediate_reswitch_pairs": [],
+  "active_cpu_call_delta_per_cycle": {
+    "min": 5,
+    "max": 16,
+    "mean": 9.3
+  },
+  "passive_cpu_call_delta_nonzero": [],
+  "switch_cycles_adjacent_to_feed": [
+    4,
+    18,
+    38,
+    45,
+    73,
+    94,
+    122,
+    130,
+    136
+  ],
+  "between_cycle_flips": [
+    {
+      "cycle": 60,
+      "from": "right",
+      "to": "left"
+    },
+    {
+      "cycle": 88,
+      "from": "right",
+      "to": "left"
+    },
+    {
+      "cycle": 109,
+      "from": "right",
+      "to": "left"
+    },
+    {
+      "cycle": 165,
+      "from": "right",
+      "to": "left"
+    }
+  ],
+  "within_cycle_switches": 35,
+  "between_cycle_flip_count": 4,
+  "restarts": [
+    {
+      "stage": "restart",
+      "at_cycle": 50,
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 143,
+        "right": 152
+      }
+    },
+    {
+      "stage": "restart",
+      "at_cycle": 100,
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 282,
+        "right": 291
+      }
+    },
+    {
+      "stage": "restart",
+      "at_cycle": 150,
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 420,
+        "right": 437
+      }
+    },
+    {
+      "stage": "restart",
+      "at_cycle": 200,
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 553,
+        "right": 573
+      }
+    }
+  ],
+  "report_elapsed_seconds": 275.7164018000003,
+  "report_switches": 61,
+  "report_left_steps": 5558,
+  "report_right_steps": 5618,
+  "segments_between_switches": [
+    {
+      "cycles": [
+        0,
+        0
+      ],
+      "len": 1,
+      "left_calls": 16,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        2,
+        3
+      ],
+      "len": 2,
+      "left_calls": 0,
+      "right_calls": 20
+    },
+    {
+      "cycles": [
+        5,
+        6
+      ],
+      "len": 2,
+      "left_calls": 28,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        8,
+        14
+      ],
+      "len": 7,
+      "left_calls": 0,
+      "right_calls": 77
+    },
+    {
+      "cycles": [
+        16,
+        17
+      ],
+      "len": 2,
+      "left_calls": 18,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        19,
+        20
+      ],
+      "len": 2,
+      "left_calls": 0,
+      "right_calls": 19
+    },
+    {
+      "cycles": [
+        22,
+        26
+      ],
+      "len": 5,
+      "left_calls": 38,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        28,
+        29
+      ],
+      "len": 2,
+      "left_calls": 0,
+      "right_calls": 22
+    },
+    {
+      "cycles": [
+        31,
+        32
+      ],
+      "len": 2,
+      "left_calls": 19,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        34,
+        37
+      ],
+      "len": 4,
+      "left_calls": 0,
+      "right_calls": 43
+    },
+    {
+      "cycles": [
+        39,
+        44
+      ],
+      "len": 6,
+      "left_calls": 47,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        46,
+        50
+      ],
+      "len": 5,
+      "left_calls": -227,
+      "right_calls": -242
+    },
+    {
+      "cycles": [
+        52,
+        53
+      ],
+      "len": 2,
+      "left_calls": 20,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        55,
+        62
+      ],
+      "len": 8,
+      "left_calls": 26,
+      "right_calls": 58
+    },
+    {
+      "cycles": [
+        64,
+        68
+      ],
+      "len": 5,
+      "left_calls": 0,
+      "right_calls": 41
+    },
+    {
+      "cycles": [
+        70,
+        72
+      ],
+      "len": 3,
+      "left_calls": 23,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        74,
+        78
+      ],
+      "len": 5,
+      "left_calls": 0,
+      "right_calls": 42
+    },
+    {
+      "cycles": [
+        80,
+        81
+      ],
+      "len": 2,
+      "left_calls": 28,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        83,
+        93
+      ],
+      "len": 11,
+      "left_calls": 44,
+      "right_calls": 55
+    },
+    {
+      "cycles": [
+        95,
+        99
+      ],
+      "len": 5,
+      "left_calls": 0,
+      "right_calls": 38
+    },
+    {
+      "cycles": [
+        101,
+        102
+      ],
+      "len": 2,
+      "left_calls": 18,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        104,
+        111
+      ],
+      "len": 8,
+      "left_calls": 28,
+      "right_calls": 49
+    },
+    {
+      "cycles": [
+        113,
+        116
+      ],
+      "len": 4,
+      "left_calls": 0,
+      "right_calls": 30
+    },
+    {
+      "cycles": [
+        118,
+        121
+      ],
+      "len": 4,
+      "left_calls": 25,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        123,
+        126
+      ],
+      "len": 4,
+      "left_calls": 0,
+      "right_calls": 30
+    },
+    {
+      "cycles": [
+        128,
+        129
+      ],
+      "len": 2,
+      "left_calls": 15,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        131,
+        135
+      ],
+      "len": 5,
+      "left_calls": 0,
+      "right_calls": 58
+    },
+    {
+      "cycles": [
+        137,
+        138
+      ],
+      "len": 2,
+      "left_calls": 20,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        140,
+        146
+      ],
+      "len": 7,
+      "left_calls": 0,
+      "right_calls": 62
+    },
+    {
+      "cycles": [
+        148,
+        155
+      ],
+      "len": 8,
+      "left_calls": -115,
+      "right_calls": -282
+    },
+    {
+      "cycles": [
+        157,
+        167
+      ],
+      "len": 11,
+      "left_calls": 26,
+      "right_calls": 76
+    },
+    {
+      "cycles": [
+        169,
+        176
+      ],
+      "len": 8,
+      "left_calls": 0,
+      "right_calls": 59
+    },
+    {
+      "cycles": [
+        178,
+        179
+      ],
+      "len": 2,
+      "left_calls": 15,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        181,
+        188
+      ],
+      "len": 8,
+      "left_calls": 0,
+      "right_calls": 90
+    },
+    {
+      "cycles": [
+        190,
+        193
+      ],
+      "len": 4,
+      "left_calls": 31,
+      "right_calls": 0
+    },
+    {
+      "cycles": [
+        195,
+        199
+      ],
+      "len": 5,
+      "left_calls": 0,
+      "right_calls": 38
+    }
+  ]
+}

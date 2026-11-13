@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "root": "O:\\数据集",
+  "files": {
+    "01_LogiQA/AGIEval-LogiQA-zh/test.parquet": {
+      "size": 387042,
+      "mtime_ns": 1790967795398502700,
+      "next_offset": 387042,
+      "complete": true
+    },
+    "01_LogiQA/LogiQA-1.0/LogiQA-dataset-master/Eval.txt": {
+      "size": 550021,
+      "mtime_ns": 1790967815831177500,
+      "next_offset": 550021,
+      "complete": true
+    },
+    "01_LogiQA/LogiQA-1.0/LogiQA-dataset-master/README.md": {
+      "size": 556,
+      "mtime_ns": 1790967815832130100,
+      "next_offset": 556,
+      "complete": true
+    },
+    "01_LogiQA/LogiQA-1.0/LogiQA-dataset-master/Test.txt": {
+      "size": 559060,
+      "mtime_ns": 1790967815834129900,
+      "next_offset": 559060,
+      "complete": true
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/README.md": {
+      "size": 8012,
+      "mtime_ns": 1790967857911850700,
+      "next_offset": 8012,
+      "complete": true
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/datasource.txt": {
+      "size": 315,
+      "mtime_ns": 1790967857914093400,
+      "next_offset": 315,
+      "complete": true
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/dev.txt": {
+      "size": 1770764,
+      "mtime_ns": 1790967857919135900,
+      "next_offset": 1770764,
+      "complete": true
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/dev_fol.jsonl": {
+      "size": 16840405,
+      "mtime_ns": 1790967857960458100,
+      "next_offset": 16789766,
+      "complete": false
+    }
+  },
+  "frames": 27
+}

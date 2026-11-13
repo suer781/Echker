@@ -1,0 +1,238 @@
+{
+  "created_at": "2026-11-13T20:30:17.562220",
+  "all_measurable_criteria_passed": false,
+  "criteria": {
+    "cpu_inference_gpu_training": true,
+    "mixed_cycles_completed": true,
+    "both_hemispheres_trained": true,
+    "automatic_switching": false,
+    "ttt_weight_updates": true,
+    "passive_cpu_isolation": true,
+    "train_loss_finite": true,
+    "debt_bounded": true,
+    "replay_bounded": true,
+    "duplicate_cleaning": true,
+    "automatic_structure_events": true,
+    "restarts_exact": true,
+    "real_dataset_volume": true,
+    "real_dataset_resume": true,
+    "source_files_unchanged": true,
+    "queue_drained": true,
+    "learning_rate_in_bounds": true,
+    "host_memory_bounded": true,
+    "gpu_memory_bounded": true,
+    "no_runtime_errors": true
+  },
+  "mixed_cycles": 200,
+  "elapsed_seconds": 33.73861080000279,
+  "left_steps": 492,
+  "right_steps": 466,
+  "switches": 0,
+  "ttt_samples": 40,
+  "ttt_minimum_weight_l1_delta": 4.658205986022949,
+  "lr_values": {
+    "left": [
+      1e-05,
+      1.0500000000000001e-05,
+      1.07183146644e-05,
+      1.125423039762e-05,
+      1.7013197879999998e-05,
+      1.7863857774e-05,
+      2.7005075999999998e-05,
+      2.8355329799999998e-05,
+      4.28652e-05,
+      4.500846e-05,
+      6.803999999999999e-05,
+      7.1442e-05,
+      0.00010799999999999998,
+      0.00011339999999999999,
+      0.00017999999999999998,
+      0.0003
+    ],
+    "right": [
+      0.0003,
+      0.00031499999999999996,
+      0.00033075,
+      0.0003472875,
+      0.00036465187500000004,
+      0.0003828844687500001,
+      0.0004020286921875001,
+      0.00042213012679687514,
+      0.0004432366331367189,
+      0.0004653984647935549,
+      0.0004886683880332327,
+      0.0005131018074348943,
+      0.0005387568978066391,
+      0.000565694742696971,
+      0.0005939794798318196,
+      0.0006236784538234106,
+      0.0006400210838299845,
+      0.0006548623765145812,
+      0.0006720221380214838,
+      0.0006876054953403103,
+      0.000705623244922558,
+      0.0007219857701073259,
+      0.0007409044071686859,
+      0.0007580850586126922,
+      0.0007779496275271202,
+      0.0007959893115433268,
+      0.0008168471089034763,
+      0.0008357887771204932,
+      0.0008576894643486502,
+      0.000877578215976518,
+      0.0009005739375660827,
+      0.0009214571267753439,
+      0.0009675299831141111,
+      0.0010159064822698168,
+      0.0010667018063833075
+    ]
+  },
+  "hidden_history": {
+    "left": [
+      [
+        256,
+        256
+      ],
+      [
+        272,
+        256
+      ],
+      [
+        272,
+        272
+      ],
+      [
+        288,
+        272
+      ],
+      [
+        304,
+        272
+      ],
+      [
+        304,
+        288
+      ]
+    ],
+    "right": [
+      [
+        256,
+        256
+      ],
+      [
+        256,
+        272
+      ],
+      [
+        272,
+        272
+      ],
+      [
+        272,
+        288
+      ],
+      [
+        288,
+        288
+      ]
+    ]
+  },
+  "automatic_structure": {
+    "growth_event": {
+      "layer": 0,
+      "new_dim": 272
+    },
+    "growth_dim": [
+      272,
+      256
+    ],
+    "prune_event": {
+      "layer": 0,
+      "new_dim": 248
+    },
+    "prune_dim": [
+      248,
+      256
+    ],
+    "passed": true
+  },
+  "cleaning": {
+    "unique_before": 429,
+    "unique_after": 430,
+    "increase": 1,
+    "minimum_feed_weight": 0.01742643359660126
+  },
+  "real_dataset": {
+    "requested_bytes": 0,
+    "payload_bytes": 0,
+    "frames": 0,
+    "resume_verified": true,
+    "source_unchanged": true,
+    "resume_offset": 0
+  },
+  "restarts": [
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 136,
+        "right": 116
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 253,
+        "right": 230
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 371,
+        "right": 344
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 487,
+        "right": 460
+      }
+    },
+    {
+      "loaded": true,
+      "active_match": true,
+      "switches_match": true,
+      "steps_match": true,
+      "weights_match": true,
+      "steps": {
+        "left": 492,
+        "right": 466
+      }
+    }
+  ],
+  "memory": {
+    "rss_baseline_mb": 422.22265625,
+    "rss_final_mb": 1158.890625,
+    "gpu_baseline_bytes": 2920448,
+    "gpu_final_bytes": 38502400
+  },
+  "state_dir": "O:\\Documents\\智能自学习AI（新）\\validation_runs\\continuous-adaptive-1\\state",
+  "scope": "Mechanism validation only; no claim of semantic understanding or consciousness."
+}

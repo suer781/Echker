@@ -1,0 +1,67 @@
+{
+  "all_checks_passed": true,
+  "checks": {
+    "independent_cpu_gpu_models_optimizers_memory_controllers": true,
+    "initial_weights_distinct": true,
+    "left_cpu_only": true,
+    "left_ttt": true,
+    "right_offline_consolidation": true,
+    "right_cpu_only": true,
+    "right_ttt": true,
+    "left_offline_consolidation": true,
+    "full_switch_cycle": true,
+    "reciprocal_debt": true,
+    "checkpoint_has_both": true,
+    "checkpoint_weights_distinct": true,
+    "restored_active": true,
+    "restored_both_learned": true,
+    "byte_vocabulary_256_plus_6": true,
+    "cuda_training_cpu_inference": true
+  },
+  "runtime": {
+    "first": {
+      "active": "left",
+      "cpu_calls": {
+        "left": 8,
+        "right": 0
+      },
+      "left_steps": 2,
+      "right_offline_steps": 1,
+      "left_event": "ttt:loss=5.0112;lr=3.00e-04;hold",
+      "right_event": "consolidate:loss=5.6735;lr=3.00e-04;hold",
+      "right_debt": 2
+    },
+    "second": {
+      "active": "right",
+      "cpu_calls": {
+        "left": 8,
+        "right": 8
+      },
+      "left_offline_steps": 4,
+      "right_steps": 4,
+      "left_event": "consolidate:loss=5.4261;lr=3.00e-04;hold",
+      "right_event": "ttt:loss=5.1035;lr=3.00e-04;hold"
+    },
+    "cycle": {
+      "active": "left",
+      "switches": 2,
+      "left_debt": 2,
+      "right_debt": 2,
+      "sync_mix": 0.02
+    }
+  },
+  "checkpoint": {
+    "format_version": 2,
+    "hemispheres": [
+      "left",
+      "right"
+    ],
+    "left_steps": 5,
+    "right_steps": 5
+  },
+  "boundaries": [
+    "Only online generation is single-sided; the passive side intentionally performs offline consolidation.",
+    "The sides are independent but not isolated: switch sync interpolates 2% total and debt replays samples.",
+    "This is a short mechanism test, not evidence of long-term stability, generalization, or consciousness."
+  ]
+}

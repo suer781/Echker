@@ -1,0 +1,318 @@
+{
+  "reviewer": "readiness",
+  "generated_at": "2026-11-13T21:19:11+08:00",
+  "scope": "只读审查 O:\\Documents\\智能自学习AI（新）：A 大数据训练准备度（ingest_dataset.py / life_agent/byte_codec.py / continuous_validation.py 真实数据段 / dataset_inventory.json / validation_runs/continuous-adaptive-full-7/dataset_progress.json）；B 自适应边界（config.json 与 worker.py 控制器默认值）；C 测试覆盖（tests/ 7 个文件，实测收集与通过数）。未修改 life_agent/、tests/、validation_runs/、state_dataset_smoke/，未启动全量训练，未写 O:\\数据集。",
+  "findings": [
+    {
+      "id": "READY-01",
+      "title": "20 MB 真实样本仅覆盖 LogiQA 单目录 8 个文件，格式分布不代表全量",
+      "severity": "高",
+      "kind": "验证盲区",
+      "evidence_strength": "已实测证实",
+      "location": ["validation_runs/continuous-adaptive-full-7/dataset_progress.json:5-53", "dataset_inventory.json:14-87", "continuous_validation.py:414-428"],
+      "evidence": "progress 文件记录 8 个被触碰文件，全部位于 01_LogiQA 目录；扩展名分布：.parquet 1 个/387,042 B，.txt 4 个/2,880,160 B，.md 2 个/8,568 B，.jsonl 1 个/16,840,405 B。源文件大小合计 20,116,175 B，仅占清单 10,913,873,703 B 的 0.184%，文件数占 8/760=1.05%；实际读取 payload 20,000,000 B、26 帧（report.json real_dataset）。全量清单含 .parquet 227 个/1.663 GiB、.json 238 个/1.336 GiB、.csv 136 个/0.746 GiB、.arrow 3 个/0.618 GiB、.zip 3 个/0.023 GiB、.png 7 个、.jpeg 2 个、.pdf 1 个、.ipynb 5 个，这些格式在已跑真实数据中一个都没有被喂入。",
+      "impact": "Parquet/Arrow/CSV/JSON/压缩包/图片/PDF 的分块行为、帧大小边界、CRC 与吞吐/内存表现均未在真实数据上验证；用 LogiQA 小文本段外推 10.164 GiB 全量不具备格式代表性。",
+      "recommendation": "全量前按格式分别跑有界小段（每种格式 --max-bytes 5 MB 量级），记录帧/块/步/字节/耗时/错误与 RSS、显存；冻结一份采样清单（含每文件大小、扩展名、sha256），再决定全量顺序。",
+      "regression_test": "test_inventory_format_coverage：在临时目录构造覆盖每种扩展名的文件，有界流式喂入，断言 visit 到的扩展名集合与预期一致，且任意帧不抛出未捕获异常。"
+    },
+    {
+      "id": "READY-02",
+      "title": "1% 保留集按相对路径哈希划分，不是内容去重，也不跨格式识别重复",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["ingest_dataset.py:92-95", "ingest_dataset.py:119-126", "dataset_inventory.json:88"],
+      "evidence": "_holdout 对 relative 路径字符串做 sha256 取前 8 字节归一化比较；不读文件内容，不计算文件级校验和，不比对不同格式中的同源数据。清单 note 自述“no claim about semantic quality or duplicate content across formats”，README:142 也承认跨来源近重复不会自动去重。",
+      "impact": "同一语料以 jsonl/parquet/arrow 多份存在时会被重复学习；保留集可能与训练集内容重复，无法作为泛化留出评估。",
+      "recommendation": "全量前生成文件级内容 sha256 清单，按内容哈希（而非路径）去重并标注跨格式同源；保留集划分记录到冻结清单中。",
+      "regression_test": "test_holdout_hash_is_path_based_and_content_checksum_recorded：断言同内容不同路径会进入不同侧，并在清单中记录文件哈希。"
+    },
+    {
+      "id": "READY-03",
+      "title": "验证路径先写进度偏移、后存检查点，崩溃窗口可丢帧；ingest 路径顺序相反，两条路径 durability 语义不一致",
+      "severity": "高",
+      "kind": "真实缺陷",
+      "evidence_strength": "代码推断",
+      "location": ["continuous_validation.py:418-428", "ingest_dataset.py:250-264", "ingest_dataset.py:268-270"],
+      "evidence": "continuous_validation 真实数据循环：agent.feed_frame(frame) 后立即 progress.mark(record, next_offset)，agent.save() 每 4 帧才一次（426-428）。若在 mark 之后、save 之前崩溃，重启后进度偏移已前进，但该帧权重从未写入检查点，恢复时跳过该帧——学习丢失。ingest_dataset 主循环则相反：先 agent.save() 再 commit_progress()（260-264），注释明确“checkpoint committed before its dataset offsets”，崩溃只会重复最近未提交的帧，不会跳过。",
+      "impact": "长跑中按验证路径语义运行时，最近 ≤4 帧的学习可能被静默丢弃；两条路径恢复语义不统一，故障排查与幂等保证困难。",
+      "recommendation": "统一为“检查点持久化成功后再提交偏移”；progress 记录最后一次成功检查点标识；恢复时校验偏移不得超过检查点覆盖范围；失败帧进入重试队列而非直接标记完成。",
+      "regression_test": "test_progress_not_ahead_of_checkpoint：喂入 N 帧后在保存前模拟崩溃，从进度文件恢复，断言没有任何偏移领先于已持久化状态，且未保存帧被重放而非跳过。"
+    },
+    {
+      "id": "READY-04",
+      "title": "断点续训只比对 size 与 mtime_ns，无文件内容校验和；源文件变动即整文件回零重读",
+      "severity": "中",
+      "kind": "真实缺陷",
+      "evidence_strength": "代码推断",
+      "location": ["ingest_dataset.py:43-49", "ingest_dataset.py:158-160"],
+      "evidence": "ProgressStore.offset 在 size 或 mtime_ns 不一致时返回 0（整文件重读）；progress 中只存 size/mtime_ns/next_offset/complete，没有文件级哈希。帧内虽有 chunk_sha256（ingest_dataset.py:181），但不落进度文件、不用于恢复校验。",
+      "impact": "源文件被替换/截断/局部改动而 mtime 巧合变化时，要么整文件重读浪费算力，要么（若只改内容不动大小）无法发现损坏；损坏字节在读取前无任何检测。",
+      "recommendation": "记录文件级 sha256（或首尾块哈希），恢复时核对；校验失败列入错误清单并跳过/重试，而不是静默从 0 重读。",
+      "regression_test": "test_resume_detects_modified_file_by_hash：构造同长度不同内容文件，断言恢复时检测到哈希不一致并报错/回退，而不是沿用旧偏移。"
+    },
+    {
+      "id": "READY-05",
+      "title": "吞吐无法从持久化产物中拆分出纯真实数据段，全量时长外推不确定性大",
+      "severity": "高",
+      "kind": "验证盲区",
+      "evidence_strength": "尚未验证",
+      "location": ["validation_runs/continuous-adaptive-full-7/report.json:27-33", "validation_runs/continuous-adaptive-full-7/metrics.jsonl", "state_dataset_smoke/last_run.json"],
+      "evidence": "report 记录总耗时 275.716 s，混合了 200 次合成交互、5 次检查点重载/恢复、清洗阶段与 20 MB 真实数据；metrics.jsonl 只有 cycle/restart/cleaning 三类记录，没有分阶段或逐帧耗时字段。实测混合速率 20,000,000 B / 275.716 s = 72,538 B/s（约 70.8 KiB/s），按此外推 10,913,873,703 B 约 150,457 s = 41.8 h；README:146 称 2 MB 段实测 79.3 KB/s、外推约 38.2 h，但当前 state_dataset_smoke/last_run.json 只记录 1024 B / 1.580 s / 648 B/s，该 79.3 KB/s 段的产物在本环境中找不到，无法独立复核。合成与真实阶段的步数拆分也未持久化（总计 left 5558 + right 5618 = 11,176 步）。",
+      "impact": "全量运行窗口、检查点节奏、磁盘与人力安排缺少可靠依据；结构生长、离线巩固、双半球同步、保存开销在数十小时尺度下的累积效应未观测。",
+      "recommendation": "在 ingest 循环中逐帧记录 bytes/chunks/steps/elapsed 与阶段标记到 JSONL；先跑一个 100–200 MB 跨格式真实数据段，测纯数据吞吐、步数/字节比、RSS/显存曲线，再外推全量；不要沿用混合段速率直接排期。",
+      "regression_test": "test_frame_timing_metrics_recorded：断言每次 feed 落一条含 payload_bytes、chunks、steps、elapsed_ms 的记录，且可按阶段汇总出纯真实数据吞吐。"
+    },
+    {
+      "id": "READY-06",
+      "title": "长程资源趋势未验证：RSS 422→1226 MB、检查点 18.1 MB×2、无轮转、无日志轮转、无磁盘配额检查",
+      "severity": "高",
+      "kind": "验证盲区",
+      "evidence_strength": "代码推断",
+      "location": ["validation_runs/continuous-adaptive-full-7/report.json:329-333", "life_agent/store.py:27-48", "life_agent/agent.py:348-357", "config.json:40"],
+      "evidence": "report 内存：RSS 基线 422.29 MB、结束 1225.69 MB（+803.4 MB）；GPU 2.92 MB→44.83 MB。检查点：冷启动轮次 latest.pt 约 8.8–10.8 MB，回放/债务填满后的 full-5/6/7 约 17.5–18.1 MB，且 latest.pt 与 latest.backup.pt 各一份；store.py 只保留这两份，无历史轮转。checkpoint_interval_s=300，monitor 线程到时保存；ingest 另每 10 帧保存一次。metrics.jsonl 在验证 harness 中 205 行/47,525 B（约 232 B/行），追加写无轮转；ingest_dataset 本身只向 stdout 打 JSON，无日志文件与轮转。代码中未检索到 quota/rotation/retry/磁盘余量检查逻辑。",
+      "impact": "数十小时运行中：RSS 是否在 replay/debt 容量饱和后趋平未验证；检查点随 hidden_dim 从 256 长到 416/400 已增大，到 512 上限的体积未知；旧检查点无法回滚到更早状态；日志无限增长；磁盘写满或内存触顶时无前置告警与降级。",
+      "recommendation": "全量前落实：检查点轮转策略（保留 N 份并自动清理）、日志按大小/行数轮转、运行前记录 RSS/显存/磁盘基线与上限告警；监控 replay/debt 饱和度与 hidden_dim 上限；先做长程（数小时）稳定性观察。",
+      "regression_test": "test_checkpoint_rotation_and_log_rollover：模拟多次保存，断言只保留配置份数的检查点、旧份被清理；日志超过阈值后滚动；磁盘余量低于阈值时进入告警/降级而非直接写满。"
+    },
+    {
+      "id": "READY-07",
+      "title": "max_frame_bytes=1 MiB 为拒绝式上限；大二进制在 960 KiB 处硬切，feed_file 路径会整文件读入内存",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "已实测证实",
+      "location": ["life_agent/agent.py:119-125", "life_agent/byte_codec.py:132-137", "ingest_dataset.py:169-183", "life_agent/byte_codec.py:114-118"],
+      "evidence": "边界实验实测：BLF1 头 20 B，典型 ingest 元数据 262 B；payload 恰好 1,048,576 B 时编码后 1,048,858 B，超过 1,048,576 上限，agent._validate_frame 会抛 ValueError；带典型元数据时能放下的最大 payload 为 1,048,294 B。流式 ingest 路径按 chunk_bytes=960,000 切片，帧不会超限；但 996.31 MiB 等大文件被无格式感知地按 960 KiB 硬切，Parquet row group、Arrow record batch、ZIP/压缩块、PNG/PDF 结构跨帧断裂。ByteFrame.from_file（feed_file 路径）path.read_bytes() 整文件读入，对近 1 GiB 文件有 OOM 风险。",
+      "impact": "大二进制格式边界字节语义丢失；超限帧在喂入路径会直接抛错中断整流；feed_file 处理大文件不可用。",
+      "recommendation": "明确大二进制策略：记录分块大小与格式边界探测结果；超限/损坏帧计数并跳过（带告警）而不是中断全量流；feed_file 增加大小预检与流式分片。",
+      "regression_test": "test_oversize_frame_recorded_and_skipped_not_fatal：构造超过限长的帧，断言流式循环记录跳过原因、继续处理后续帧，整体不失败。"
+    },
+    {
+      "id": "READY-08",
+      "title": "observation_chunks 按 509 token 切分，跨块前驱上下文缺失，块头每块重置 BOS/USER",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "已实测证实",
+      "location": ["life_agent/byte_codec.py:252-260", "tests/test_byte_frame.py:66-75"],
+      "evidence": "chunk 宽度 = max_seq_len - 3 = 509；每块 ids=[BOS, USER, *payload[start:start+509], EOS]，labels 与 ids 相同。实验对 1244 B 编码帧得到 3 块，字节可完整重建，但每块都以 BOS/USER 重新开头；上一块末尾字节不会出现在下一块上下文中。现有测试 test_streaming_chunks_cover_every_frame_byte 只校验字节全覆盖，不校验跨块建模。",
+      "impact": "跨 509 字节边界的字节依赖（含 BLF1 头跨块、UTF-8 多字节字符跨块）在同一条序列里学不到；长文件边界段的预测质量无保证。",
+      "recommendation": "在报告中声明该不可学习范围；评估重叠块或跨块状态携带；至少把跨块边界列为已知设计限制写入运行手册。",
+      "regression_test": "test_chunk_boundary_context_isolated：断言相邻块之间不存在共享前驱 token，并统计跨块边界字节数供观测。"
+    },
+    {
+      "id": "READY-09",
+      "title": "全量前工程前置项尚未成套落实：格式探测、清单冻结、校验和、磁盘配额、检查点/日志轮转、失败重试、进度原子写校验、断点幂等",
+      "severity": "中",
+      "kind": "验证盲区",
+      "evidence_strength": "代码推断",
+      "location": ["ingest_dataset.py:197-283", "life_agent/agent.py:359-373", "life_agent/store.py:27-48"],
+      "evidence": "进度文件本身经 .tmp + os.replace 原子写（ingest_dataset.py:61-65, 190-194），这一点已具备；但其余前置项在代码中未见对应机制：无文件格式探测/魔数识别、无冻结采样清单产物、无文件内容校验和、无磁盘配额/余量检查、无检查点历史轮转、无日志轮转、无失败帧重试/死信队列、无“重复偏移重放是否幂等”的校验。重放同一帧时 replay 按 digest 去重，但 debt.add 会在同 digest 上叠加权重（memory.py:197-199），崩溃重复帧可能造成债务权重膨胀。",
+      "impact": "长跑中遇到单个损坏文件、磁盘波动或进程崩溃时，恢复与重试语义不完整，可能重复训练或静默丢帧。",
+      "recommendation": "按前置清单逐项补齐并形成运行手册；幂等性校验：同一 offset 重放后 replay 数量与债务权重增幅在有界范围内。",
+      "regression_test": "test_resume_replay_is_bounded_idempotent：同一有界目录连续跑两遍，比对 replay/debt 数量与权重，断言重复帧不会导致债务权重无界叠加。"
+    },
+    {
+      "id": "READY-10",
+      "title": "仍为常量的控制量分级：①资源安全上限保持常量 / ②工程节流可半自适应 / ③适合在线学习（护栏内）",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["config.json:2-53", "life_agent/config.py:34-88", "life_agent/worker.py:27-114"],
+      "evidence": "逐条分类（依据见 recommendation）：\n① 资源安全上限（应保持常量）：min_learning_rate 1e-5、max_learning_rate 3e-3（钳位安全网）；grad_clip 1.0（梯度爆炸防线）；weight_decay 0.01（与任务无关的正则先验）；min/max_hidden_dim 128/512（结构硬边界）；max_seq_len 512（位置嵌入维度绑定，改动需重训嵌入）；max_frame_bytes 1,048,576（帧内存/编码上限）；max_new_tokens 96（生成长度边界）；debt_min_weight 0.005（防权重退化到 0 的淘汰下限）；context_turns 6（上下文窗口策略）。\n② 工程节流参数（可半自适应，测量值驱动 + 硬上限）：structure_interval 32、structure_warmup 64（事件冷却/预热）；growth_size 16、prune_size 8（结构步长）；checkpoint_interval_s 300（按磁盘余量/帧速率调）；idle_sleep_s 0.1（空转轮询）；batch_size 4、feed_steps 1、consolidation_steps 2、ttt_steps 1、ttt_chunk_tokens 8（吞吐-稳定性折中，受显存上限约束）；replay_capacity 1024、debt_capacity 512（内存预算，按 RSS 调，设硬顶）；sync_mix 0.02（双半球插值，保守起步）；replay_probability 0.35（回放混合比例）；temperature 0.8 / top_k 40 / top_p 0.95（推理采样策略）。\n③ 真正适合在线学习（在①②护栏内）：learning_rate 初值 3e-4（已有 LR 控制器界内自适应）；lr_up_factor 1.05、lr_down_factor 0.6（控制器增益，长程可按损失统计调）；loss_spike_ratio 1.35（可由损失方差/EMA 动态估计）；debt_retention 0.35、debt_decay 0.75（债务准入/遗忘，按债务压力与偿还容量调，约束在 (0,1]）；结构生长/剪枝的相对改善阈值 0.002 / 0.01（由损失曲线统计自适应，事件频率仍受②冷却约束）。",
+      "impact": "若把①类安全上限也交给在线控制，可能在分布突变时失控；把③类长期钉死常量又浪费自适应空间。分级不清会导致过早在线化。",
+      "recommendation": "按上述分级落地：①只允许人工评审改动；②先接入测量值与硬上限、保留回退；③在阶段2稳定性证据充分后再开放在线调节。",
+      "regression_test": "test_config_classification_guardrails：断言①类参数不存在在线更新路径，②③类参数的任何自适应输出都被夹在配置硬边界内。"
+    },
+    {
+      "id": "READY-11",
+      "title": "结构生长/剪枝由损失阈值 + 固定周期双门控；同模型“生长后立刻剪枝”的震荡未在真实长跑中验证",
+      "severity": "中",
+      "kind": "验证盲区",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/worker.py:83-107", "life_agent/model.py:61-110", "continuous_validation.py:217-259", "validation_runs/continuous-adaptive-full-7/report.json:72-256"],
+      "evidence": "consider() 门控顺序：step < warmup(64) 或距上次变更 < interval(32) 直接返回；step 不是 interval(32) 整数倍、损失不足 24 条或非有限值也返回。阈值：相对改善 <0.002 且未到 max_hidden_dim 时生长 +16；相对改善 >0.01 且最低重要度 < 中位数 2% 时剪枝 -8。报告 hidden_history 左右两侧均为 256 单调升至 416/400；剪枝事件只在 validate_automatic_structure 的独立新模型上触发（continuous_validation.py:235-246），没有在同一模型上经历生长→冷却→剪枝→再生长的序列。optimizer 在每次结构变化后重建（worker.py:221-225），EMA 激活统计在剪枝后按保留神经元重算。",
+      "impact": "长程下生长-剪枝来回震荡、optimizer 重建频率、新神经元 EMA 冷启动对损失的影响均未观测；若生长后损失短暂改善触发剪枝，可能反复折损刚分裂的高重要度神经元。",
+      "recommendation": "阶段1 记录每次事件的损失窗口、重要度分布、变更前后维度与输出差异；阶段2 步长按当前 dim 比例并设最小冷却；阶段3 在线控制前先证明震荡率有界、功能保持在噪声界内。",
+      "regression_test": "test_grow_then_prune_oscillation_bounded：同一模型先逼出生长、再逼出改善后剪枝，断言维度始终在 [min,max]、前向输出有限、冷却期内不发生第二次事件，且无连续反复横跳。"
+    },
+    {
+      "id": "READY-12",
+      "title": "LR 上限 3e-3 从未被真实数据触碰；spike 降速分支原因未持久化，边界行为未验证",
+      "severity": "高",
+      "kind": "验证盲区",
+      "evidence_strength": "已实测证实",
+      "location": ["validation_runs/continuous-adaptive-full-7/report.json:34-71", "life_agent/worker.py:35-56", "config.json:24-29"],
+      "evidence": "report lr_values：左侧 1e-5 → 3.15e-4，右侧 1e-5 → 3.473e-4；上限 3e-3 从未接近（峰值约为上限的 11.6%），下限 1e-5 仅在初值到达。metrics.jsonl 不记录 lr 更新原因（plateau/spike/hold）、ema_loss、stale_updates，无法从产物判断 loss_spike_ratio=1.35 分支是否真实触发。",
+      "impact": "上限钳位、spike 大幅降速、非有限损失降速这几条保护路径只在单元测试里走过小模型，未在真实数据流上验证；全量分布切换时 LR 振荡行为未知。",
+      "recommendation": "把 lr reason/ema_loss/stale_updates/grad_norm 写入 metrics；补上限/下限钳位与 spike 降速的单元测试；真实数据段观测 LR 轨迹是否贴近或越过边界。",
+      "regression_test": "test_lr_clamps_at_max_and_min：构造持续平台期逼 LR 到 max、构造 spike 逼到 min，断言被钳位且记录的 reason 正确；test_lr_spike_down_reason_recorded 断言 spike 分支落盘可查。"
+    },
+    {
+      "id": "READY-13",
+      "title": "自适应分阶段路线：阶段1 常量+可观测 → 阶段2 半自适应带硬上限 → 阶段3 在线控制，各阶段附可验证判据",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/worker.py:27-114", "life_agent/switching.py:67-113", "config.json:2-53"],
+      "evidence": "阶段1（保持常量 + 可观测）：所有控制量维持现状；逐帧/逐步记录 loss、lr、reason、ema、结构事件、replay/debt 饱和度、RSS、显存、磁盘、每帧字节/块/步/耗时。判据：至少一个 100–200 MB 跨格式真实段可复现；loss 全有限；债务/回放不越容量；检查点可恢复；无未捕获异常；LR 与维度轨迹有完整记录。\n阶段2（半自适应，测量驱动 + 硬上限 + 可回退）：容量、检查点间隔、批大小、结构步长按测量值调整，全部夹在①类硬边界内，异常时回退常量。判据：调整窗口内 loss 不发散、不越 RSS/显存/磁盘上限；回退后状态可恢复；同种子分段 A/B 对照指标不劣化。\n阶段3（在线控制）：增益、spike 阈值、债务 retention/decay、结构阈值在线学习。前提：阶段2 稳定性证据齐备；具备震荡率/发散检测与自动回退；有多格式长程观测；结构功能保持（atol 噪声界内）有持续验证；在线策略永远不能突破①类上限。",
+      "impact": "避免在证据不足时把不稳定项硬改成在线控制；每阶段退出条件可机器检查，而不是凭感觉推进。",
+      "recommendation": "按阶段设门禁：阶段1 指标未达标不进阶段2；阶段2 对照不达标不进阶段3。",
+      "regression_test": "test_stage_gate_criteria_measurable：把每阶段判据实现为可执行检查（容量边界、loss 有限、可恢复、回退成功、对照不劣化），未满足时阻断进入下一阶段。"
+    },
+    {
+      "id": "READY-14",
+      "title": "指定 pytest 命令在当前环境无法运行（pytest 未安装）；改用标准库 unittest 实测 38 个用例全部通过",
+      "severity": "中",
+      "kind": "验证盲区",
+      "evidence_strength": "已实测证实",
+      "location": ["tests/", ".venv-life/Scripts/python.exe"],
+      "evidence": "按任务给定命令执行：.venv-life python -m pytest tests -q -p no:cacheprovider 报错 ModuleNotFoundError: No module named 'pytest'；.venv 已损坏（基础 Python 路径缺失），系统 Python 3.12 同样无 pytest。.venv-life 内 torch 2.8.0+cu126、CUDA 可用。改用 python -m unittest discover -s tests -p test_*.py -v 实测：Ran 38 tests in 4.218s，OK，0 failed；两个 CUDA 用例因 cuda 可用实际执行（未 skip）。逐文件：test_byte_codec.py 5、test_byte_frame.py 8、test_controllers.py 3、test_dataset_ingest.py 2、test_integration.py 12（WorkerTests 3 + AgentIntegrationTests 9）、test_memory.py 5、test_model.py 3。",
+      "impact": "测试运行依赖未在环境中固化；pytest 专属特性（标记、参数化、插件）无法使用；本报告用例数来自 unittest 重新收集，不引用 README 中的历史数字。",
+      "recommendation": "在隔离环境中补装 pytest 并锁定版本到 requirements；保持 unittest 可运行作为兜底。",
+      "regression_test": "environment check：断言 pytest 可导入且版本记录在依赖清单中。"
+    },
+    {
+      "id": "READY-15",
+      "title": "缺失测试：持续 feed 下 drain 被动巩固的锁持有时间",
+      "severity": "高",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/agent.py:205-228", "life_agent/agent.py:264-267"],
+      "evidence": "feed_frame 在 self.lock 内 submit(train, wait=True)，随后 _drain_passive_consolidation 在同一把锁内 future.result() 等待被动巩固完成。现有 test_feed_frame_is_not_starved_by_passive_queue 只断言被动步数增加、pending 清空，没有测量持锁时长，也没有在 drain 期间并发观察 monitor/其他线程是否被阻塞。既有并发审计记录 drain 最长 0.0206 s、wait_true 最长 0.286 s（_audit_tmp/concurrency/audit_summary.json），但那是一次性观测，不是回归测试。",
+      "impact": "长程下若被动巩固队列变长，持锁等待会阻塞 monitor 与交互线程，放大尾延迟；无测试守护该边界。",
+      "recommendation": "测量 feed/interact 临界区持锁时长与 drain future 等待时长，设阈值告警；测试覆盖 drain 慢任务下其他线程不被无限期阻塞。",
+      "regression_test": "test_drain_lock_hold_time_bounded：注入慢巩固 future，记录持锁时长，断言低于阈值且 monitor 线程仍能按时获得锁。"
+    },
+    {
+      "id": "READY-16",
+      "title": "缺失测试：monitor 线程与 feed/interact 的 _maybe_switch 竞争",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/agent.py:323-346", "life_agent/agent.py:348-357"],
+      "evidence": "_monitor 每 1 s 在 self.lock 内调用 _schedule_passive_consolidation 与 _maybe_switch；feed_frame/interact_frame 也在 self.lock 内调用同一对方法。RLock 序列化调用，但没有测试构造 monitor 恰好在 feed 中途触发的交错场景；既有审计显示 homeostasis 线程 4 次 maybe_switch 全部 early_return，主链路 64 次切换 18 次，未覆盖竞争交错。",
+      "impact": "切换基线、债务台账在两条线程间的读写时序若有漏同步，可能出现重复切换或漏切换；当前无并发回归保护。",
+      "recommendation": "用可控屏障模拟 monitor 与 feed 同时进入临界区，断言切换计数、active 状态、基线一致且无重复切换。",
+      "regression_test": "test_monitor_feed_maybe_switch_race：屏障对齐两线程同时调用，重复 N 轮，断言 switch_count 与 active 在所有交错下一致。"
+    },
+    {
+      "id": "READY-17",
+      "title": "缺失测试：save 期间存在 pending consolidate 时的快照一致性",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/agent.py:359-365", "life_agent/store.py:27-48", "life_agent/worker.py:357-385"],
+      "evidence": "save() 在 self.lock 内提交 snapshot 任务并 wait=True；pending_consolidation 中的后台 future 不会被先等待。snapshot 在 worker 线程读 replay/debt（state.lock 保护），但债务偿还衰减发生在 consolidate 任务里；既有持久化审计已观测到 live→restored 之间债务权重、global_step、last_loss、cleaner 统计存在差异（_audit_tmp/persistence/audit_results.json:383-399），部分原因正是快照时后台巩固仍在进行。",
+      "impact": "检查点可能落在巩固中途：恢复后部分债务/步骤回退；该行为是否可接受没有测试界定，也没有在保存前排空或标记未完成任务。",
+      "recommendation": "明确快照语义：保存前等待 pending consolidate 完成，或在检查点中标记未完成任务并在恢复后续做；测试两种语义下的恢复一致性。",
+      "regression_test": "test_save_with_pending_consolidation：保存前塞入未完成巩固 future，断言恢复后债务/步骤与快照时刻一致，或未完成任务被正确标记续做。"
+    },
+    {
+      "id": "READY-18",
+      "title": "缺失测试：切换时 debt exchange 造成的重复训练与权重叠加",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/agent.py:282-290", "life_agent/memory.py:192-204"],
+      "evidence": "_exchange_switch_debt 把两侧 replay 最新 2 条克隆到对方债务台账；debt.add 遇到同 digest 时权重叠加（min(4.0, 旧权重+新权重)）。快速连续切换会反复交换同样的最新样本，债务权重可能堆积到 4.0 上限。现有双半球测试只断言两侧债务非空，不统计交换次数与权重叠加幅度。",
+      "impact": "反复切换时少量热门样本被反复当作债务训练，挤占其他样本的巩固容量；权重上限行为无测试。",
+      "recommendation": "统计每样本被交换次数与债务权重分布；测试连续多次切换后权重有界、重复样本不无限膨胀。",
+      "regression_test": "test_switch_debt_exchange_weight_bounded：连续切换 N 次，断言任一债务样本权重 ≤ 4.0，且重复交换带来的权重增幅在预期范围内。"
+    },
+    {
+      "id": "READY-19",
+      "title": "缺失测试：重载检查点后立即触发自适应切换的基线恢复",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/store.py:111-122", "life_agent/switching.py:57-65", "tests/test_integration.py:94-124"],
+      "evidence": "恢复时若检查点带 adaptive_switch 则载入基线，否则用被动侧债务压力补记基线。现有手动切换恢复测试只校验 active、interaction_count、hidden_dims、history，没有在重载后立即喂入数据并评估首次自适应切换决策是否基于恢复后的正确基线。",
+      "impact": "基线恢复错误可能导致重载后立刻误切换或长时间不切换；该路径无回归保护。",
+      "recommendation": "重载后构造压力/容量条件，断言首次 decide 的 baseline 与保存时一致，切换决策方向正确。",
+      "regression_test": "test_post_restore_immediate_switch_baseline：保存前记录基线，恢复后调用 decide，断言 baseline 三字段一致且切换判据与保存前等价。"
+    },
+    {
+      "id": "READY-20",
+      "title": "缺失测试：空债务 / 零容量 / 空样本巩固路径",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/agent.py:240-247", "life_agent/worker.py:258-260", "life_agent/memory.py:206-219"],
+      "evidence": "_debt_training_samples 在无债务且回放未命中时返回空列表；_train 对空样本返回 no_samples、steps=0。decide 在 has_debt=False 时不切换（switching.py:76-79），但空债务下提交 consolidate 任务、due(limit) 空列表、容量压到 0 等组合路径没有测试覆盖。",
+      "impact": "边界空输入下若未来改动提交空作业或除零，不会被测试拦住；偿还容量/压力为 0 时的切换行为未界定。",
+      "recommendation": "补空债务、零容量、空样本作业的用例，断言 steps=0、不抛异常、切换决策为不切换。",
+      "regression_test": "test_consolidate_with_empty_debt_and_zero_capacity：空债务下提交巩固，断言结果 no_samples、队列清空、decide 不切换。"
+    },
+    {
+      "id": "READY-21",
+      "title": "缺失测试：resize 结构变更与 sync 同步的并发/交错",
+      "severity": "中",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/worker.py:227-242", "life_agent/worker.py:333-355", "tests/test_integration.py:65-73"],
+      "evidence": "resize 与 sync 都经单写者队列（优先级同为 1），_resize_both 同时改 GPU 模型与 CPU 模型；_synchronize 先把两侧 MLP 宽对齐到 max 再插值。现有 test_resize_repairs_stale_cpu_width 只测单步 resize 修复 CPU 宽度，没有交错 resize 与 sync，也没有验证 sync 对齐宽度时两侧维度一致、插值权重有限。",
+      "impact": "结构生长/剪枝与双半球同步交错时，若宽度对齐或权重拷贝有遗漏，可能出现形状不一致或 NaN；无并发回归保护。",
+      "recommendation": "在队列中交错提交 resize 与 sync，断言两侧 hidden_dims 一致、参数有限、CPU/GPU 快照一致。",
+      "regression_test": "test_resize_sync_interleave_consistent：交替 resize 左右层与 sync，断言每步结束两侧维度相同、权重有限、CPU 快照可加载。"
+    },
+    {
+      "id": "READY-22",
+      "title": "缺失测试：pending future 异常在 schedule/drain 路径上的传播（现有覆盖仅限 close 路径）",
+      "severity": "高",
+      "kind": "设计边界",
+      "evidence_strength": "代码推断",
+      "location": ["life_agent/agent.py:249-267", "life_agent/agent.py:269-280", "tests/test_integration.py:176-191"],
+      "evidence": "_schedule_passive_consolidation 对已完成但异常的 future 调 result() 重新抛出；_drain_passive_consolidation 同样 result()；_wait_consolidations 收集首个异常并在 close 时抛出。现有 test_running_load_rejected_and_background_failure_is_not_silent 只在 close() 路径塞入失败 future 并断言抛出；feed/interact/monitor 触发 schedule 或 drain 时 future 异常如何传播、agent 状态是否可恢复，没有测试。",
+      "impact": "后台巩固异常若在 feed 路径被吞或导致状态半初始化，长程运行可能静默退化；异常恢复路径未验证。",
+      "recommendation": "覆盖 schedule 复用旧异常 future、drain 等待异常 future、monitor 捕获异常三条路径，断言异常上抛、worker 状态一致、可选择重试或关闭。",
+      "regression_test": "test_pending_failure_propagates_in_schedule_and_drain：分别在 schedule/drain 前塞入失败 future，断言异常到达调用方且未污染另一半球状态。"
+    },
+    {
+      "id": "READY-23",
+      "title": "dataset_inventory.json 与当前目录存在小幅不一致，全量前应重新生成冻结清单",
+      "severity": "低",
+      "kind": "真实缺陷",
+      "evidence_strength": "已实测证实",
+      "location": ["dataset_inventory.json:14-87", "O:\\数据集（只读遍历）"],
+      "evidence": "只读遍历当前目录：总计 760 文件、10,913,873,703 B（与清单总量一致）。分项差异：清单 .zip 2 个而实测 3 个（24,823,192 B）；清单 <none> 6 个而实测 3 个（4,856 B）；实测另有 .gitattributes 1 个/1,174 B、.gitignore 1 个/837 B 未列入清单。清单生成后目录内容有过小改动。",
+      "impact": "以旧清单为准做排除/保留决策时，可能漏算新增的点配置文件；保留集哈希划分基于旧路径集合。",
+      "recommendation": "全量前重跑 inventory（不训练），把新清单与冻结采样清单一并归档；显式排除 .gitattributes/.gitignore 等非数据文件。",
+      "regression_test": "test_inventory_matches_current_tree：清单文件数/字节数/扩展名分布与目录遍历结果一致（除显式排除项外）。"
+    }
+  ],
+  "experiments": [
+    {
+      "name": "dataset-readonly-inventory",
+      "command": "Get-ChildItem -LiteralPath 'O:\\数据集' -Recurse -File -Force，按扩展名与顶层目录分组统计计数/大小（只读，未写入）",
+      "result": "760 文件 / 10,913,873,703 B（10.164 GiB）。扩展名：.jsonl 41/6,126,284,498；.parquet 227/1,785,374,876；.json 238/1,435,021,168；.csv 136/800,641,819；.arrow 3/663,529,912；.txt 17/64,835,810；.zip 3/24,823,192；.ipynb 5/7,514,755；.png 7/3,977,514；.pdf 1/702,343；.jpeg 2/574,072；.py 39/449,266；.md 19/126,306；.sh 14/10,383；<none> 3/4,856；.gitattributes 1/1,174；.gitignore 1/837；.example 1/454；.yml 1/256；.yaml 1/212。顶层目录前四：12_模型蒸馏 19/4.090 GiB、05_推理指令 8/1.829 GiB、10_数学推理扩充 39/1.485 GiB、03_数学推理 18/0.804 GiB。",
+      "artifact_dir": "O:\\Documents\\智能自学习AI（新）\\_audit_tmp\\readiness"
+    },
+    {
+      "name": "byteframe-boundary-and-chunk-experiment",
+      "command": "$env:PYTHONDONTWRITEBYTECODE=1; .venv-life\\Scripts\\python.exe _audit_tmp\\readiness\\boundary_experiment.py（纯 CPU，不训练）",
+      "result": "HEADER 20 B；典型元数据 262 B；空帧编码 61 B、expected_payload_length=None；1 MiB payload 编码 1,048,858 B 超限、1 MiB+1 为 1,048,859 B 超限；典型元数据下最大可容纳 payload 1,048,294 B；默认 chunk 960,000 ≤ 守卫限 983,040；元数据 >65535 B 抛 ValueError；1244 B 编码帧切 3 块（宽 509），字节重建一致，每块独立 BOS/USER 开头。覆盖统计：触碰 8 文件/源大小 20,116,175 B（0.184%），仅 01_LogiQA；混合速率 72,538 B/s，全量 41.79 h；按 README 79.3 KB/s 外推 38.23 h（该段产物未能复核）。",
+      "artifact_dir": "O:\\Documents\\智能自学习AI（新）\\_audit_tmp\\readiness\\experiments.json"
+    },
+    {
+      "name": "pytest-attempt",
+      "command": "$env:PYTHONDONTWRITEBYTECODE=1; .venv-life\\Scripts\\python.exe -m pytest tests -q -p no:cacheprovider",
+      "result": "失败：ModuleNotFoundError: No module named 'pytest'（.venv-life 与系统 Python 3.12 均未安装 pytest；.venv 基础路径已损坏）。",
+      "artifact_dir": "O:\\Documents\\智能自学习AI（新）\\_audit_tmp\\readiness"
+    },
+    {
+      "name": "unittest-collection-fallback",
+      "command": "$env:PYTHONDONTWRITEBYTECODE=1; .venv-life\\Scripts\\python.exe -m unittest discover -s tests -p test_*.py -v",
+      "result": "Ran 38 tests in 4.218s — OK，0 failed，0 skipped 记录；CUDA 可用，两个 CUDA 用例实际执行。逐文件：5/8/3/2/12/5/3。",
+      "artifact_dir": "O:\\Documents\\智能自学习AI（新）\\_audit_tmp\\readiness"
+    }
+  ],
+  "summary": "机制级单元、集成与 CUDA 测试 38 项全部通过，双半球切换、债务/回放、检查点往返、结构生长剪枝的基本路径在小模型上成立。但面向 10.164 GiB 全量训练的准备度存在三类缺口：(A) 真实数据仅读过 LogiQA 8 个文件、约 0.18% 字节，Parquet/Arrow/CSV/JSON/图片/压缩包等格式从未喂入；吞吐无法从混合段产物拆分，长程 RSS/显存/检查点/日志趋势与轮转、配额、重试、幂等等工程前置未落实；验证路径进度先于检查点提交，存在丢帧窗口。(B) 常量分级未成文，结构生长-剪枝同模型震荡与 LR 上限/spike 边界未在真实数据上验证；建议按常量+可观测 → 半自适应带硬上限 → 在线控制三阶段推进。(C) 并发与持久化边界（drain 持锁、monitor/feed 竞争、保存时 pending 巩固、切换债务叠加、重载后切换、空债务、resize/sync 交错、future 异常传播）缺回归测试；pytest 环境未固化。",
+  "verdict": "不具备直接启动 10.164 GiB 全量训练的前置条件。需先完成跨格式有界实测（吞吐/资源/边界）、补齐工程加固与上述并发/持久化回归测试，并按阶段1 门禁取得可复现指标后，再进入全量。",
+  "test_inventory": {
+    "collected": 38,
+    "passed": 38,
+    "failed": 0,
+    "runner": "unittest discover（pytest 在当前环境未安装，指定 pytest 命令未能执行）",
+    "skipped": 0
+  }
+}

@@ -1,0 +1,542 @@
+{
+  "probe": "novelty_signal_readonly",
+  "note": "Pure Python replay; no torch, no training. memory.py/switching.py loaded by path.",
+  "quality_rows": [
+    {
+      "case": "silence_pcm_256_zeros",
+      "length": 256,
+      "distinct": 1,
+      "entropy_bits": -0.0,
+      "longest_run": 256,
+      "structural_quality": 0.001
+    },
+    {
+      "case": "solid_gray_256",
+      "length": 256,
+      "distinct": 1,
+      "entropy_bits": -0.0,
+      "longest_run": 256,
+      "structural_quality": 0.001
+    },
+    {
+      "case": "random_high_entropy_256",
+      "length": 256,
+      "distinct": 167,
+      "entropy_bits": 7.1932,
+      "longest_run": 2,
+      "structural_quality": 1.0
+    },
+    {
+      "case": "alternating_two_values",
+      "length": 256,
+      "distinct": 2,
+      "entropy_bits": 1.0,
+      "longest_run": 1,
+      "structural_quality": 0.097656
+    },
+    {
+      "case": "monotonic_0_to_255",
+      "length": 256,
+      "distinct": 256,
+      "entropy_bits": 8.0,
+      "longest_run": 1,
+      "structural_quality": 1.0
+    },
+    {
+      "case": "periodic_16_cycle",
+      "length": 256,
+      "distinct": 16,
+      "entropy_bits": 4.0,
+      "longest_run": 1,
+      "structural_quality": 0.78125
+    },
+    {
+      "case": "short_seq_len8",
+      "length": 8,
+      "distinct": 1,
+      "entropy_bits": -0.0,
+      "longest_run": 8,
+      "structural_quality": 1.0
+    },
+    {
+      "case": "block_len32",
+      "length": 32,
+      "distinct": 4,
+      "entropy_bits": 2.0,
+      "longest_run": 1,
+      "structural_quality": 1.0
+    },
+    {
+      "case": "block_len64",
+      "length": 64,
+      "distinct": 4,
+      "entropy_bits": 2.0,
+      "longest_run": 1,
+      "structural_quality": 0.78125
+    },
+    {
+      "case": "block_len128",
+      "length": 128,
+      "distinct": 4,
+      "entropy_bits": 2.0,
+      "longest_run": 1,
+      "structural_quality": 0.390625
+    },
+    {
+      "case": "wrapped_prefixA_suffixA",
+      "length": 35,
+      "distinct": 7,
+      "entropy_bits": 2.3864,
+      "longest_run": 1,
+      "structural_quality": 1.0
+    },
+    {
+      "case": "wrapped_prefixB_suffixB",
+      "length": 36,
+      "distinct": 8,
+      "entropy_bits": 2.5033,
+      "longest_run": 1,
+      "structural_quality": 1.0
+    },
+    {
+      "case": "table_16x16_with_jitter",
+      "length": 256,
+      "distinct": 242,
+      "entropy_bits": 7.8906,
+      "longest_run": 1,
+      "structural_quality": 1.0
+    }
+  ],
+  "digest_map": {
+    "exact_zero": "a7d30f21bf64263cb5f646b28e6be6a14ed58eb3ec5eb56c84722ab766b92c02",
+    "exact_zero_dup": "a7d30f21bf64263cb5f646b28e6be6a14ed58eb3ec5eb56c84722ab766b92c02",
+    "wrapped_a": "317a16e865301805341c2adea02f2d603841d0dbec9da84244e0cb32942a4f6e",
+    "wrapped_b": "c1ff55512f50fd98ed1181173493ee9fe305eb95f90acc753f212e60230f3c85",
+    "table": "aa092de740dc3bb85ee0e51f8b69112203245c0508d6ad2ef8f0a8b005b5bce0"
+  },
+  "digest_equal_pairs": {
+    "exact_zero==exact_zero_dup": true,
+    "wrapped_a==wrapped_b": false
+  },
+  "replay_trace": [
+    {
+      "admission": 1,
+      "unique": 1,
+      "weight": 0.001
+    },
+    {
+      "admission": 2,
+      "unique": 1,
+      "weight": 0.021
+    },
+    {
+      "admission": 3,
+      "unique": 1,
+      "weight": 0.039
+    },
+    {
+      "admission": 4,
+      "unique": 1,
+      "weight": 0.0552
+    },
+    {
+      "admission": 5,
+      "unique": 1,
+      "weight": 0.06978
+    }
+  ],
+  "replay_after_wrap": {
+    "unique": 3,
+    "weights": {
+      "a7d30f21bf64263cb5f646b28e6be6a14ed58eb3ec5eb56c84722ab766b92c02": 0.06978,
+      "317a16e865301805341c2adea02f2d603841d0dbec9da84244e0cb32942a4f6e": 0.5,
+      "c1ff55512f50fd98ed1181173493ee9fe305eb95f90acc753f212e60230f3c85": 0.5
+    }
+  },
+  "debt_trace_exact_repeat": [
+    {
+      "admission": 1,
+      "unique": 1,
+      "weight": 0.175781,
+      "clean_pressure": 0.000176,
+      "clean_backlog": 0.000176
+    },
+    {
+      "admission": 2,
+      "unique": 1,
+      "weight": 0.351562,
+      "clean_pressure": 0.000352,
+      "clean_backlog": 0.000352
+    },
+    {
+      "admission": 3,
+      "unique": 1,
+      "weight": 0.527344,
+      "clean_pressure": 0.000527,
+      "clean_backlog": 0.000527
+    },
+    {
+      "admission": 4,
+      "unique": 1,
+      "weight": 0.703125,
+      "clean_pressure": 0.000703,
+      "clean_backlog": 0.000703
+    },
+    {
+      "admission": 5,
+      "unique": 1,
+      "weight": 0.878906,
+      "clean_pressure": 0.000879,
+      "clean_backlog": 0.000879
+    }
+  ],
+  "debt_trace_micro_variants": [
+    {
+      "admission": 1,
+      "unique": 2,
+      "clean_pressure": 0.138208,
+      "clean_backlog": 0.138208
+    },
+    {
+      "admission": 2,
+      "unique": 3,
+      "clean_pressure": 0.275537,
+      "clean_backlog": 0.275537
+    },
+    {
+      "admission": 3,
+      "unique": 4,
+      "clean_pressure": 0.412866,
+      "clean_backlog": 0.412866
+    },
+    {
+      "admission": 4,
+      "unique": 5,
+      "clean_pressure": 0.558778,
+      "clean_backlog": 0.558778
+    },
+    {
+      "admission": 5,
+      "unique": 6,
+      "clean_pressure": 0.696107,
+      "clean_backlog": 0.696107
+    },
+    {
+      "admission": 6,
+      "unique": 7,
+      "clean_pressure": 0.833437,
+      "clean_backlog": 0.833437
+    },
+    {
+      "admission": 7,
+      "unique": 8,
+      "clean_pressure": 0.979349,
+      "clean_backlog": 0.979349
+    },
+    {
+      "admission": 8,
+      "unique": 9,
+      "clean_pressure": 1.116678,
+      "clean_backlog": 1.116678
+    }
+  ],
+  "debt_after_due_capacity": 0.412866,
+  "debt_after_decay1_weights": {
+    "a7d30f21bf64263cb5f646b28e6be6a14ed58eb3ec5eb56c84722ab766b92c02": 0.65918,
+    "f3061b640b637ca3e72ceab88402b243a19dfaef5c34b9512a102d10fbdf0d5e": 0.131836,
+    "42f1c26c307a122cb0f3cdb32f0798276babd71848170e07ccbbd74d1e376b81": 0.131836,
+    "bc3f254643c530bc8b7e6ff0e23514c56fc28a339148eecedeaeb74c37b19491": 0.131836,
+    "3c01ce4032c48c49d2603d076b9988f4d7130e7ed967cc0003d7bf1bcf17fb29": 0.131836,
+    "7228c7fed418f2970b007f8fb127c6d8f5ef03e4a13082d022dd02e2a476dfa1": 0.131836,
+    "5a7f4e7a18e2204250bce36e00cbe5f7338806521d5f947684044280e0ec43ae": 0.131836,
+    "1d87d1c5e66990a194185146f5c05644729f17df08c6b2014b0741203d8510e5": 0.131836,
+    "95fbc805e47e0f2aec18b8ac6d143b5f06bd3497191ce255229e4c57ba0c03fa": 0.131836
+  },
+  "debt_len_after_decay2": 9,
+  "loss_weight_trace": [
+    {
+      "phase": "warmup",
+      "count": 20,
+      "mean": 1.6778
+    },
+    {
+      "phase": "typical",
+      "loss": 5.0,
+      "weight": 1.0,
+      "count": 21
+    },
+    {
+      "phase": "high_outlier",
+      "loss": 9.0,
+      "weight": 0.712114,
+      "count": 22
+    },
+    {
+      "phase": "repeated_low",
+      "loss": 3.0,
+      "weight": 1.0,
+      "count": 23
+    }
+  ],
+  "due_ordering": [
+    {
+      "source": "debt:probe",
+      "weight": 0.527344,
+      "quality": 0.001
+    },
+    {
+      "source": "debt:probe",
+      "weight": 0.175781,
+      "quality": 1.0
+    }
+  ],
+  "switch_repeated": {
+    "stream": "exact_repeat_zeros",
+    "final_unique": 1,
+    "final_pressure": 0.002109,
+    "final_capacity": 0.001143,
+    "switches": 3,
+    "switch_intervals": [
+      1,
+      2,
+      5
+    ],
+    "decisions": [
+      {
+        "round": 1,
+        "pressure_growth": 0.000176,
+        "learned_capacity": 0.000176,
+        "passive_delta": 2.0,
+        "active_delta": 2.0,
+        "should_switch": true,
+        "reason": "new clean data exceeded learned repayment capacity"
+      },
+      {
+        "round": 2,
+        "pressure_growth": 0.000176,
+        "learned_capacity": 0.000264,
+        "passive_delta": 2,
+        "active_delta": 2,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 3,
+        "pressure_growth": 0.000352,
+        "learned_capacity": 0.000352,
+        "passive_delta": 4,
+        "active_delta": 4,
+        "should_switch": true,
+        "reason": "new clean data exceeded learned repayment capacity"
+      },
+      {
+        "round": 4,
+        "pressure_growth": 0.000176,
+        "learned_capacity": 0.000439,
+        "passive_delta": 2,
+        "active_delta": 2,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 5,
+        "pressure_growth": 0.000352,
+        "learned_capacity": 0.000527,
+        "passive_delta": 4,
+        "active_delta": 4,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 6,
+        "pressure_growth": 0.000527,
+        "learned_capacity": 0.000615,
+        "passive_delta": 6,
+        "active_delta": 6,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 7,
+        "pressure_growth": 0.000703,
+        "learned_capacity": 0.000703,
+        "passive_delta": 8,
+        "active_delta": 8,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 8,
+        "pressure_growth": 0.000879,
+        "learned_capacity": 0.000791,
+        "passive_delta": 10,
+        "active_delta": 10,
+        "should_switch": true,
+        "reason": "new clean data exceeded learned repayment capacity"
+      },
+      {
+        "round": 9,
+        "pressure_growth": 0.000176,
+        "learned_capacity": 0.000879,
+        "passive_delta": 2,
+        "active_delta": 2,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 10,
+        "pressure_growth": 0.000352,
+        "learned_capacity": 0.000967,
+        "passive_delta": 4,
+        "active_delta": 4,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 11,
+        "pressure_growth": 0.000527,
+        "learned_capacity": 0.001055,
+        "passive_delta": 6,
+        "active_delta": 6,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 12,
+        "pressure_growth": 0.000703,
+        "learned_capacity": 0.001143,
+        "passive_delta": 8,
+        "active_delta": 8,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      }
+    ]
+  },
+  "switch_novel": {
+    "stream": "random_novel",
+    "final_unique": 12,
+    "final_pressure": 2.109375,
+    "final_capacity": 0.615234,
+    "switches": 4,
+    "switch_intervals": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "decisions": [
+      {
+        "round": 1,
+        "pressure_growth": 0.175781,
+        "learned_capacity": 0.175781,
+        "passive_delta": 2.0,
+        "active_delta": 2.0,
+        "should_switch": true,
+        "reason": "new clean data exceeded learned repayment capacity"
+      },
+      {
+        "round": 2,
+        "pressure_growth": 0.175781,
+        "learned_capacity": 0.263672,
+        "passive_delta": 2,
+        "active_delta": 2,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 3,
+        "pressure_growth": 0.351562,
+        "learned_capacity": 0.351562,
+        "passive_delta": 4,
+        "active_delta": 4,
+        "should_switch": true,
+        "reason": "new clean data exceeded learned repayment capacity"
+      },
+      {
+        "round": 4,
+        "pressure_growth": 0.175781,
+        "learned_capacity": 0.439453,
+        "passive_delta": 2,
+        "active_delta": 2,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 5,
+        "pressure_growth": 0.351562,
+        "learned_capacity": 0.492188,
+        "passive_delta": 4,
+        "active_delta": 4,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 6,
+        "pressure_growth": 0.527344,
+        "learned_capacity": 0.527344,
+        "passive_delta": 6,
+        "active_delta": 6,
+        "should_switch": true,
+        "reason": "new clean data exceeded learned repayment capacity"
+      },
+      {
+        "round": 7,
+        "pressure_growth": 0.175781,
+        "learned_capacity": 0.552455,
+        "passive_delta": 2,
+        "active_delta": 2,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 8,
+        "pressure_growth": 0.351562,
+        "learned_capacity": 0.571289,
+        "passive_delta": 4,
+        "active_delta": 4,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 9,
+        "pressure_growth": 0.527344,
+        "learned_capacity": 0.585938,
+        "passive_delta": 6,
+        "active_delta": 6,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 10,
+        "pressure_growth": 0.703125,
+        "learned_capacity": 0.597656,
+        "passive_delta": 8,
+        "active_delta": 8,
+        "should_switch": true,
+        "reason": "new clean data exceeded learned repayment capacity"
+      },
+      {
+        "round": 11,
+        "pressure_growth": 0.175781,
+        "learned_capacity": 0.607244,
+        "passive_delta": 2,
+        "active_delta": 2,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      },
+      {
+        "round": 12,
+        "pressure_growth": 0.351562,
+        "learned_capacity": 0.615234,
+        "passive_delta": 4,
+        "active_delta": 4,
+        "should_switch": false,
+        "reason": "insufficient new clean data pressure"
+      }
+    ]
+  },
+  "hard_reject_below_0.05": [
+    "silence_pcm_256_zeros",
+    "solid_gray_256"
+  ]
+}

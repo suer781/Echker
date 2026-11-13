@@ -1,0 +1,76 @@
+{
+  "save_events": [
+    {
+      "thread": "homeostasis",
+      "dur": 0.064118,
+      "snapshot": {
+        "left": {
+          "step": 37,
+          "debt": 26,
+          "replay": 9
+        },
+        "right": {
+          "step": 86,
+          "debt": 9,
+          "replay": 45
+        }
+      },
+      "pending_done": {
+        "right": true,
+        "left": false
+      },
+      "pending_pending": [
+        "left"
+      ],
+      "t": 25668.433137
+    },
+    {
+      "thread": "MainThread",
+      "dur": 0.052416,
+      "snapshot": {
+        "left": {
+          "step": 76,
+          "debt": 23,
+          "replay": 15
+        },
+        "right": {
+          "step": 161,
+          "debt": 15,
+          "replay": 93
+        }
+      },
+      "pending_done": {},
+      "pending_pending": [],
+      "t": 25670.197778
+    }
+  ],
+  "phase_b": {
+    "interact_calls": 36,
+    "consolidate_jobs": 40,
+    "ttt_jobs": 116,
+    "train_jobs": 0,
+    "steps_delta": {
+      "left": 47,
+      "right": 109
+    },
+    "qsize_max": 1,
+    "pending_at_end": [
+      "right",
+      "left"
+    ]
+  },
+  "close": [
+    {
+      "close_dur": 0.065778,
+      "exc": null,
+      "final": {
+        "qsize": 0,
+        "pending": [],
+        "steps": {
+          "left": 76,
+          "right": 161
+        }
+      }
+    }
+  ]
+}
