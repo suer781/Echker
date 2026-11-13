@@ -1,6 +1,7 @@
 """Persistent dual-hemisphere continual-learning agent over universal byte frames."""
 from __future__ import annotations
 
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 import logging
 from pathlib import Path
 import random
@@ -259,7 +260,8 @@ class LifeAgent:
             if not future.done():
                 return
             self.pending_consolidation.pop(name, None)
-            future.result()  # never hide a failed background consolidation
+            # never hide a failed background consolidation
+            self._await_consolidation(name, future)
         samples = self._debt_training_samples(name)
         if not samples:
             return
@@ -270,13 +272,22 @@ class LifeAgent:
     def _drain_passive_consolidation(self) -> None:
         future = self.pending_consolidation.pop(self.passive, None)
         if future is not None:
-            future.result()
+            self._await_consolidation(self.passive, future)
+
+    def _await_consolidation(self, name: str, future: Future) -> None:
+        # CONC-01: a background consolidation used to be awaited without a
+        # deadline; a wedged GPU worker froze the agent inside its own lock.
+        deadline = 900.0
+        try:
+            future.result(timeout=deadline)
+        except FutureTimeoutError as exc:
+            raise RuntimeError(f"consolidation job for {name} exceeded {deadline}s") from exc
 
     def _wait_consolidations(self) -> None:
         first_error = None
         for name, future in list(self.pending_consolidation.items()):
             try:
-                future.result()
+                self._await_consolidation(name, future)
             except Exception as exc:
                 if first_error is None:
                     first_error = exc
@@ -290,10 +301,17 @@ class LifeAgent:
             source = self.state(source_name)
             target = self.state(target_name)
             with source.lock:
-                latest = [item.clone() for item in source.replay.latest(2)]
+                # MATH-05: exchanged material is already-learned replay being
+                # re-admitted for cross-hemisphere exposure. It must not count
+                # as new clean pressure, and the exchange tag lets the debt
+                # ledger keep it out of repayment-capacity history.
+                latest = [
+                    item.clone(source=f"exchange:{item.source}")
+                    for item in source.replay.latest(2)
+                ]
             with target.lock:
                 for sample in latest:
-                    target.debt.add(sample, self.config.runtime.debt_retention)
+                    target.debt.add(sample, self.config.runtime.debt_retention, count_pressure=False)
 
     def switch(self) -> None:
         if not self.started:

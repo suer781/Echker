@@ -89,7 +89,7 @@
 
 证据：最终 5 次恢复全字段一致；`DebtReservationTests` 覆盖“due 不记账、未 commit 不计数、重复不制造压力”。
 
-剩余边界：没有做强制断电/磁盘满故障注入；`CONC-01` 的 future 等待仍无超时。
+剩余边界：没有做强制断电/磁盘满故障注入；`CONC-01` 已于 2026-11-14 修复（见第 8 节）。
 
 ## 5. B5：验收器可证伪性
 
@@ -149,14 +149,17 @@
 
 ## 8. 未关闭的非阻断项
 
-原审查的高/中非阻断项多数仍在，不能因为 21/21 通过就宣称全部修完：
+2026-11-14 修复三项（55 项测试全过 + verify_architecture 16/16 + `validation_runs/continuous-adaptive-postfix-1` 验收 **21/21、0 failed、0 skipped**，42 次切换全部可复算，5 次恢复指纹全对，RSS 峰值 1,230 MB）：
 
-- `CONC-01`：所有 `future.result()` 仍无超时；`drain` 在 agent RLock 内阻塞；
-- `CONC-03/04/05/06/07/08/10`：队列/重建/锁粒度的残余风险；
-- `MATH-03`：容量偏高（历史实测左 2.633x、右 1.548x）；
+- `CONC-01`（已修）：`TrainingWorker.submit(wait=True)` 按 job 种类带 300–900 秒超时（`_JOB_TIMEOUT_S`），agent 侧 `_await_consolidation()` 对后台巩固 future 同样带 900 秒死线；挂死不再无声冻结，调用方收到 `RuntimeError` 后由进程级看门狗重启。
+- `SYNC-02`（已修）：`_optimizer_rebuild` 携带动量重建 AdamW——形状不变的参数原样搬运 `exp_avg/exp_avg_sq/step`；生长神经元按 `row_map` 继承其分裂源神经元的动量；剪枝按 `keep_map` 重映射保留神经元的动量。新神经元从零动量开始。
+- `MATH-05`（已修）：切换交换样本打 `exchange:` 来源标签并以 `count_pressure=False` 入账——已学材料不再计入新净压力，也不再污染 `capacity_history`（混合批只计新数据质量，纯交换批不记账）。
+
+原审查的其余高/中非阻断项仍在，不能因为 21/21 通过就宣称全部修完：
+
+- `CONC-03/04/05/06/07/08/10`：队列/重建/锁粒度的残余风险（`_wait_consolidations` 仍在 agent RLock 内等待，但现在有死线）；
+- `MATH-03`：容量偏高（历史实测左 2.633x、右 1.548x）；MATH-05 修复移除了交换污染这一来源，剩余偏差来自 top-weight 选择偏置，需长跑数据再校准；
 - `MATH-04`：`due()` 重复计批的旧证据已被“预选不记账”修掉，但容量中位数与批边界仍需更多实验；
-- `MATH-05`：切换交换重复计压力；
-- `SYNC-02`：resize/sync 重建 AdamW 会清空动量；
 - `NOV-02/03`：结构质量与长度耦合已改为前 32 字节，但重复债务优先级仍需实验；
 - `READY-04/07/08`、`PERS-12/13`：数据集漂移、文档/版本、长期恢复；
 - `--skip-real` 的 skipped 语义已修，但跨格式探针不进入正式 21 项判据，是独立证据。

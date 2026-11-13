@@ -109,11 +109,27 @@
     "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/train.txt": {
       "size": 14045351,
       "mtime_ns": 1790967858070549700,
-      "next_offset": 960000,
+      "next_offset": 14045351,
+      "complete": true,
+      "last_chunk_sha256": "a8b115f186381266b1737e474287ddce53e2646ae2c507d9d9e11ec8e7728b4e",
+      "last_chunk_bytes": 605351
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/train_fol.zip": {
+      "size": 23744378,
+      "mtime_ns": 1790967858092832600,
+      "next_offset": 23744378,
+      "complete": true,
+      "last_chunk_sha256": "2fb1476c0b924887393b4f4db0679667e4aaf49b7337ef1e876abb05333fabf2",
+      "last_chunk_bytes": 704378
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/train_zh.txt": {
+      "size": 9581270,
+      "mtime_ns": 1790967858130189000,
+      "next_offset": 8640000,
       "complete": false,
-      "last_chunk_sha256": "17f6e8a3d0a46b7fe69dc55ace09562f07a0ae91b5921f3b3bff24091105339b",
+      "last_chunk_sha256": "7c4efc7cb9e1d382baa8d33aedcc4c59c31fa9e438c87add05a7227fdaab8a18",
       "last_chunk_bytes": 960000
     }
   },
-  "frames": 51
+  "frames": 99
 }

@@ -113,7 +113,7 @@ $env:PYTHONPATH = (Get-Location).Path
 & ".\.venv-life\Scripts\python.exe" -m unittest discover -s .\tests -v
 ```
 
-最近结果：**47 项通过，0 失败，0 错误**（约 4.8 秒）。测试输出里可能出现一次预期的 “failed to restore checkpoint” 指纹篡改测试日志，那是负向测试，不代表回归失败。
+最近结果：**55 项通过，0 失败，0 错误**（约 6 秒；2026-11-14 新增 8 项可靠性回归：submit 超时、动量搬运、交换去污染）。测试输出里可能出现一次预期的 “failed to restore checkpoint” 指纹篡改测试日志，那是负向测试，不代表回归失败。
 
 ---
 
@@ -135,7 +135,7 @@ life_agent/
 ingest_dataset.py                只读流式数据集训练、进度与恢复
 continuous_validation.py         200 轮 + 20 MB 可证伪验收器
 cross_format_probe.py            20 格式只读准入探针
-tests/                           47 项单元/集成/CUDA 测试
+tests/                           55 项单元/集成/CUDA 测试
 ```
 
 关键语义：
@@ -358,7 +358,7 @@ Set-Location -LiteralPath "O:\Documents\智能自学习AI（新）"
 - 20 MB 真实数据仅覆盖 0.184% 字节；跨格式每桶约 128 KB。
 - 没有证明语义理解、事实正确性、意识或通用智能。
 - 46 次/200 次只是观测频率，不证明频率最优或长期不抖动。
-- `AUDIT_CLOSURE.md` 第 8 节列出的非阻断项多数仍未修：`CONC-01`（无超时等待）、`CONC-03/04/05/06/07/08/10`、`MATH-03/04/05`、`SYNC-02`、`NOV-02/03`、`READY-04/07/08`、`PERS-12/13`。
+- `AUDIT_CLOSURE.md` 第 8 节：`CONC-01`/`SYNC-02`/`MATH-05` 已于 2026-11-14 修复（55 项测试 + 架构 16/16 + postfix-1 验收）；`CONC-03/04/05/06/07/08/10`、`MATH-03/04`、`NOV-02/03`、`READY-04/07/08`、`PERS-12/13` 仍未修。
 - 1% 路径哈希保留集不是语义去污染；已知重复版本需要 `--exclude` 或人工清单。
 - `ARCHITECTURE_AUDIT.md` / `ARCHITECTURE_VALIDATION.json` 的数字是旧版；以本文件和 final-1 报告为准。
 

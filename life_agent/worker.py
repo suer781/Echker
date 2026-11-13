@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 import itertools
 import logging
@@ -22,6 +22,20 @@ from .memory import DebtLedger, ReplayBuffer, Sample
 from .model import DynamicByteLM
 
 LOG = logging.getLogger(__name__)
+
+# CONC-01: every submit must resolve or fail loudly. A hung CUDA job used to
+# freeze the whole agent inside future.result() forever; now the caller gets a
+# RuntimeError and the process-level supervisor can restart cleanly. The
+# margins are deliberately large: a legitimate train job runs hundreds of
+# gradient steps, so the timeout only fires on a genuinely wedged worker.
+_JOB_TIMEOUT_S: dict[str, float] = {
+    "ttt": 300.0,
+    "sync": 300.0,
+    "resize": 300.0,
+    "snapshot": 300.0,
+    "train": 900.0,
+    "consolidate": 900.0,
+}
 
 
 class LearningRateController:
@@ -215,6 +229,7 @@ class TrainingWorker:
         wait: bool = True,
         priority: int | None = None,
         event: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> Any:
         if self.stop_event.is_set():
             raise RuntimeError("training worker has stopped")
@@ -229,21 +244,132 @@ class TrainingWorker:
             event=event or {},
         )
         self.jobs.put(job)
-        return job.future.result() if wait else job.future
+        if not wait:
+            return job.future
+        deadline = timeout if timeout is not None else _JOB_TIMEOUT_S.get(kind, 600.0)
+        try:
+            return job.future.result(timeout=deadline)
+        except FutureTimeoutError as exc:
+            raise RuntimeError(
+                f"training job '{kind}'[{hemisphere}] exceeded {deadline}s (queued={self.jobs.qsize()})"
+            ) from exc
 
     def _optimizer_reset(self, state: HemisphereState) -> None:
-        state.optimizer = torch.optim.AdamW(
+        # SYNC-02: a structural change used to rebuild AdamW from scratch and
+        # discard every momentum buffer, so the optimizer forgot everything it
+        # had learned about each surviving neuron's gradient history on every
+        # growth/prune event. The rebuild below carries optimizer state across.
+        self._optimizer_rebuild(state)
+
+    def _optimizer_rebuild(
+        self,
+        state: HemisphereState,
+        pre_resize: tuple[list[tuple[str, torch.Tensor]], dict[str, Any], list[torch.Tensor]] | None = None,
+        resize_result: dict[str, Any] | None = None,
+        layer: int | None = None,
+    ) -> None:
+        """Rebuild AdamW while carrying momentum through the topology change.
+
+        Shape-preserving parameters keep their exact optimizer state. Reshaped
+        MLP weights are remapped through the resize's neuron correspondence:
+        grown units inherit the momentum of the neuron they split from, and
+        pruned weights keep only the kept units' momentum in their new order.
+        """
+        if pre_resize is None:
+            old_named = list(state.model.named_parameters())
+            old_state = state.optimizer.state_dict()
+            old_params = [p for group in state.optimizer.param_groups for p in group["params"]]
+        else:
+            old_named, old_state, old_params = pre_resize
+        old_index_by_id = {id(p): i for i, p in enumerate(old_params)}
+        old_state_by_name: dict[str, dict[str, Any]] = {}
+        for name, parameter in old_named:
+            index = old_index_by_id.get(id(parameter))
+            if index is not None and index in old_state["state"]:
+                old_state_by_name[name] = old_state["state"][index]
+
+        new_optimizer = torch.optim.AdamW(
             state.model.parameters(), lr=state.lr.value, weight_decay=self.config.runtime.weight_decay
         )
-        state.last_event = "optimizer rebuilt after structural change"
+        row_map = None
+        if resize_result is not None:
+            if resize_result.get("mode") == "grow":
+                row_map = resize_result.get("row_map") or []
+            elif resize_result.get("mode") == "prune":
+                row_map = resize_result.get("keep_map") or []
+        prefix = f"blocks.{layer}." if layer is not None else ""
+        fc1_weight, fc1_bias, fc2_weight = f"{prefix}fc1.weight", f"{prefix}fc1.bias", f"{prefix}fc2.weight"
+        with torch.no_grad():
+            for name, parameter in state.model.named_parameters():
+                source = old_state_by_name.get(name)
+                if source is None:
+                    continue
+                step = (
+                    source["step"].clone()
+                    if torch.is_tensor(source["step"])
+                    else torch.tensor(float(source["step"]))
+                )
+                if tuple(source["exp_avg"].shape) == tuple(parameter.shape):
+                    new_optimizer.state[parameter] = {
+                        "step": step,
+                        "exp_avg": source["exp_avg"].detach().clone(),
+                        "exp_avg_sq": source["exp_avg_sq"].detach().clone(),
+                    }
+                    continue
+                if row_map is None or prefix == "" or name not in (fc1_weight, fc1_bias, fc2_weight):
+                    continue
+                old_avg = source["exp_avg"].detach()
+                old_sq = source["exp_avg_sq"].detach()
+                new_avg = torch.zeros_like(parameter)
+                new_sq = torch.zeros_like(parameter)
+                if name in (fc1_weight, fc1_bias):
+                    # The neuron index is dim 0 for fc1 rows and bias.
+                    if resize_result["mode"] == "grow":
+                        old_dim = int(resize_result["old_dim"])
+                        new_avg[:old_dim] = old_avg[:old_dim]
+                        new_sq[:old_dim] = old_sq[:old_dim]
+                        for target, source_index in row_map:
+                            new_avg[target] = old_avg[source_index]
+                            new_sq[target] = old_sq[source_index]
+                    else:
+                        kept = torch.as_tensor(row_map, dtype=torch.long, device=old_avg.device)
+                        new_avg = old_avg.index_select(0, kept)
+                        new_sq = old_sq.index_select(0, kept)
+                else:
+                    # fc2.weight: the neuron index is dim 1.
+                    if resize_result["mode"] == "grow":
+                        old_dim = int(resize_result["old_dim"])
+                        new_avg[:, :old_dim] = old_avg[:, :old_dim]
+                        new_sq[:, :old_dim] = old_sq[:, :old_dim]
+                        for target, source_index in row_map:
+                            new_avg[:, target] = old_avg[:, source_index]
+                            new_sq[:, target] = old_sq[:, source_index]
+                    else:
+                        kept = torch.as_tensor(row_map, dtype=torch.long, device=old_avg.device)
+                        new_avg = old_avg.index_select(1, kept)
+                        new_sq = old_sq.index_select(1, kept)
+                new_optimizer.state[parameter] = {
+                    "step": step,
+                    "exp_avg": new_avg.to(parameter.device),
+                    "exp_avg_sq": new_sq.to(parameter.device),
+                }
+        state.optimizer = new_optimizer
+        state.last_event = "optimizer rebuilt with momentum carry-over"
 
     def _resize_both(self, state: HemisphereState, event: dict[str, Any]) -> dict[str, Any]:
+        # Capture optimizer bookkeeping before the module attributes are
+        # replaced, so momentum can be carried to the new parameters.
+        pre_resize = (
+            list(state.model.named_parameters()),
+            state.optimizer.state_dict(),
+            [p for group in state.optimizer.param_groups for p in group["params"]],
+        )
         result = state.model.resize_hidden(event["layer"], event["new_dim"])
         target = state.model.blocks[event["layer"]].hidden_dim
         with state.lock:
             cpu_result = state.cpu_model.resize_hidden(event["layer"], target)
         if result["mode"] != "none" or cpu_result["mode"] != "none":
-            self._optimizer_reset(state)
+            self._optimizer_rebuild(state, pre_resize=pre_resize, resize_result=result, layer=event["layer"])
             state.last_event = f"{result['mode']} L{result['layer']}: {result['old_dim']}->{target}"
             LOG.info("%s %s", state.name, state.last_event)
         return result

@@ -27,8 +27,8 @@
       },
       "left_steps": 2,
       "right_offline_steps": 1,
-      "left_event": "ttt:loss=5.0112;lr=3.00e-04;hold",
-      "right_event": "consolidate:loss=5.6735;lr=3.00e-04;hold",
+      "left_event": "ttt:loss=5.0330;lr=3.00e-04;hold",
+      "right_event": "consolidate:loss=5.5237;lr=3.00e-04;hold",
       "right_debt": 2
     },
     "second": {
@@ -39,8 +39,8 @@
       },
       "left_offline_steps": 4,
       "right_steps": 4,
-      "left_event": "consolidate:loss=5.4261;lr=3.00e-04;hold",
-      "right_event": "ttt:loss=5.1035;lr=3.00e-04;hold"
+      "left_event": "consolidate:loss=5.4545;lr=3.00e-04;hold",
+      "right_event": "ttt:loss=5.0537;lr=3.00e-04;hold"
     },
     "cycle": {
       "active": "left",

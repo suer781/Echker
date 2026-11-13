@@ -361,11 +361,20 @@ class DebtLedger:
                 committed.append(item)
         if not committed:
             return 0
-        batch_capacity = sum(max(0.0, item.weight) * self._quality(item) for item in committed)
+        # MATH-05: switch-exchanged material is already-learned replay re-entered
+        # for cross-hemisphere exposure. Training it is real consolidation work,
+        # but its mass must not inflate the measured new-data batch capacity that
+        # the switch controller compares against incoming clean pressure.
+        batch_capacity = sum(
+            max(0.0, item.weight) * self._quality(item)
+            for item in committed
+            if not item.source.startswith("debt:exchange")
+        )
         self.total_repaid += len(committed)
         self.repayment_batches += 1
-        self.capacity_history.append(batch_capacity)
-        self.repayment_capacity = float(statistics.median(self.capacity_history))
+        if batch_capacity > 0:
+            self.capacity_history.append(batch_capacity)
+            self.repayment_capacity = float(statistics.median(self.capacity_history))
         return len(committed)
 
     def release_reservation(self, samples: Iterable[Sample]) -> None:

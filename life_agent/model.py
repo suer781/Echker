@@ -73,6 +73,7 @@ class DynamicBlock(nn.Module):
             source = importance.topk(min(count, old_dim)).indices
             if count > old_dim:
                 source = source.repeat(math.ceil(count / old_dim))[:count]
+            row_map: list[list[int]] = []
             new_fc1 = self._replacement_linear(self.fc1, self.fc1.in_features, new_dim)
             new_fc2 = self._replacement_linear(self.fc2, new_dim, self.fc2.out_features)
             with torch.no_grad():
@@ -84,6 +85,7 @@ class DynamicBlock(nn.Module):
                     new_fc2.bias.copy_(self.fc2.bias)
                 for offset, index in enumerate(source.tolist()):
                     target = old_dim + offset
+                    row_map.append([target, int(index)])
                     new_fc1.weight[target].copy_(self.fc1.weight[index])
                     new_fc1.weight[target].add_(torch.randn_like(new_fc1.weight[target]) * 1e-5)
                     if self.fc1.bias is not None:
@@ -107,7 +109,17 @@ class DynamicBlock(nn.Module):
         self.fc1 = new_fc1
         self.fc2 = new_fc2
         self.register_buffer("activation_ema", new_activity.to(new_fc1.weight.device))
-        return {"old_dim": old_dim, "new_dim": new_dim, "mode": "grow" if growing else "prune"}
+        result: dict[str, Any] = {"old_dim": old_dim, "new_dim": new_dim, "mode": "grow" if growing else "prune"}
+        if growing:
+            # Neuron correspondence for optimizer-state carry-over (SYNC-02):
+            # the new unit at row_map[i][0] is a split of the old unit at
+            # row_map[i][1]; rows/columns below old_dim keep their positions.
+            result["row_map"] = row_map
+        else:
+            # Pruning keeps an arbitrary subset: new index i corresponds to the
+            # old index keep_map[i].
+            result["keep_map"] = [int(index) for index in keep.tolist()]
+        return result
 
 
 class DynamicByteLM(nn.Module):
