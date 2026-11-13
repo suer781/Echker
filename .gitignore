@@ -8,3 +8,5 @@ __pycache__/
 
 # 运行日志
 *.stderr.log
+# 交互探针的临时状态副本，不进仓库
+_audit_tmp/interactive_probe_state/

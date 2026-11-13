@@ -125,11 +125,115 @@
     "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/train_zh.txt": {
       "size": 9581270,
       "mtime_ns": 1790967858130189000,
-      "next_offset": 8640000,
+      "next_offset": 9581270,
+      "complete": true,
+      "last_chunk_sha256": "0067d38d34d411a9465ae31a87460845c378c9f7a433a5904963ddc45e8ba5fb",
+      "last_chunk_bytes": 941270
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/word_matching.py": {
+      "size": 745,
+      "mtime_ns": 1790967858131184900,
+      "next_offset": 745,
+      "complete": true,
+      "last_chunk_sha256": "469ca3ead133ff45b4b61c4263ea5100f2769768443b8d1e6de7f2610871ae93",
+      "last_chunk_bytes": 745
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/logiqa.sh": {
+      "size": 592,
+      "mtime_ns": 1790967858132190800,
+      "next_offset": 592,
+      "complete": true,
+      "last_chunk_sha256": "acb7d5a31fe064043fed123d6a98e5a17316d265b190f1c81964195f72c3d468",
+      "last_chunk_bytes": 592
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/modeling_bart.py": {
+      "size": 59634,
+      "mtime_ns": 1790967858132740900,
+      "next_offset": 59634,
+      "complete": true,
+      "last_chunk_sha256": "98c5c48942f5182db749a04dd2a913f7c1f095a5013df5d952e0e0c00ed95e36",
+      "last_chunk_bytes": 59634
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/multi-choice-prompt.py": {
+      "size": 4816,
+      "mtime_ns": 1790967858132740900,
+      "next_offset": 4816,
+      "complete": true,
+      "last_chunk_sha256": "a05afc2760441b13031c315e5a7f5831cd87d7e1a9edb8cefe22a34333c0bcbf",
+      "last_chunk_bytes": 4816
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/run_mrc.py": {
+      "size": 27757,
+      "mtime_ns": 1790967858133288000,
+      "next_offset": 27757,
+      "complete": true,
+      "last_chunk_sha256": "7b06f55d9f6b107f5a57742ae50552246a2b1028639741b8263599b5e3cdf914",
+      "last_chunk_bytes": 27757
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/utils_mrc.py": {
+      "size": 10045,
+      "mtime_ns": 1790967858133831900,
+      "next_offset": 10045,
+      "complete": true,
+      "last_chunk_sha256": "6f4996d836c18b0f7ad730fd9e371d5daac664c153c0803df8b43f93ff4218ce",
+      "last_chunk_bytes": 10045
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa2nli/DATA/QA2NLI/ dev_new.txt": {
+      "size": 2978446,
+      "mtime_ns": 1790967858142876900,
+      "next_offset": 2978446,
+      "complete": true,
+      "last_chunk_sha256": "734fcfd3c6c0ed9c0f7e973962dded232eaffb1214a60ae9f249b1304955ccd2",
+      "last_chunk_bytes": 98446
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa2nli/DATA/QA2NLI/dev.txt": {
+      "size": 2453230,
+      "mtime_ns": 1790967858151501400,
+      "next_offset": 2453230,
+      "complete": true,
+      "last_chunk_sha256": "d4111476d4c19a1ff7c63a5864ed1bcb04178cc0af2369d5ac6acd3e05426c9e",
+      "last_chunk_bytes": 533230
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa2nli/DATA/QA2NLI/readme.md": {
+      "size": 25,
+      "mtime_ns": 1790967858152536400,
+      "next_offset": 25,
+      "complete": true,
+      "last_chunk_sha256": "940e836e1da93796400fb709339fe4eb193e830a6ab56191ab183a2753c11ce2",
+      "last_chunk_bytes": 25
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa2nli/DATA/QA2NLI/stat.py": {
+      "size": 598,
+      "mtime_ns": 1790967858152536400,
+      "next_offset": 598,
+      "complete": true,
+      "last_chunk_sha256": "b351efe35495419ad0ef88fc50c49a79c4a7f16bb3f2e1143c31530722cdad2e",
+      "last_chunk_bytes": 598
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa2nli/DATA/QA2NLI/test.txt": {
+      "size": 2458217,
+      "mtime_ns": 1790967858161075800,
+      "next_offset": 2458217,
+      "complete": true,
+      "last_chunk_sha256": "52d5391fec7df592c85ed0207981ee85119bd833644d79c00a84b38b5431aabe",
+      "last_chunk_bytes": 538217
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa2nli/DATA/QA2NLI/test_new.txt": {
+      "size": 2484632,
+      "mtime_ns": 1790967858168845600,
+      "next_offset": 2484632,
+      "complete": true,
+      "last_chunk_sha256": "6f4a4c6517f13d30538f9ad181c2c3269b8a51a39facde04f5417800fff9c809",
+      "last_chunk_bytes": 564632
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa2nli/DATA/QA2NLI/train.txt": {
+      "size": 19684892,
+      "mtime_ns": 1790967858241343400,
+      "next_offset": 9600000,
       "complete": false,
-      "last_chunk_sha256": "7c4efc7cb9e1d382baa8d33aedcc4c59c31fa9e438c87add05a7227fdaab8a18",
+      "last_chunk_sha256": "d1792cd86e618b3afa210e1046a90fb6a3a2b068048279be0bfc2508f4efa0d8",
       "last_chunk_bytes": 960000
     }
   },
-  "frames": 99
+  "frames": 131
 }
