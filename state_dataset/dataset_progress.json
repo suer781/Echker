@@ -101,11 +101,19 @@
     "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/test_fol.jsonl": {
       "size": 16807118,
       "mtime_ns": 1790967858018264300,
-      "next_offset": 2880000,
+      "next_offset": 16807118,
+      "complete": true,
+      "last_chunk_sha256": "cf5ff1565ca969ac0372b3055a787e3ba28d19d7d0bf2439748b7ebe6232d4d6",
+      "last_chunk_bytes": 487118
+    },
+    "01_LogiQA/LogiQA-2.0/LogiQA2.0-main/logiqa/DATA/LOGIQA/train.txt": {
+      "size": 14045351,
+      "mtime_ns": 1790967858070549700,
+      "next_offset": 960000,
       "complete": false,
-      "last_chunk_sha256": "0a9628b96844b344cb1f48f8d54ecb8ca740116908d1289eda642ede5990f4a2",
+      "last_chunk_sha256": "17f6e8a3d0a46b7fe69dc55ace09562f07a0ae91b5921f3b3bff24091105339b",
       "last_chunk_bytes": 960000
     }
   },
-  "frames": 35
+  "frames": 51
 }

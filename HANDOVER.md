@@ -251,6 +251,28 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "O:\Documents\智能自学�
 - 直接删除 `watchdog.stop` 后用上面的命令即可重新启动守护。
 - 修改这两个 `.ps1` 时注意：文件必须带 UTF-8 BOM（PowerShell 5.1 对无 BOM 的 UTF-8 按 ANSI 解析，中文会破坏语法）；改完用解析器检查语法再上线。
 
+#### 停机维护工作流（项目开发期，停/启控制权在人）
+
+```powershell
+# 停：创建 stop 文件，看门狗 ≤30 秒内退出（损失 ≤16 帧可重放，不丢数据）
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\stop_training.ps1"
+# ……维护、改代码、跑 47 项测试……
+# 恢复：清 stop 文件 + 防双写检查 + WMI 启动看门狗
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\start_training.ps1"
+```
+
+- `start_training.ps1` 自带防呆：看门狗已在岗或训练 python 还活着时拒绝启动，防止双写者互相覆盖检查点。
+- **没有开机自启动**（明确要求）：电脑重启后训练不会自己回来，需要手动跑 `start_training.ps1`。
+- 语料吃完的判定：`watchdog.log` 出现 `graceful completion detected`，且 `dataset_progress.json` 全部文件 `complete:true`。此时 `start_training.ps1` 启动的看门狗会立即检测到完成并退出，属正常。
+- **语料吃完后的持续在线学习入口**（聊天式，TTT 在线学习继续）：
+
+```powershell
+Set-Location -LiteralPath "O:\Documents\智能自学习AI（新）"
+& ".\.venv-life\Scripts\python.exe" ".\run_agent.py" --config ".\config.json" --state-dir ".\state_dataset"
+```
+
+- **切勿**在语料训练还在跑时对同一 `state_dir` 开交互会话：两个进程都是 `latest.pt` 的写者，会互相覆盖。先 `stop_training.ps1`，聊完再 `start_training.ps1`。
+
 ---
 
 ## 5. 关键机制速览
@@ -394,4 +416,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "O:\Documents\智能自学�
 | `state_dataset/latest.pt` / `latest.backup.pt` | 全量检查点对（save-then-mark，崩溃只重放不跳过） |
 | `state_dataset_backup_20261114/` | 2026-11-13 停止时三个文件的原始备份 |
 | `watchdog.ps1` / `status_check.ps1` | 长跑守护与状态查看（第 4.7 节） |
+| `start_training.ps1` / `stop_training.ps1` | 停机维护与恢复（第 4.7 节，无自启动） |
 | `ContinualLifeAgent.zip` | 2026-11-13 源码快照（不含本节新增脚本） |
