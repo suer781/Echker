@@ -35,7 +35,8 @@
 | `make_chitchat_data.py` | 闲聊/算术/身份指令对生成 |
 | `finetune_byt5.py` | q/v 真权重微调（`--resume` 续训，读取 finetune_data/*.jsonl 全部） |
 | `chat_cli.py` | 交互 CLI：每轮 TTT 式真权重更新（`--no-learn` 关闭，`/save` `/exit`），自动每 20 轮落盘 |
-| `evaluate_holdout.py` | 旧架构 holdout 仪器（保留；ByT5 时代判据待重定义） |
+| `evaluate_holdout.py` | 旧架构 holdout 仪器（保留；legacy） |
+| `evaluate_byt5_holdout.py` | ByT5 时代泛化判决：微调模型 vs 谷歌基座在 1% 保留集上的 CE 对比 |
 
 ### 运行
 
@@ -58,6 +59,20 @@ Set-Location -LiteralPath "O:\Documents\智能自学习AI（新）"
 5. 旧管线机制（双半球/债务/自适应切换）向 ByT5 语义的移植：需 ≥8GB 卡的顺序驻留方案已备好，等硬件
 6. ByT5 时代 21 项验收器重定义（旧验收器绑定 DynamicByteLM 结构）
 7. 55 项测试与 `verify_architecture` 属于 ByT5-DNA 自研内核路线，作为 legacy 保留
+
+### 0.6.1 验收记录（2026-11-14，全项通过）
+
+| 判据 | 实测 |
+|---|---|
+| V1 静态一致性 | 语法 OK，旧概念（learn_this/accumulator/LEVELS/note_oom）残留 0 |
+| V2 曲线单调性 + 字节掩码 | 强度随显存严格单调、下限>0；坏字节/截断/控制符精确屏蔽 |
+| V3 边界电池 | 空行/空白/emoji/超长/英文混合：EXIT 0、Traceback 0 |
+| V4 长会话逐轮学习 | 12/12 轮全部学习（强度 1.00），enc 450→435→424 曲线随水位平滑收缩 |
+| V5 持久化闭环 | 副本学习 2 轮 → SHA `9c3596ff→99839cbe` → 新进程重载生成 ✓；正式模型保持 `9c3596ff` 纯净 |
+| V6 holdout 泛化判决 | **PASS，+96.3%**：微调模型 CE 0.090 vs 基座 2.435（从未训练的 1% 保留集：LogiQA2 test +90.9%、CMMLU arts +97.4%）——微调是泛化不是背题 |
+| V7 文档落地 | 本文件 0.6.0/0.6.1 + 全套推送 GitHub |
+
+曲线自适应治理（0.6.1 定稿）：无档位——上下文上限/回复长度/学习强度均为空闲显存（EMA 平滑）的 smoothstep 连续函数；OOM 压力标量平滑收紧并指数衰减；**学习强度直接缩放等效学习率，每轮都学习，"学/不学"之间不存在离散切换点**；字节级有效性统计保证错误字节（坏序列/控制符/替换符）在损失中被 -100 屏蔽。
 
 ---
 
