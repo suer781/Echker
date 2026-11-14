@@ -17,9 +17,16 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import os
 from pathlib import Path
+import sys
 import time
 import unicodedata
+
+# 可扩展分段分配器：显著减少长会话反复分配/释放造成的显存碎片。
+# Windows 不支持（torch 会告警回退），仅在非 Windows 平台启用。
+if sys.platform != "win32":
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
@@ -38,6 +45,69 @@ def build_byte_maps(tok) -> tuple[dict[int, int], dict[int, int]]:
     byte_to_id = {b: vocab[chr(b)] for b in range(256)}
     id_to_byte = {i: b for b, i in byte_to_id.items()}
     return byte_to_id, id_to_byte
+
+
+class VramGovernor:
+    """自适应显存治理：水位监测 + 分级降档 + OOM 拥塞退避。
+
+    等级越高（数字越大），编码上限/回复长度越小、学习越早暂停——
+    用"放慢"换 OOM 概率。OOM 后强制保守若干轮（乘性降），平稳后
+    逐级恢复（加性升），类似 TCP 拥塞控制。水位用 cudaMemGetInfo
+    读取整机空闲显存，桌面应用波动会被自动感知。
+    """
+
+    # 等级 → (编码上限, 回复上限, 是否允许学习)
+    LEVELS = [
+        (512, 128, True),    # 等级 0：全速
+        (320, 96, True),     # 等级 1：缩上下文
+        (192, 64, False),    # 等级 2：只聊不学
+        (128, 48, False),    # 等级 3：最小生成
+    ]
+    # 空闲显存台阶（字节）：低于下一档就降一级。台阶按实测校准：
+    # 学习一步的增量峰值 ~0.22GB，阈值留少量余量，激进档由 OOM 退避兜底。
+    FREE_FLOORS = [int(0.40 * 1024**3), int(0.26 * 1024**3), int(0.15 * 1024**3)]
+    LEARN_FREE = int(0.26 * 1024**3)          # 学习要求的最低余量
+    SKIP_FREE = int(0.10 * 1024**3)           # 低于此值整轮跳过
+    CLEAN_TURNS_PER_RECOVERY = 10             # 每平稳 N 轮 OOM 退避恢复一级
+
+    def __init__(self) -> None:
+        self.backoff = 0        # OOM 强制等级下限（乘性降）
+        self.clean_streak = 0
+        self.last_level = None
+
+    def free_bytes(self) -> int:
+        try:
+            free, _total = torch.cuda.mem_get_info()
+            # 驱动层“空闲”不含 torch 缓存分配器扣住的空闲块——它们对
+            # torch 是立即可复用的。真实余量 = 驱动空闲 + 可复用缓存，
+            # 否则第一轮学习后缓存变大会被误判为 0。
+            cached_freeable = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+            return int(free) + max(0, cached_freeable)
+        except Exception:
+            return 1 << 62      # 读不到就视为充裕，交给 OOM 兜底
+
+    def note_ok(self) -> None:
+        self.clean_streak += 1
+        if self.clean_streak >= self.CLEAN_TURNS_PER_RECOVERY and self.backoff > 0:
+            self.backoff -= 1
+            self.clean_streak = 0
+
+    def note_oom(self) -> None:
+        self.backoff = min(len(self.LEVELS) - 1, max(self.backoff, 2))
+        self.clean_streak = 0
+
+    def plan(self, learn_requested: bool) -> tuple[int, int, int, bool, int]:
+        """返回 (等级, enc_cap, gen_tokens, 本轮是否学习, 当前空闲字节)。"""
+        free = self.free_bytes()
+        level = len(self.LEVELS) - 1
+        for index, floor in enumerate(self.FREE_FLOORS):
+            if free >= floor:
+                level = index
+                break
+        level = min(len(self.LEVELS) - 1, max(level, self.backoff))
+        enc_cap, gen_tokens, learn = self.LEVELS[level]
+        learn = learn and learn_requested and free >= self.LEARN_FREE and self.backoff <= 1
+        return level, enc_cap, gen_tokens, learn, free
 
 
 def decode_response(ids: list[int], id_to_byte: dict[int, int]) -> str:
@@ -145,6 +215,7 @@ def main() -> int:
         print("在线学习关闭（--learn 可开启）", flush=True)
 
     print("输入文字开始对话；/save 保存，/exit 退出。", flush=True)
+    governor = VramGovernor()
     turns_since_save = 0
     while True:
         try:
@@ -171,30 +242,46 @@ def main() -> int:
             print("已保存。")
             continue
 
+        level, enc_cap, gen_tokens, learn_this, free = governor.plan(args.learn)
+        if level != governor.last_level:
+            governor.last_level = level
+            print(
+                f"[自适应] 空闲显存 {free / 1024**3:.2f}GB → 等级{level}"
+                f"（编码≤{enc_cap}，回复≤{gen_tokens}，学习{'开' if learn_this else '停'}）",
+                flush=True,
+            )
+        if free < governor.SKIP_FREE:
+            torch.cuda.empty_cache()
+            print(f"[显存告急（{free / 1024**3:.2f}GB），本轮跳过。关闭占显存的应用后输入继续。]", flush=True)
+            continue
+        if level >= 2:
+            torch.cuda.empty_cache()   # 低水位时把缓存还给驱动，降低整机压力
         response_ids = None
         try:
-            enc = tok(user_text, add_special_tokens=True).input_ids[-ENC_CAP:]
+            enc = tok(user_text, add_special_tokens=True).input_ids[-enc_cap:]
             inputs = torch.tensor([enc], device="cuda")
             start = time.perf_counter()
             model.eval()
             with torch.no_grad():
                 output = model.generate(
                     input_ids=inputs,
-                    max_new_tokens=GEN_TOKENS,
+                    max_new_tokens=gen_tokens,
                     do_sample=False,
                     num_beams=1,
                     repetition_penalty=1.15,
                 )
             response_ids = output[0].tolist()
         except torch.cuda.OutOfMemoryError:
+            governor.note_oom()
             torch.cuda.empty_cache()
-            print("[显存不足，本轮生成失败。请关闭占显存的应用（壁纸引擎/浏览器硬件加速/游戏）后重试；对话已保留，输入继续。]", flush=True)
+            print("[显存不足，本轮生成失败（已自动降档）。关闭占显存的应用后输入继续。]", flush=True)
             continue
+        governor.note_ok()
         response = decode_response(response_ids, id_to_byte)
         print(f"助手: {response}")
         print(f"[生成 {time.perf_counter() - start:.2f}s]", flush=True)
 
-        if args.learn and response.strip():
+        if learn_this and response.strip():
             raw = response_bytes(response_ids, id_to_byte)
             mask, ratio = utf8_byte_mask(bytes(raw))
             valid_bytes = sum(mask)
@@ -213,6 +300,7 @@ def main() -> int:
                     loss = model(input_ids=inputs, labels=label_tensor).loss
                     loss_value = float(loss.item())
                 except torch.cuda.OutOfMemoryError:
+                    governor.note_oom()
                     torch.cuda.empty_cache()
                     print("[显存不足，本轮学习跳过]", flush=True)
                     continue
@@ -226,6 +314,7 @@ def main() -> int:
                         torch.nn.utils.clip_grad_norm_(trainable, 1.0)
                         optimizer.step()
                     except torch.cuda.OutOfMemoryError:
+                        governor.note_oom()
                         optimizer.zero_grad(set_to_none=True)
                         torch.cuda.empty_cache()
                         print("[显存不足，本轮学习跳过（部分梯度已回滚）]", flush=True)
