@@ -50,6 +50,39 @@ class Sample:
         return cls(**raw)
 
 
+class Seq2SeqSample(Sample):
+    """seq2seq 语义样本：ids=编码器（用户侧），labels=解码器（回应侧）。
+
+    长度天然不等——放宽 legacy 的等长校验；digest/clone 语义保持一致，
+    债务/回放账本可无差别持有两类样本。
+    """
+
+    def __post_init__(self) -> None:
+        if not self.created_at:
+            self.created_at = time.time()
+        if len(self.ids) < 2:
+            raise ValueError("sample ids must have length >= 2")
+
+    def clone(self, weight: float | None = None, source: str | None = None) -> "Seq2SeqSample":
+        return Seq2SeqSample(
+            ids=self.ids.copy(),
+            labels=self.labels.copy(),
+            weight=self.weight if weight is None else weight,
+            source=self.source if source is None else source,
+            created_at=self.created_at,
+            loss=self.loss,
+        )
+
+
+def sample_from_dict(raw: dict) -> Sample:
+    """容错重建：legacy 等长样本走正常构造；ByT5 双半球的 seq2seq 样本
+    （encoder/decoder 长度不等）重建为 Seq2SeqSample。"""
+    try:
+        return Sample(**raw)
+    except ValueError:
+        return Seq2SeqSample(**raw)
+
+
 class StatisticalCleaner:
     """Robust EWMA statistics; downweights outliers instead of judging truth.
 
@@ -261,7 +294,7 @@ class ReplayBuffer:
     def load_dict(self, raw: dict[str, Any]) -> None:
         self.samples = {}
         for item in raw.get("samples", []):
-            sample = Sample.from_dict(item)
+            sample = sample_from_dict(item)
             self.samples[sample.digest] = sample
         self.cleaner.load_dict(raw.get("cleaner", {}))
         self._evict()
@@ -414,7 +447,7 @@ class DebtLedger:
     def load_dict(self, raw: dict[str, Any]) -> None:
         self.items = {}
         for value in raw.get("items", []):
-            item = Sample.from_dict(value)
+            item = sample_from_dict(value)
             self.items[item.digest] = item
         self.total_created = int(raw.get("total_created", 0))
         self.total_repaid = int(raw.get("total_repaid", 0))
