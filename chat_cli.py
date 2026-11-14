@@ -5,6 +5,9 @@ Every turn can update the model's own attention q/v weights on the exchange
 The language core is Google's pre-trained ByT5; what the project fine-tuned
 and keeps learning online is the dialogue behaviour on top of it.
 
+学习统计只认正确字词构成的字节：逐字节 UTF-8 有效性 + 字符类别合法性，
+错误字节在损失里被屏蔽（-100），模型物理上学不到它们；有效率过低的整轮拒学。
+
 Usage:
   python chat_cli.py                     # chat with per-turn online learning
   python chat_cli.py --no-learn          # chat only
@@ -13,8 +16,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import codecs
 from pathlib import Path
 import time
+import unicodedata
 
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
@@ -46,6 +51,61 @@ def decode_response(ids: list[int], id_to_byte: dict[int, int]) -> str:
         if byte is not None:
             raw.append(byte)
     return raw.decode("utf-8", errors="replace")
+
+
+def response_bytes(ids: list[int], id_to_byte: dict[int, int]) -> bytearray:
+    raw = bytearray()
+    for token in ids:
+        if token in (0, 1, 2):  # pad / eos / unk 不是字节
+            if token == 1:
+                break
+            continue
+        byte = id_to_byte.get(token)
+        if byte is not None:
+            raw.append(byte)
+    return raw
+
+
+def _char_ok(ch: str) -> bool:
+    """正确字词的字符类别：字母/数字/标点/符号/空白；控制符与替换符是错误。"""
+    if ch == "\ufffd":
+        return False
+    category = unicodedata.category(ch)
+    return category[0] in {"L", "N", "P", "S"} or ch.isspace()
+
+
+def utf8_byte_mask(raw: bytes) -> tuple[list[bool], float]:
+    """逐字节有效性统计。
+
+    mask[i]=True 表示 raw[i] 属于正确字词的字节：
+    - 能构成合法 UTF-8 序列（坏序列字节、尾部截断字节标记 False）；
+    - 解出的字符属于正常类别（控制符 / U+FFFD 对应字节标记 False）。
+    返回 (mask, valid_ratio)。
+    """
+    mask = [True] * len(raw)
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    i = 0
+    while i < len(raw):
+        pending = len(decoder.getstate()[0])
+        try:
+            emitted = decoder.decode(raw[i : i + 1])
+        except UnicodeDecodeError:
+            decoder.reset()
+            mask[i] = False
+            i += 1
+            continue
+        i += 1
+        if emitted and not _char_ok(emitted):
+            for j in range(max(0, i - pending - 1), i):
+                mask[j] = False
+    try:
+        decoder.decode(b"", final=True)
+    except UnicodeDecodeError:
+        buffered = decoder.getstate()[0]
+        for j in range(max(0, len(raw) - len(buffered)), len(raw)):
+            mask[j] = False
+    valid = sum(mask)
+    return mask, (valid / len(raw) if raw else 0.0)
 
 
 def main() -> int:
@@ -120,29 +180,40 @@ def main() -> int:
         print(f"[生成 {time.perf_counter() - start:.2f}s]", flush=True)
 
         if args.learn and response.strip():
-            labels = tok(response, add_special_tokens=False).input_ids[-DEC_CAP:] + [tok.eos_token_id]
-            label_tensor = torch.tensor([labels], device="cuda")
-            model.train()
-            loss = model(input_ids=inputs, labels=label_tensor).loss
-            loss_value = float(loss.item())
-            # 学习质量闸门：交换损失过高说明模型对这段内容毫无把握（多半是
-            # 自己的退化输出），把垃圾当教材会自我污染权重——跳过本轮学习。
-            if loss_value > 2.0:
-                print(f"[本轮学习跳过：loss={loss_value:.4f} 超过阈值 2.0]", flush=True)
+            raw = response_bytes(response_ids, id_to_byte)
+            mask, ratio = utf8_byte_mask(bytes(raw))
+            valid_bytes = sum(mask)
+            # 错误字节直接从损失中屏蔽：labels 在非法/坏字符位置 = -100，
+            # 模型对这些字节不产生梯度，物理上学不到错误字节。
+            if valid_bytes < 4 or ratio < 0.4:
+                print(f"[本轮学习跳过：正确字节占比 {ratio:.0%} 过低，整轮拒学]", flush=True)
             else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                turns_since_save += 1
-                print(f"[本轮学习 loss={loss_value:.4f}]", flush=True)
-                if turns_since_save >= args.save_every and not args.no_save:
-                    model.config.use_cache = True
-                    model.save_pretrained(FINETUNED, safe_serialization=True)
-                    tok.save_pretrained(FINETUNED)
-                    model.config.use_cache = False
-                    turns_since_save = 0
-                    print("[自动保存]", flush=True)
+                byte_labels = [
+                    byte_to_id[byte] if ok else -100
+                    for byte, ok in zip(raw, mask)
+                ][-DEC_CAP:] + [tok.eos_token_id]
+                label_tensor = torch.tensor([byte_labels], device="cuda")
+                model.train()
+                loss = model(input_ids=inputs, labels=label_tensor).loss
+                loss_value = float(loss.item())
+                # 第二道闸门：屏蔽后的损失仍过高说明模型对正确部分也毫无把握
+                # （多半是退化输出），把垃圾当教材会自我污染权重——跳过。
+                if loss_value > 2.0:
+                    print(f"[本轮学习跳过：loss={loss_value:.4f} 超过阈值 2.0]", flush=True)
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    turns_since_save += 1
+                    print(f"[本轮学习 loss={loss_value:.4f}]", flush=True)
+                    if turns_since_save >= args.save_every and not args.no_save:
+                        model.config.use_cache = True
+                        model.save_pretrained(FINETUNED, safe_serialization=True)
+                        tok.save_pretrained(FINETUNED)
+                        model.config.use_cache = False
+                        turns_since_save = 0
+                        print("[自动保存]", flush=True)
     return 0
 
 
