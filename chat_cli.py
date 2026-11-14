@@ -53,27 +53,26 @@ class VramGovernor:
     三个连续控制量，全部是空闲显存的光滑函数（smoothstep 插值，无拐点）：
     - enc_cap：编码上下文上限，(0.08GB, 96) → (0.45GB, 512)；
     - gen_tokens：回复长度，(0.08GB, 48) → (0.45GB, 128)；
-    - 学习占空比 p_learn：(0.08GB, 0.34) → (0.30GB, 1.0)，累加器（Bresenham）
-      实现无级节奏——0.87 就是每 10 轮平滑地学 8.7 次，而不是死板周期。
+    - 学习强度 intensity：(0.08GB, 0.25) → (0.30GB, 1.0)，直接作为等效
+      学习率的缩放系数——每轮都学习，显存紧张时步子连续变小。
     时间平滑：水位走 EMA；OOM 用"压力"标量平滑收紧并逐轮指数衰减。
-    学习占空比永不为 0——学习可以无限放慢，但从不停止。
+    "学/不学"之间不存在离散切换点：强度曲线连续，学习永不停止。
     """
 
     ENC_MAX, ENC_MIN = 512, 96
     GEN_MAX, GEN_MIN = 128, 48
     ANCHOR_HI = 0.45 * 1024**3      # 达到此空闲即全速
     ANCHOR_LO = 0.08 * 1024**3      # 低于此空闲贴地滑行
-    DUTY_HI, DUTY_LO = 1.0, 0.34
-    DUTY_ANCHOR_HI = 0.30 * 1024**3
+    INTENSITY_HI, INTENSITY_LO = 1.0, 0.25
+    INTENSITY_ANCHOR_HI = 0.30 * 1024**3
     SKIP_FREE = int(0.10 * 1024**3)   # 连生成都不安全的物理底线
     EMA_ALPHA = 0.30
-    OOM_JUMP, OOM_DECAY, OOM_DUTY_PENALTY = 0.5, 0.85, 0.5
-    DUTY_FLOOR = 0.25
+    OOM_JUMP, OOM_DECAY, OOM_INTENSITY_PENALTY = 0.5, 0.85, 0.5
+    INTENSITY_FLOOR = 0.15            # OOM 压力满格时的学习强度下限（仍不为零）
 
     def __init__(self) -> None:
         self.ema = None
         self.pressure = 0.0
-        self.accumulator = 0.0
 
     def free_bytes(self) -> int:
         try:
@@ -98,20 +97,22 @@ class VramGovernor:
         self.pressure = min(1.0, self.pressure + self.OOM_JUMP)
         torch.cuda.empty_cache()
 
-    def plan(self, learn_requested: bool) -> tuple[int, int, bool, float, float, float]:
-        """返回 (enc_cap, gen_tokens, 本轮是否学习, 学习占空比, 压力, 空闲字节)。"""
+    def plan(self, learn_requested: bool) -> tuple[int, int, float, float, float, float]:
+        """返回 (enc_cap, gen_tokens, 学习强度, 压力, 空闲字节, 学习率缩放)。
+
+        学习强度 = 等效学习率缩放系数：每轮都学，强度随显存曲线连续缩放。
+        """
         free = self.observe()
         # OOM 压力平滑收紧有效余量：不必撞第二次墙才开始让路
         effective = free * (1.0 - 0.35 * self.pressure)
         enc_cap = int(self._interp(effective, self.ANCHOR_LO, self.ANCHOR_HI, self.ENC_MIN, self.ENC_MAX))
         gen_tokens = int(self._interp(effective, self.ANCHOR_LO, self.ANCHOR_HI, self.GEN_MIN, self.GEN_MAX))
-        duty = self._interp(effective, self.ANCHOR_LO, self.DUTY_ANCHOR_HI, self.DUTY_LO, self.DUTY_HI)
-        duty = max(self.DUTY_FLOOR, min(self.DUTY_HI, duty * (1.0 - self.OOM_DUTY_PENALTY * self.pressure)))
-        self.accumulator += duty
-        learn_this = learn_requested and self.accumulator >= 1.0
-        if learn_this:
-            self.accumulator -= 1.0
-        return enc_cap, gen_tokens, learn_this, duty, self.pressure, free
+        intensity = self._interp(effective, self.ANCHOR_LO, self.INTENSITY_ANCHOR_HI, self.INTENSITY_LO, self.INTENSITY_HI)
+        intensity = max(
+            self.INTENSITY_FLOOR,
+            min(self.INTENSITY_HI, intensity * (1.0 - self.OOM_INTENSITY_PENALTY * self.pressure)),
+        )
+        return enc_cap, gen_tokens, intensity, self.pressure, free, intensity
 
     def observe(self) -> float:
         free = float(self.free_bytes())
@@ -255,10 +256,10 @@ def main() -> int:
             print("已保存。")
             continue
 
-        enc_cap, gen_tokens, learn_this, duty, pressure, free = governor.plan(args.learn)
+        enc_cap, gen_tokens, intensity, pressure, free, lr_scale = governor.plan(args.learn)
         print(
             f"[自适应] 空闲 {free / 1024**3:.2f}GB · enc≤{enc_cap} · 回复≤{gen_tokens}"
-            f" · 学习占空 {duty:.2f} · 压力 {pressure:.2f}",
+            f" · 学习强度 {intensity:.2f} · 压力 {pressure:.2f}",
             flush=True,
         )
         if free < governor.SKIP_FREE:
@@ -288,7 +289,7 @@ def main() -> int:
         print(f"助手: {response}")
         print(f"[生成 {time.perf_counter() - start:.2f}s]", flush=True)
 
-        if learn_this and response.strip():
+        if args.learn and response.strip():
             raw = response_bytes(response_ids, id_to_byte)
             mask, ratio = utf8_byte_mask(bytes(raw))
             valid_bytes = sum(mask)
@@ -316,6 +317,10 @@ def main() -> int:
                     print(f"[本轮学习跳过：loss={loss_value:.4f} 超过阈值 2.0]", flush=True)
                 else:
                     try:
+                        # 曲线自适应的核心：每轮都学习，等效学习率随显存曲线
+                        # 连续缩放——显存紧张时步子变小（放慢），永不停轮。
+                        for group in optimizer.param_groups:
+                            group["lr"] = 1e-4 * lr_scale
                         loss.backward()
                         torch.nn.utils.clip_grad_norm_(trainable, 1.0)
                         optimizer.step()
@@ -326,7 +331,7 @@ def main() -> int:
                         continue
                     optimizer.zero_grad(set_to_none=True)
                     turns_since_save += 1
-                    print(f"[本轮学习 loss={loss_value:.4f}]", flush=True)
+                    print(f"[本轮学习 loss={loss_value:.4f} 强度={lr_scale:.2f}]", flush=True)
                     if turns_since_save >= args.save_every and not args.no_save:
                         model.config.use_cache = True
                         model.save_pretrained(FINETUNED, safe_serialization=True)
