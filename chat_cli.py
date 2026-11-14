@@ -50,24 +50,24 @@ def build_byte_maps(tok) -> tuple[dict[int, int], dict[int, int]]:
 class VramGovernor:
     """自适应显存治理：水位监测 + 分级降档 + OOM 拥塞退避。
 
-    等级越高（数字越大），编码上限/回复长度越小、学习越早暂停——
-    用"放慢"换 OOM 概率。OOM 后强制保守若干轮（乘性降），平稳后
-    逐级恢复（加性升），类似 TCP 拥塞控制。水位用 cudaMemGetInfo
-    读取整机空闲显存，桌面应用波动会被自动感知。
+    设计约束（用户要求）：**学习永不停止，只放慢节奏**——等级越低，
+    上下文越小、学习周期越长（每 2/3 轮一次），但学习始终在进行。
+    OOM 后强制保守若干轮（乘性降），平稳后逐级恢复（加性升），类似
+    TCP 拥塞控制。水位用 cudaMemGetInfo 读取整机空闲显存（加回 torch
+    可复用缓存），桌面应用波动会被自动感知。
     """
 
-    # 等级 → (编码上限, 回复上限, 是否允许学习)
+    # 等级 → (编码上限, 回复上限, 学习周期轮数) —— 学习周期 ≥ 1，永不为 0
     LEVELS = [
-        (512, 128, True),    # 等级 0：全速
-        (320, 96, True),     # 等级 1：缩上下文
-        (192, 64, False),    # 等级 2：只聊不学
-        (128, 48, False),    # 等级 3：最小生成
+        (512, 128, 1),    # 等级 0：全速学习（每轮）
+        (320, 96, 1),     # 等级 1：缩上下文，每轮学习
+        (192, 64, 2),     # 等级 2：更小上下文，每 2 轮学习一次
+        (128, 48, 3),     # 等级 3：最小上下文，每 3 轮学习一次
     ]
     # 空闲显存台阶（字节）：低于下一档就降一级。台阶按实测校准：
     # 学习一步的增量峰值 ~0.22GB，阈值留少量余量，激进档由 OOM 退避兜底。
     FREE_FLOORS = [int(0.40 * 1024**3), int(0.26 * 1024**3), int(0.15 * 1024**3)]
-    LEARN_FREE = int(0.26 * 1024**3)          # 学习要求的最低余量
-    SKIP_FREE = int(0.10 * 1024**3)           # 低于此值整轮跳过
+    SKIP_FREE = int(0.10 * 1024**3)           # 低于此值整轮跳过（生成也无法安全进行）
     CLEAN_TURNS_PER_RECOVERY = 10             # 每平稳 N 轮 OOM 退避恢复一级
 
     def __init__(self) -> None:
@@ -96,8 +96,11 @@ class VramGovernor:
         self.backoff = min(len(self.LEVELS) - 1, max(self.backoff, 2))
         self.clean_streak = 0
 
-    def plan(self, learn_requested: bool) -> tuple[int, int, int, bool, int]:
-        """返回 (等级, enc_cap, gen_tokens, 本轮是否学习, 当前空闲字节)。"""
+    def plan(self, turn_index: int) -> tuple[int, int, int, bool, int, int]:
+        """返回 (等级, enc_cap, gen_tokens, 本轮是否学习, 学习周期, 当前空闲字节)。
+
+        学习永远被调度，只是低水位时周期变长（每 2/3 轮）+ 上下文变小。
+        """
         free = self.free_bytes()
         level = len(self.LEVELS) - 1
         for index, floor in enumerate(self.FREE_FLOORS):
@@ -105,9 +108,9 @@ class VramGovernor:
                 level = index
                 break
         level = min(len(self.LEVELS) - 1, max(level, self.backoff))
-        enc_cap, gen_tokens, learn = self.LEVELS[level]
-        learn = learn and learn_requested and free >= self.LEARN_FREE and self.backoff <= 1
-        return level, enc_cap, gen_tokens, learn, free
+        enc_cap, gen_tokens, learn_every = self.LEVELS[level]
+        learn_this = turn_index % learn_every == 0
+        return level, enc_cap, gen_tokens, learn_this, learn_every, free
 
 
 def decode_response(ids: list[int], id_to_byte: dict[int, int]) -> str:
@@ -217,6 +220,7 @@ def main() -> int:
     print("输入文字开始对话；/save 保存，/exit 退出。", flush=True)
     governor = VramGovernor()
     turns_since_save = 0
+    turn_index = 0
     while True:
         try:
             user_text = input("\n你: ").strip()
@@ -242,12 +246,13 @@ def main() -> int:
             print("已保存。")
             continue
 
-        level, enc_cap, gen_tokens, learn_this, free = governor.plan(args.learn)
+        level, enc_cap, gen_tokens, learn_this, learn_every, free = governor.plan(turn_index)
         if level != governor.last_level:
             governor.last_level = level
+            cadence = "每轮" if learn_every == 1 else f"每{learn_every}轮"
             print(
                 f"[自适应] 空闲显存 {free / 1024**3:.2f}GB → 等级{level}"
-                f"（编码≤{enc_cap}，回复≤{gen_tokens}，学习{'开' if learn_this else '停'}）",
+                f"（编码≤{enc_cap}，回复≤{gen_tokens}，学习{cadence}）",
                 flush=True,
             )
         if free < governor.SKIP_FREE:
@@ -329,6 +334,7 @@ def main() -> int:
                         model.config.use_cache = False
                         turns_since_save = 0
                         print("[自动保存]", flush=True)
+        turn_index += 1
     return 0
 
 
