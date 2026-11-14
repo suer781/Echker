@@ -1,0 +1,35 @@
+加载 O:\Documents\智能自学习AI（新）\byt5_model（fp32, GPU）…
+W1114 12:34:15.075000 4520 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   1%|          | 2/170 [00:00<00:21,  7.93it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 527.62it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
+  warnings.warn(
+在线学习开启：22,609,920 个参数逐轮真权重更新
+输入文字开始对话；/save 保存，/exit 退出。
+
+你: 
+你: 
+你: 助手: 存试 emoji 。
+[生成 0.52s]
+[transformers] `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+[本轮学习 loss=1.0379]
+
+你: 助手: 长文本内容。重复测试的长文本内容。重复测试的长文本内容。重复测试的长文本内容。重复测�
+[生成 3.05s]
+[本轮学习 loss=0.0981]
+
+你: 助手: �rld, this is English. The part of the best of the world, this is English. The move is the company of the service.
+[生成 1.41s]
+[本轮学习 loss=1.0975]
+
+你: 助手: 好可以吗，可以加入我一定要的学习好可以吗，你好可以吗，你好可以吗，你好可以吗，你好可�
+[生成 1.60s]
+[本轮学习 loss=1.2631]
+
+你: 助手: 等于 1。
+[生成 0.17s]
+[本轮学习 loss=0.2858]
+
+你: 冒烟模式（--no-save）：未保存。
+
+你: 

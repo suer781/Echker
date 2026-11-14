@@ -120,7 +120,16 @@ def main() -> int:
     print(f"加载 {source}（fp32, GPU）…", flush=True)
     tok = AutoTokenizer.from_pretrained(source)
     model = AutoModelForSeq2SeqLM.from_pretrained(source, dtype=torch.float32)
-    model.cuda()
+    if not torch.cuda.is_available():
+        print("[错误] 未检测到可用 CUDA。本系统按设计在 GPU 上推理与学习；请检查显卡驱动与 PyTorch CUDA 安装后重试。")
+        return 1
+    try:
+        model.cuda()
+    except torch.cuda.OutOfMemoryError:
+        print("[错误] 显存不足（CUDA OOM）。byt5-small fp32 需要 ~1.7GB 空闲显存：")
+        print("       - 关闭占用显存的应用（壁纸引擎、浏览器硬件加速、游戏等）后重试；")
+        print("       - 或在显存更大的显卡上运行。")
+        return 1
     model.gradient_checkpointing_enable()
     byte_to_id, id_to_byte = build_byte_maps(tok)
 
@@ -162,19 +171,25 @@ def main() -> int:
             print("已保存。")
             continue
 
-        enc = tok(user_text, add_special_tokens=True).input_ids[-ENC_CAP:]
-        inputs = torch.tensor([enc], device="cuda")
-        start = time.perf_counter()
-        model.eval()
-        with torch.no_grad():
-            output = model.generate(
-                input_ids=inputs,
-                max_new_tokens=GEN_TOKENS,
-                do_sample=False,
-                num_beams=1,
-                repetition_penalty=1.15,
-            )
-        response_ids = output[0].tolist()
+        response_ids = None
+        try:
+            enc = tok(user_text, add_special_tokens=True).input_ids[-ENC_CAP:]
+            inputs = torch.tensor([enc], device="cuda")
+            start = time.perf_counter()
+            model.eval()
+            with torch.no_grad():
+                output = model.generate(
+                    input_ids=inputs,
+                    max_new_tokens=GEN_TOKENS,
+                    do_sample=False,
+                    num_beams=1,
+                    repetition_penalty=1.15,
+                )
+            response_ids = output[0].tolist()
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            print("[显存不足，本轮生成失败。请关闭占显存的应用（壁纸引擎/浏览器硬件加速/游戏）后重试；对话已保留，输入继续。]", flush=True)
+            continue
         response = decode_response(response_ids, id_to_byte)
         print(f"助手: {response}")
         print(f"[生成 {time.perf_counter() - start:.2f}s]", flush=True)
@@ -193,17 +208,28 @@ def main() -> int:
                     for byte, ok in zip(raw, mask)
                 ][-DEC_CAP:] + [tok.eos_token_id]
                 label_tensor = torch.tensor([byte_labels], device="cuda")
-                model.train()
-                loss = model(input_ids=inputs, labels=label_tensor).loss
-                loss_value = float(loss.item())
+                try:
+                    model.train()
+                    loss = model(input_ids=inputs, labels=label_tensor).loss
+                    loss_value = float(loss.item())
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    print("[显存不足，本轮学习跳过]", flush=True)
+                    continue
                 # 第二道闸门：屏蔽后的损失仍过高说明模型对正确部分也毫无把握
                 # （多半是退化输出），把垃圾当教材会自我污染权重——跳过。
                 if loss_value > 2.0:
                     print(f"[本轮学习跳过：loss={loss_value:.4f} 超过阈值 2.0]", flush=True)
                 else:
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-                    optimizer.step()
+                    try:
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                        optimizer.step()
+                    except torch.cuda.OutOfMemoryError:
+                        optimizer.zero_grad(set_to_none=True)
+                        torch.cuda.empty_cache()
+                        print("[显存不足，本轮学习跳过（部分梯度已回滚）]", flush=True)
+                        continue
                     optimizer.zero_grad(set_to_none=True)
                     turns_since_save += 1
                     print(f"[本轮学习 loss={loss_value:.4f}]", flush=True)
