@@ -1,0 +1,5 @@
+hello before
+ÿþ
+hello after
+/status
+/exit

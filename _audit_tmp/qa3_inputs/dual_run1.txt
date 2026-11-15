@@ -1,0 +1,5 @@
+你好，今天天气怎么样？
+Hello, how are you?
+/status
+/save
+/exit

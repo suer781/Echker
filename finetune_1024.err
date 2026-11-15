@@ -1,0 +1,8 @@
+W1115 23:58:22.426000 28156 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   1%|          | 2/170 [00:01<01:28,  1.89it/s]Loading weights:   2%|▏         | 3/170 [00:01<01:33,  1.79it/s]Loading weights:   2%|▏         | 4/170 [00:02<02:19,  1.19it/s]Loading weights:   3%|▎         | 5/170 [00:03<01:48,  1.52it/s]Loading weights:   4%|▎         | 6/170 [00:03<01:34,  1.74it/s]Loading weights:   4%|▍         | 7/170 [00:04<01:31,  1.78it/s]Loading weights:   5%|▍         | 8/170 [00:06<02:41,  1.00it/s]Loading weights:   5%|▌         | 9/170 [00:06<02:13,  1.21it/s]Loading weights: 100%|██████████| 170/170 [00:06<00:00, 25.59it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
+  warnings.warn(
+[transformers] `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\models\byt5\tokenization_byt5.py:139: UserWarning: This sequence already has </s>. In future versions this behavior may lead to duplicated eos tokens being added.
+  warnings.warn(

@@ -1,0 +1,33 @@
+双半球初始化（两侧均为 O:\Documents\智能自学习AI（新）\byt5_model）…
+W1114 19:31:50.605000 19196 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   4%|▎         | 6/170 [00:00<00:04, 40.67it/s]Loading weights:   6%|▋         | 11/170 [00:01<00:28,  5.53it/s]Loading weights:   8%|▊         | 13/170 [00:02<00:29,  5.25it/s]Loading weights:   9%|▉         | 15/170 [00:04<01:09,  2.23it/s]Loading weights:   9%|▉         | 16/170 [00:06<01:39,  1.54it/s]Loading weights:  10%|█         | 17/170 [00:06<01:37,  1.57it/s]Loading weights:  11%|█         | 18/170 [00:07<01:24,  1.79it/s]Loading weights: 100%|██████████| 170/170 [00:07<00:00, 23.70it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
+  warnings.warn(
+Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   2%|▏         | 4/170 [00:00<00:04, 38.01it/s]Loading weights:   5%|▍         | 8/170 [00:00<00:07, 20.28it/s]Loading weights:   8%|▊         | 14/170 [00:00<00:06, 24.42it/s]Loading weights:  11%|█         | 18/170 [00:00<00:07, 20.19it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 201.70it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+[双半球] 无历史检查点，按全新档启动。
+检查点：全新（两侧继承微调权重）
+双半球在线学习开启：每轮都更新活动侧权重，被动侧巩固，曲线自适应切换
+输入文字开始对话；/status 状态，/save 保存，/exit 退出。
+
+你: [自适应] 空闲 1.28GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 left
+助手(left): 怎么样，你好，你好，今天天气怎么样，你好，你好，你好，你好，你好，你好，你好，你好，�
+[生成 2.65s]
+[transformers] `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+[left 学习 loss=0.9434 强度=1.00]
+
+你: [自适应] 空闲 1.27GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 left
+助手(left): от ， hello, how are you? Hello, how are you? Hello, how are you? Hello, how are you? Hello, how are you? Hello, how are you?
+[生成 1.55s]
+[left 学习 loss=0.7218 强度=1.00]
+
+你: active=left 切换次数=0 紧迫度=0.156 累计=0.199 被动侧容量=0.000 被动侧待偿债务=0
+
+你: Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:05<00:00,  5.93s/it]Writing model shards: 100%|██████████| 1/1 [00:05<00:00,  5.93s/it]
+Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:15<00:00, 15.15s/it]Writing model shards: 100%|██████████| 1/1 [00:15<00:00, 15.15s/it]
+已保存。
+
+你: Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:15<00:00, 15.35s/it]Writing model shards: 100%|██████████| 1/1 [00:15<00:00, 15.35s/it]
+Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:17<00:00, 17.11s/it]Writing model shards: 100%|██████████| 1/1 [00:17<00:00, 17.11s/it]
+已保存并退出。

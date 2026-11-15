@@ -1,0 +1,10 @@
+failed to restore checkpoint O:\Documents\智能自学习AI（新）\tests\tmp02vj88ye\latest.pt
+Traceback (most recent call last):
+  File "O:\Documents\智能自学习AI（新）\life_agent\store.py", line 203, in load
+    raise ValueError(f"checkpoint fingerprint mismatch: {differences}")
+ValueError: checkpoint fingerprint mismatch: ['.adaptive_switch.baseline_active_work: 0.0 != 999999.0']
+.......................................................
+----------------------------------------------------------------------
+Ran 55 tests in 9.606s
+
+OK

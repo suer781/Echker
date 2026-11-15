@@ -1,0 +1,5 @@
+你喜欢什么音乐
+Do you like music?
+/status
+/save
+/exit

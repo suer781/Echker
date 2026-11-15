@@ -16,3 +16,15 @@ byt5_model/
 finetune_byt5*.log
 postfix-1-console.log
 validation_runs/postfix-1-console.log
+
+# 双半球状态目录（大检查点不入库）
+state_dual/
+_audit_tmp/qa_dual_state/
+_audit_tmp/qa_cli_state/
+_audit_tmp/qa_reg_state/
+_audit_tmp/roundtrip_state/
+*.bak
+_audit_tmp/qa_dual_edge_state/
+_audit_tmp/dbg_state/
+_audit_tmp/dbg_state2/
+*.brainpack

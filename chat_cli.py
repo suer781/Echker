@@ -62,10 +62,10 @@ class VramGovernor:
     ENC_MAX, ENC_MIN = 512, 96
     GEN_MAX, GEN_MIN = 128, 48
     ANCHOR_HI = 0.45 * 1024**3      # 达到此空闲即全速
-    ANCHOR_LO = 0.08 * 1024**3      # 低于此空闲贴地滑行
+    ANCHOR_LO = 0.12 * 1024**3      # 曲线下端锚点（须高于 SKIP_FREE，避免死区）
     INTENSITY_HI, INTENSITY_LO = 1.0, 0.25
     INTENSITY_ANCHOR_HI = 0.30 * 1024**3
-    SKIP_FREE = int(0.10 * 1024**3)   # 连生成都不安全的物理底线
+    SKIP_FREE = int(0.08 * 1024**3)   # 连生成都不安全的物理底线（低于曲线锚点）
     EMA_ALPHA = 0.30
     OOM_JUMP, OOM_DECAY, OOM_INTENSITY_PENALTY = 0.5, 0.85, 0.5
     INTENSITY_FLOOR = 0.15            # OOM 压力满格时的学习强度下限（仍不为零）
@@ -174,8 +174,11 @@ def utf8_byte_mask(raw: bytes) -> tuple[list[bool], float]:
         try:
             emitted = decoder.decode(raw[i : i + 1])
         except UnicodeDecodeError:
+            # P2-2：坏字节会让缓冲里悬挂的 lead 字节一起变非法——整段标 False
+            pending = len(decoder.getstate()[0])
+            for j in range(max(0, i - pending), i + 1):
+                mask[j] = False
             decoder.reset()
-            mask[i] = False
             i += 1
             continue
         i += 1
@@ -198,6 +201,9 @@ def main() -> int:
     parser.add_argument("--no-learn", dest="learn", action="store_false")
     parser.add_argument("--no-save", action="store_true", help="冒烟测试模式：不写任何检查点")
     parser.add_argument("--save-every", type=int, default=20, help="autosave every N learned turns")
+    parser.add_argument("--temperature", type=float, default=0.8, help="采样温度（0=贪心）")
+    parser.add_argument("--history-turns", type=int, default=3, help="多轮上下文轮数")
+    parser.add_argument("--no-context", action="store_true", help="关闭多轮上下文")
     args = parser.parse_args()
 
     source = FINETUNED if (FINETUNED / "config.json").exists() else BASE
@@ -231,24 +237,40 @@ def main() -> int:
     print("输入文字开始对话；/save 保存，/exit 退出。", flush=True)
     governor = VramGovernor()
     turns_since_save = 0
+    history = []
     while True:
         try:
             user_text = input("\n你: ").strip()
         except (EOFError, KeyboardInterrupt):
             user_text = "/exit"
+        except UnicodeDecodeError as exc:
+            print(f"[输入编码错误，已忽略该行：{exc}]", flush=True)
+            continue
         if not user_text:
             continue
-        if user_text == "/exit":
+        cmd = user_text.lower()   # P1-1
+        if user_text.startswith("/") and cmd not in ("/exit", "/save"):
+            print("[未知命令。可用命令：/save /exit]", flush=True)
+            continue
+        if cmd == "/exit":
             if args.learn and not args.no_save:
+                import shutil as _shutil
+                saf = FINETUNED / "model.safetensors"
+                if saf.exists():
+                    _shutil.copy2(saf, FINETUNED / "model.safetensors.bak")
                 model.config.use_cache = True
                 model.save_pretrained(FINETUNED, safe_serialization=True)
                 tok.save_pretrained(FINETUNED)
                 print("已保存并退出。")
             break
-        if user_text == "/save":
+        if cmd == "/save":
             if args.no_save:
                 print("冒烟模式（--no-save）：未保存。")
                 continue
+            import shutil as _shutil
+            saf = FINETUNED / "model.safetensors"
+            if saf.exists():
+                _shutil.copy2(saf, FINETUNED / "model.safetensors.bak")
             model.config.use_cache = True
             model.save_pretrained(FINETUNED, safe_serialization=True)
             tok.save_pretrained(FINETUNED)
@@ -267,24 +289,29 @@ def main() -> int:
             print(f"[显存告急（{free / 1024**3:.2f}GB），本轮跳过。关闭占显存的应用后输入继续。]", flush=True)
             continue
         response_ids = None
-        try:
-            enc = tok(user_text, add_special_tokens=True).input_ids[-enc_cap:]
-            inputs = torch.tensor([enc], device="cuda")
-            start = time.perf_counter()
-            model.eval()
-            with torch.no_grad():
-                output = model.generate(
-                    input_ids=inputs,
-                    max_new_tokens=gen_tokens,
-                    do_sample=False,
-                    num_beams=1,
-                    repetition_penalty=1.15,
-                )
-            response_ids = output[0].tolist()
-        except torch.cuda.OutOfMemoryError:
-            governor.bump_pressure()
-            print("[显存不足，本轮生成失败（压力已上调，系统自动收紧）。输入继续。]", flush=True)
-            continue
+        context_text = ""
+        if not args.no_context:
+            for h_user, h_resp in history[-args.history_turns:]:
+                context_text += "用户：" + h_user + chr(10) + "助手：" + h_resp + chr(10)
+        full_text = context_text + "用户：" + user_text + chr(10) + "助手："
+        enc = tok(full_text, add_special_tokens=True).input_ids[-512:]
+        inputs = torch.tensor([enc], device="cuda")
+        start = time.perf_counter()
+        model.eval()
+        model.config.use_cache = True
+        sampling = args.temperature > 0
+        with torch.no_grad():
+            output = model.generate(
+                input_ids=inputs,
+                max_new_tokens=gen_tokens,
+                do_sample=sampling,
+                temperature=max(args.temperature, 1e-5) if sampling else None,
+                top_k=40 if sampling else None,
+                num_beams=1,
+                repetition_penalty=1.5,
+            )
+        model.config.use_cache = False
+        response_ids = output[0].tolist()
         response = decode_response(response_ids, id_to_byte)
         print(f"助手: {response}")
         print(f"[生成 {time.perf_counter() - start:.2f}s]", flush=True)
@@ -322,7 +349,12 @@ def main() -> int:
                         for group in optimizer.param_groups:
                             group["lr"] = 1e-4 * lr_scale
                         loss.backward()
-                        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                        total_norm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                        # P2-7：反向 NaN 卫兵——范数非有限时 step 会毒化权重
+                        if not torch.isfinite(total_norm):
+                            optimizer.zero_grad(set_to_none=True)
+                            print("[本轮学习跳过：梯度非有限]", flush=True)
+                            continue
                         optimizer.step()
                     except torch.cuda.OutOfMemoryError:
                         governor.bump_pressure()

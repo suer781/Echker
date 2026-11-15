@@ -1,0 +1,33 @@
+加载 O:\Documents\智能自学习AI（新）\byt5_model（fp32, GPU）…
+W1114 17:12:53.047000 19220 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   4%|▎         | 6/170 [00:00<00:04, 39.99it/s]Loading weights:   8%|▊         | 13/170 [00:00<00:04, 38.90it/s]Loading weights:  11%|█         | 18/170 [00:00<00:03, 42.01it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 382.85it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
+  warnings.warn(
+在线学习开启：22,609,920 个参数逐轮真权重更新
+输入文字开始对话；/save 保存，/exit 退出。
+
+你: [自适应] 空闲 1.28GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
+助手: 好可以吗，可以加入我可以吗，一定要学习好可以吗，你好可以吗，你好可以吗，你好可以吗
+[生成 1.65s]
+[transformers] `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+[本轮学习 loss=1.5741 强度=1.00]
+
+你: [自适应] 空闲 0.99GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
+助手: 等于 1。
+[生成 0.15s]
+[本轮学习 loss=0.3235 强度=1.00]
+
+你: [自适应] 空闲 0.79GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
+助手: 你好吗，你好吗！ 😀 你好吗，你好吗，你好吗，你好吗，你好吗，你好吗，你好吗，你好吗，�
+[生成 1.41s]
+[本轮学习 loss=0.7101 强度=1.00]
+
+你: [自适应] 空闲 0.65GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
+助手: 天气很好，今天天气很好，天天气很好，天天气很好，天天气很好，天天气很好，天天气很好，�
+[生成 1.44s]
+[本轮学习 loss=0.8961 强度=1.00]
+
+你: 冒烟模式（--no-save）：未保存。
+
+你: 

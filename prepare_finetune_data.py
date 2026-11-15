@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 DATA_ROOT = Path(r"O:\数据集")
 OUTPUT = ROOT / "finetune_data" / "dialogue_pairs.jsonl"
-MAX_PAIRS = 8000
+MAX_PAIRS = 40000
 MAX_CHARS = 1200
 LETTERS = "ABCD"
 
@@ -102,20 +102,20 @@ def main() -> int:
         path = logiqa2_root / name
         if path.exists() and not is_holdout(path):
             before = len(pairs)
-            pairs += logiqa2_jsonl(path)[:cap]
+            pairs += logiqa2_jsonl(path)
             print(f"LogiQA2 {name}: +{len(pairs) - before}")
     for name in ("Eval.txt", "Test.txt"):
         path = data_root / "01_LogiQA/LogiQA-1.0/LogiQA-dataset-master" / name
         if path.exists() and not is_holdout(path):
             before = len(pairs)
-            pairs += logiqa1_blocks(path)[:800]
+            pairs += logiqa1_blocks(path)
             print(f"LogiQA1 {name}: +{len(pairs) - before}")
     cmmlu_dir = data_root / "04_综合评测/CMMLU/test"
-    for path in sorted(cmmlu_dir.glob("*.csv"))[:14]:
+    for path in sorted(cmmlu_dir.glob("*.csv")):
         if is_holdout(path):
             continue
         before = len(pairs)
-        pairs += cmmlu_pairs(path)[:150]
+        pairs += cmmlu_pairs(path)
         print(f"CMMLU {path.name}: +{len(pairs) - before}")
 
     random.seed(7)

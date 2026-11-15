@@ -1,0 +1,21 @@
+双半球初始化（两侧均为 O:\Documents\智能自学习AI（新）\byt5_model）…
+W1114 20:38:33.810000 23212 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   2%|▏         | 3/170 [00:00<00:06, 25.50it/s]Loading weights:  36%|███▌      | 61/170 [00:00<00:00, 298.73it/s]Loading weights:  54%|█████▎    | 91/170 [00:00<00:00, 138.83it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 274.87it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
+  warnings.warn(
+Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   1%|          | 2/170 [00:00<00:08, 19.59it/s]Loading weights:   6%|▋         | 11/170 [00:00<00:03, 40.20it/s]Loading weights:  11%|█         | 18/170 [00:00<00:03, 45.66it/s]Loading weights:  17%|█▋        | 29/170 [00:00<00:02, 64.30it/s]Loading weights:  21%|██        | 36/170 [00:00<00:03, 43.10it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 209.80it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   2%|▏         | 3/170 [00:01<00:58,  2.84it/s]Loading weights:   2%|▏         | 4/170 [00:03<02:28,  1.12it/s]Loading weights:   4%|▎         | 6/170 [00:03<01:32,  1.78it/s]Loading weights:   5%|▌         | 9/170 [00:03<00:49,  3.27it/s]Loading weights:   9%|▉         | 16/170 [00:05<00:43,  3.58it/s]Loading weights:  11%|█         | 18/170 [00:06<00:55,  2.72it/s]Loading weights:  11%|█         | 19/170 [00:07<01:05,  2.32it/s]Loading weights: 100%|██████████| 170/170 [00:07<00:00, 21.76it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   2%|▏         | 4/170 [00:00<00:32,  5.15it/s]Loading weights:   5%|▍         | 8/170 [00:01<00:21,  7.65it/s]Loading weights:   5%|▌         | 9/170 [00:01<00:23,  6.90it/s]Loading weights:   6%|▌         | 10/170 [00:02<00:51,  3.12it/s]Loading weights:   8%|▊         | 13/170 [00:04<01:22,  1.90it/s]Loading weights:   9%|▉         | 16/170 [00:04<00:51,  2.97it/s]Loading weights:  12%|█▏        | 21/170 [00:05<00:36,  4.08it/s]Loading weights:  15%|█▌        | 26/170 [00:07<00:39,  3.64it/s]Loading weights:  16%|█▌        | 27/170 [00:08<00:48,  2.93it/s]Loading weights:  21%|██        | 35/170 [00:08<00:21,  6.16it/s]Loading weights: 100%|██████████| 170/170 [00:08<00:00, 20.84it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+检查点：已恢复
+双半球在线学习开启：每轮都更新活动侧权重，被动侧巩固，曲线自适应切换
+输入文字开始对话；/status 状态，/save 保存，/exit 退出。
+
+你: [输入编码错误，已忽略该行：'utf-8' codec can't decode byte 0xff in position 1: invalid start byte]
+
+你: Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:10<00:00, 10.26s/it]Writing model shards: 100%|██████████| 1/1 [00:10<00:00, 10.26s/it]
+Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:11<00:00, 11.98s/it]Writing model shards: 100%|██████████| 1/1 [00:11<00:00, 11.98s/it]
+已保存并退出。

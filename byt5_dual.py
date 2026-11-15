@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import random
+import shutil
 import time
 
 import torch
@@ -27,7 +28,7 @@ BASE = "google/byt5-small"
 BASE_LR = 1e-4
 ENC_MAX = 512
 DEC_CAP = 192
-SYNC_MIX = 0.01          # 每侧 1%，合计 2% 对称插值（legacy sync_mix=0.02）
+SYNC_MIX = 0.02          # 合计 2% 对称插值；执行时每侧 lerp SYNC_MIX/2=1%
 CONSOLIDATION_STEPS = 2
 DEBT_RETENTION = 0.35
 SWITCH_RATIO_SCALE = 2.0  # 紧迫度曲线：净压力增长 / max(容量,0.5) / 2.0 → smoothstep
@@ -63,18 +64,41 @@ class ByteHemisphere:
         """兼容旧调用点：仅当半球驻留 GPU 时返回模型，否则 None。"""
         return self.model if self.device == "cuda" else None
 
+    def _sync_device_field(self) -> None:
+        """以第一个参数的真实所在设备为准回写 device 字段（P1-3）。"""
+        try:
+            first = next(self.model.parameters())
+            self.device = "cuda" if first.is_cuda else "cpu"
+        except StopIteration:
+            self.device = "cpu"
+
     def ensure_gpu(self) -> None:
         if self.device == "cuda":
             return
-        self.model.to("cuda")
-        self.device = "cuda"
+        try:
+            self.model.to("cuda")
+        except torch.cuda.OutOfMemoryError:
+            self._sync_device_field()
+            # P2-1：部分迁移后尽力整体回到 CPU，避免撕裂驻留让下轮以
+            # RuntimeError（而非 OOM）崩溃
+            try:
+                self.model.to("cpu")
+            except Exception:
+                pass
+            self._sync_device_field()
+            raise
+        self._sync_device_field()
         self._move_optimizer_state("cuda")
 
     def to_cpu(self) -> None:
         if self.device == "cpu":
             return
-        self.model.to("cpu")
-        self.device = "cpu"
+        try:
+            self.model.to("cpu")
+        except Exception:
+            self._sync_device_field()
+            raise
+        self._sync_device_field()
         self._move_optimizer_state("cpu")
         torch.cuda.empty_cache()
 
@@ -104,15 +128,28 @@ class ByteHemisphere:
         loss = self.model(input_ids=inputs, labels=label_tensor).loss
         loss_value = float(loss.item())
         if not torch.isfinite(loss):
-            return {"loss": loss_value, "learned": False, "reason": "non-finite"}
+            # fp32 T5 的已知现象：个别批前向会出 NaN。降半强度重试一次，
+            # 仍非有限则跳过（权重不动，无污染）。
+            for group in self.optimizer.param_groups:
+                group["lr"] = BASE_LR * intensity * 0.5
+            self.optimizer.zero_grad(set_to_none=True)
+            loss = self.model(input_ids=inputs, labels=label_tensor).loss
+            loss_value = float(loss.item())
+            if not torch.isfinite(loss):
+                self.optimizer.zero_grad(set_to_none=True)
+                return {"loss": loss_value, "learned": False, "reason": "non-finite-retry"}
         if loss_value > max_loss:
             # 质量闸门：模型对正确字节毫无把握（多半是自己的退化输出），
             # 把垃圾当教材会自我污染权重——跳过本轮更新。
             return {"loss": loss_value, "learned": False, "reason": "quality-gate"}
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(
+        total_norm = torch.nn.utils.clip_grad_norm_(
             [p for p in self.model.parameters() if p.requires_grad], 1.0
         )
+        if not torch.isfinite(total_norm):
+            # P2-7：反向 NaN 会让 step 把权重整体毒化为 NaN 并静默停学
+            self.optimizer.zero_grad(set_to_none=True)
+            return {"loss": loss_value, "learned": False, "reason": "non-finite-grad"}
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
         return {"loss": loss_value, "learned": True, "intensity": intensity}
@@ -133,35 +170,60 @@ class ByteHemisphere:
         lr = BASE_LR * max(0.25, intensity)
         steps_done = 0
         last_loss = None
-        for step in range(CONSOLIDATION_STEPS):
-            sample = samples[step % len(samples)]
-            # seq2seq 语义：encoder = 用户字节，decoder = 回应字节（账本以字节为单位）
-            enc_tokens = [self.byte_to_id[b] for b in sample.ids[-ENC_MAX:] if b in self.byte_to_id]
-            dec_tokens = [self.byte_to_id[b] for b in sample.labels[-DEC_CAP:] if b in self.byte_to_id]
-            inputs = torch.tensor([enc_tokens], device="cuda")
-            targets = torch.tensor([dec_tokens], device="cuda")
-            for group in self.optimizer.param_groups:
-                group["lr"] = lr
-            self.optimizer.zero_grad(set_to_none=True)
-            out = self.model(input_ids=inputs, labels=targets)
-            loss = out.loss
-            if not torch.isfinite(loss):
-                continue
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in self.model.parameters() if p.requires_grad], 1.0
-            )
-            self.optimizer.step()
-            steps_done += 1
-            last_loss = float(loss.item())
-        if steps_done:
-            self.debt.commit_repayment(samples, trained_steps=steps_done)
+        trained_indices: list[int] = []
+        try:
+            for step in range(CONSOLIDATION_STEPS):
+                index = step % len(samples)
+                sample = samples[index]
+                # seq2seq 语义：encoder = 用户字节，decoder = 回应字节（账本以字节为单位）
+                enc_tokens = [self.byte_to_id[b] for b in sample.ids[-ENC_MAX:] if b in self.byte_to_id]
+                # TTT 语义：巩固目标 = 账本样本的观测输入自身（ids 的后段），
+                # 不再使用 labels（旧回应标签语义已废弃）
+                dec_source = sample.ids[-DEC_CAP:]
+                dec_tokens = [self.byte_to_id[b] for b in dec_source if b in self.byte_to_id]
+                dec_tokens += [self.tokenizer.eos_token_id]
+                inputs = torch.tensor([enc_tokens], device="cuda")
+                targets = torch.tensor([dec_tokens], device="cuda")
+                for group in self.optimizer.param_groups:
+                    group["lr"] = lr
+                self.optimizer.zero_grad(set_to_none=True)
+                out = self.model(input_ids=inputs, labels=targets)
+                loss = out.loss
+                loss_value = float(loss.item())
+                # P0-1：巩固侧同款质量闸门——活动侧被拒的垃圾不得经债务
+                # →巩固→交换的路径烧进被动侧真权重。
+                if not torch.isfinite(loss) or loss_value > 2.0:
+                    continue
+                loss.backward()
+                # P2-7：反向 NaN 卫兵——clip 范数非有限时 step 会把权重整体
+                # 变 NaN 并从此静默停学，必须在 step 前拦截。
+                total_norm = torch.nn.utils.clip_grad_norm_(
+                    [p for p in self.model.parameters() if p.requires_grad], 1.0
+                )
+                if not torch.isfinite(total_norm):
+                    self.optimizer.zero_grad(set_to_none=True)
+                    continue
+                self.optimizer.step()
+                steps_done += 1
+                trained_indices.append(index)
+                last_loss = loss_value
+        except Exception:
+            # P1-4：巩固失败必须释放 due() 的预留，否则这批债务本会话
+            # 永远不会被再次选中（legacy B4 修复的对应移植）。
+            self.debt.release_reservation(samples)
+            raise
+        if trained_indices:
+            # P1-1：只对**实际训练过的**样本记账/入回放/计入容量——
+            # 位置前缀切片会把被闸门拒绝的样本错记为已训练。
+            committed = [samples[i] for i in trained_indices]
+            self.debt.commit_repayment(committed, trained_steps=len(trained_indices))
             self.debt.decay_after_training()
-            stored_sample = samples[0]
             self.replay.add(Seq2SeqSample(
-                ids=stored_sample.ids.copy(), labels=stored_sample.labels.copy(),
+                ids=committed[0].ids.copy(), labels=committed[0].labels.copy(),
                 weight=1.0, source=f"consolidate:{self.name}",
             ))
+        # 全部剩余样本（含被拒/未训练的）释放预留，下轮可重选
+        self.debt.release_reservation(samples)
         return {"steps": steps_done, "loss": last_loss}
 
     # ---------- 压力与债务 ----------
@@ -178,36 +240,101 @@ class ByteHemisphere:
     # ---------- 持久化 ----------
 
     def save(self) -> None:
+        import os
+        import time as _time
         out = self.state_dir / "hemispheres" / self.name
-        out.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(".tmp")
+        # 用户实测发现的 bug：重复保存时残留 .tmp 会污染写入，且 Windows
+        # 目录 replace 对已存在目标/被杀软锁定的新档抛 PermissionError。
+        # 修复：残留 tmp 先清；替换失败按 1s/2s/4s 退避重试三次。
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        tmp.mkdir(parents=True, exist_ok=True)
         was_gpu = self.device == "cuda"
         self.to_cpu()   # 权重落盘前回到 CPU
-        self.model.save_pretrained(out, safe_serialization=True)
-        self.tokenizer.save_pretrained(out)
-        torch.save(self.optimizer.state_dict(), out / "optimizer_state.pt")
+        corrupt = out.with_suffix(".corrupt")
+        if corrupt.exists():
+            shutil.rmtree(corrupt)   # N4：保存成功后清理历史隔离产物
+        self.model.save_pretrained(tmp, safe_serialization=True)
+        self.tokenizer.save_pretrained(tmp)
+        torch.save(self.optimizer.state_dict(), tmp / "optimizer_state.pt")
         memory = {"replay": self.replay.to_dict(), "debt": self.debt.to_dict()}
-        (out / "memory.json").write_text(json.dumps(memory, ensure_ascii=False), encoding="utf-8")
+        memory_tmp = tmp / "memory.json.tmp"
+        memory_tmp.write_text(json.dumps(memory, ensure_ascii=False), encoding="utf-8")
+        os.replace(memory_tmp, tmp / "memory.json")
+        # P1-5：绝不先删旧档——旧档改名备份，新档就位后再删备份，
+        # 消除"旧档已毁、新档未就位"的断电窗口。
+        bak = out.with_suffix(".bak")
+        if out.exists():
+            if bak.exists():
+                shutil.rmtree(bak)      # 上一代备份此时才清理（新档已就位）
+            os.replace(out, bak)        # 现档退位为备份（新档就位失败时仍可恢复）
+        for attempt in range(3):
+            try:
+                os.replace(tmp, out)
+                break
+            except PermissionError as exc:
+                # Windows：杀软/索引器会锁定刚写完 1.2GB 的新档目录
+                if attempt == 2:
+                    raise PermissionError(
+                        f"{self.name} 保存三次均被锁定（{exc}）。上一代权重在 {bak}，"
+                        f"可手动恢复；或稍后重试 /save。") from exc
+                _time.sleep(1.0 * (attempt + 1))
+        # bak 保留至下一次保存（提供上一代回退路径），不立即删除
+        if was_gpu:
+            self.ensure_gpu()   # 恢复原驻留
 
     def load(self) -> bool:
+        import os
         out = self.state_dir / "hemispheres" / self.name
-        if not (out / "config.json").exists():
+        # N2：主档不完整（config 或 weights 缺失）即判定需要恢复
+        main_ok = (out / "config.json").exists() and (out / "model.safetensors").exists()
+        if not main_ok:
+            # P2-4：上一代备份存活 → 先恢复备份再加载
+            bak = out.with_suffix(".bak")
+            bak_ok = (bak / "config.json").exists() and (bak / "model.safetensors").exists()
+            if bak_ok:
+                print(f"[{self.name}] 主档缺失/不完整，从备份恢复。", flush=True)
+                # N1：Windows 的 replace 不能覆盖已存在目录——残档先挪走
+                if out.exists():
+                    shutil.rmtree(out)
+                os.replace(bak, out)
+            elif not out.exists():
+                return False
+            # 残档存在但无备份：交给后续加载路径隔离（.corrupt），不在此崩溃
+        try:
+            model = AutoModelForSeq2SeqLM.from_pretrained(out, dtype=torch.float32)
+            model.config.tie_word_embeddings = False
+            for name_, param in model.named_parameters():
+                param.requires_grad = "block" in name_ and (".q." in name_ or ".v." in name_)
+            model.gradient_checkpointing_enable()
+            model.config.use_cache = False
+            tokenizer = AutoTokenizer.from_pretrained(out)
+            # P0-1：load() 产生全新 Parameter——优化器必须在**新参数**上重建
+            # 后再载入状态，否则 step() 永久空操作（日志照常打印学习而权重
+            # 冻结），且旧参数被引用无法回收（每次重启泄漏 2.4GB RAM）。
+            trainable = [p for n, p in model.named_parameters() if p.requires_grad]
+            optimizer = Adafactor(trainable, lr=BASE_LR, scale_parameter=False, relative_step=False)
+            opt_path = out / "optimizer_state.pt"
+            if opt_path.exists():
+                optimizer.load_state_dict(torch.load(opt_path, map_location="cpu", weights_only=True))
+            memory_path = out / "memory.json"
+            if memory_path.exists():
+                memory = json.loads(memory_path.read_text(encoding="utf-8"))
+                self.replay.load_dict(memory.get("replay", {}))
+                self.debt.load_dict(memory.get("debt", {}))
+        except Exception as exc:
+            print(f"[{self.name}] 检查点损坏，已隔离该半球档案：{exc}", flush=True)
+            corrupt = out.with_suffix(".corrupt")
+            if out.exists():
+                if corrupt.exists():
+                    shutil.rmtree(corrupt)   # P1-2：Windows 不能 replace 覆盖已存在目录
+                os.replace(out, corrupt)
             return False
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(out, dtype=torch.float32)
-        self.model.config.tie_word_embeddings = False
-        for name_, param in self.model.named_parameters():
-            param.requires_grad = "block" in name_ and (".q." in name_ or ".v." in name_)
-        self.model.gradient_checkpointing_enable()
-        self.model.config.use_cache = False
+        self.model = model
+        self.tokenizer = tokenizer
+        self.optimizer = optimizer
         self.device = "cpu"
-        self.tokenizer = AutoTokenizer.from_pretrained(out)
-        opt_path = out / "optimizer_state.pt"
-        if opt_path.exists():
-            self.optimizer.load_state_dict(torch.load(opt_path, map_location="cpu", weights_only=True))
-        memory_path = out / "memory.json"
-        if memory_path.exists():
-            memory = json.loads(memory_path.read_text(encoding="utf-8"))
-            self.replay.load_dict(memory.get("replay", {}))
-            self.debt.load_dict(memory.get("debt", {}))
         return True
 
 
@@ -215,6 +342,7 @@ class Byt5DualBrain:
     """双半球大脑：活动侧 GPU 在线生成+学习，被动侧巩固，曲线自适应切换。"""
 
     def __init__(self, source: str, state_dir: Path) -> None:
+        self.source = source
         self.state_dir = state_dir
         self.hemispheres = {
             name: ByteHemisphere(name, source, state_dir) for name in ("left", "right")
@@ -223,19 +351,49 @@ class Byt5DualBrain:
         self.switch_urgency_acc = 0.0
         self.pressure_baseline = {"left": 0.0, "right": 0.0}
         self.switch_count = 0
+        self._pending_switch = None   # P2-2：待完成切换的重入保护
         self.switch_log: list[dict] = []
 
     def load(self) -> bool:
         loaded = [h.load() for h in self.hemispheres.values()]
+        # P1-5：部分加载（一侧完整一侧损坏）时整体判为新档，绝不混血——
+        # 混血 + 压力基线归零会让首轮出现假切换。
+        if not all(loaded):
+            # P2-3：绝不混血——成功侧保留但基线对齐当前账本（否则旧累计
+            # 压力在首轮饱和触发假切换）；失败侧按全新重建。
+            any_exists = False
+            for ok, (name, hemisphere) in zip(loaded, self.hemispheres.items()):
+                if ok:
+                    hemisphere.to_cpu()
+                    self.pressure_baseline[name] = hemisphere.debt.total_clean_added
+                    any_exists = True
+                else:
+                    self.hemispheres[name] = ByteHemisphere(name, self.source, self.state_dir)
+            if any_exists:
+                print("[双半球] 检查点不完整：成功侧保留（基线已校准），失败侧全新重建。", flush=True)
+            else:
+                print("[双半球] 无历史检查点，按全新档启动。", flush=True)
+            return False
         meta_path = self.state_dir / "brain.json"
-        if meta_path.exists() and all(loaded):
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            self.active = meta.get("active", "left")
-            self.switch_urgency_acc = float(meta.get("switch_urgency_acc", 0.0))
-            self.pressure_baseline = meta.get("pressure_baseline", self.pressure_baseline)
-            self.switch_count = int(meta.get("switch_count", 0))
-            self.switch_log = meta.get("switch_log", [])
-            return True
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                active = meta.get("active")
+                self.active = active if active in ("left", "right") else "left"
+                self.switch_urgency_acc = max(0.0, min(1.0, float(meta.get("switch_urgency_acc", 0.0))))
+                baselines = meta.get("pressure_baseline", {})
+                self.pressure_baseline = {
+                    name: max(0.0, float(baselines.get(name, 0.0))) for name in ("left", "right")
+                }
+                self.switch_count = int(meta.get("switch_count", 0))
+                log = meta.get("switch_log")
+                self.switch_log = log if isinstance(log, list) else []
+                return True
+            except (json.JSONDecodeError, TypeError, ValueError, UnicodeDecodeError) as exc:
+                print(f"[双半球] brain.json 元数据损坏/类型异常（{exc}），按默认处理并校准基线。", flush=True)
+                for name, hemisphere in self.hemispheres.items():
+                    self.pressure_baseline[name] = hemisphere.debt.total_clean_added
+                return True
         return False
 
     def save(self) -> None:
@@ -248,10 +406,11 @@ class Byt5DualBrain:
             "switch_count": self.switch_count,
             "switch_log": self.switch_log[-64:],
         }
+        import os
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        (self.state_dir / "brain.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        meta_tmp = self.state_dir / "brain.json.tmp"
+        meta_tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(meta_tmp, self.state_dir / "brain.json")
 
     def active_h(self) -> ByteHemisphere:
         return self.hemispheres[self.active]
@@ -278,31 +437,25 @@ class Byt5DualBrain:
         active = self.active_h()
         passive = self.passive_h()
         growth = max(0.0, active.debt.total_clean_added - self.pressure_baseline[active.name])
-        capacity = max(passive.debt.repayment_capacity, 0.5)
+        # 容量下限提到满批巩固量级（4.0）：冷启动期被动侧尚未形成真实容量，
+        # 0.5 会让单轮数据就饱和紧迫度，退化成每 2-3 轮一次的病态轮换。
+        capacity = max(passive.debt.repayment_capacity, 4.0)
         ratio = growth / capacity / SWITCH_RATIO_SCALE
         t = max(0.0, min(1.0, ratio))
         return t * t * (3.0 - 2.0 * t)
 
-    def maybe_switch(self) -> bool:
-        """紧迫度积分满 1 触发切换。两条曲线约束：
-        - 积分上限封顶 1.0：陈年积压不会在零紧迫度时级联触发切换；
-        - 触发时要求当前紧迫度 > 0：切换必须由当下的曲线状态正名。
-        """
-        urgency = self.switch_urgency()
-        if urgency <= 0.0:
-            return False
-        self.switch_urgency_acc = min(1.0, self.switch_urgency_acc + urgency)
-        if self.switch_urgency_acc < 1.0:
-            return False
-        self.switch_urgency_acc = 0.0
-        self.switch()
-        return True
-
-    def switch(self) -> None:
+    def switch_begin(self) -> None:
+        """切换第一步（纯 CPU 变更，失败零副作用）：
+        旧侧落回 CPU（腾出显存）→ 预检 → 债务交换 → 2% 对称插值 → 角色翻转。
+        预检在旧侧腾出显存**之后**执行（此时空闲 ≈ 原空闲 + 1.14GB）。"""
         old = self.active
         new = self.passive_h().name
         old_h, new_h = self.hemispheres[old], self.hemispheres[new]
-        # 1) 债务交换：双方最新 replay 克隆入对方债务（已学材料，非新压力）
+        old_h.to_cpu()   # 幂等；为新侧腾出显存
+        free, _total = torch.cuda.mem_get_info()
+        if free < int(1.3 * 1024**3):
+            raise torch.cuda.OutOfMemoryError(
+                f"切换预检：GPU 空闲 {free/1024**3:.2f}GB 不足新侧驻留（需 ~1.3GB），本轮不切换（零副作用）")
         for source_h, target_h in ((old_h, new_h), (new_h, old_h)):
             for item in source_h.replay.latest(2):
                 target_h.admit_exchange(
@@ -311,19 +464,23 @@ class Byt5DualBrain:
                         weight=1.0, source=f"exchange:{item.source}",
                     )
                 )
-        # 2) CPU 主副本上 2% 对称插值（双方都已同步到 CPU 最新状态）
-        old_h.to_cpu()
         mix = SYNC_MIX / 2
         with torch.no_grad():
             for left_p, right_p in zip(old_h.model.parameters(), new_h.model.parameters()):
                 snapshot = left_p.detach().clone()
                 left_p.lerp_(right_p, mix)
                 right_p.lerp_(snapshot, mix)
-        # 3) 换驻留：旧活动侧落回 CPU，新活动侧上 GPU
-        new_h.ensure_gpu()
+        # 标记待完成 + 角色先行翻转：设备迁移由 complete 幂等补齐
+        self._pending_switch = new
         self.active = new
         self.switch_count += 1
-        # 4) 压力基线重置（切换后压力从零起算）
+
+    def switch_complete(self) -> None:
+        """切换第二步（幂等）：新侧上 GPU、旧侧驻留 CPU、基线重置。"""
+        new = self._pending_switch
+        old = "right" if new == "left" else "left"
+        self.hemispheres[new].ensure_gpu()
+        self.hemispheres[old].to_cpu()
         for name, hemisphere in self.hemispheres.items():
             self.pressure_baseline[name] = hemisphere.debt.total_clean_added
         self.switch_log.append({
@@ -332,6 +489,23 @@ class Byt5DualBrain:
             "to": new,
             "index": self.switch_count,
         })
+        self._pending_switch = None
+
+    def maybe_switch(self) -> bool:
+        # 未竟切换优先补完（只做幂等设备迁移，不重复交换/插值）
+        if self._pending_switch is not None:
+            self.switch_complete()
+            return True
+        urgency = self.switch_urgency()
+        if urgency <= 0.0:
+            return False
+        self.switch_urgency_acc = min(1.0, self.switch_urgency_acc + urgency)
+        if self.switch_urgency_acc < 1.0:
+            return False
+        self.switch_urgency_acc = 0.0
+        self.switch_begin()
+        self.switch_complete()
+        return True
 
     # ---------- 被动巩固（换入-训练-换回） ----------
 
