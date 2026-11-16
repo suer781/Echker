@@ -13,3 +13,7 @@
 {"step": 2000, "ema_loss": 1.7482, "steps_per_s": 3.77, "enc_cap": 1024}
 {"checkpoint": 2000}
 {"step": 2200, "ema_loss": 1.8205, "steps_per_s": 3.64, "enc_cap": 1024}
+{"step": 2400, "ema_loss": 1.8645, "steps_per_s": 3.6, "enc_cap": 1024}
+{"step": 2600, "ema_loss": 1.6333, "steps_per_s": 3.56, "enc_cap": 1024}
+{"step": 2800, "ema_loss": 1.7519, "steps_per_s": 3.53, "enc_cap": 1024}
+{"step": 3000, "ema_loss": 1.7733, "steps_per_s": 3.53, "enc_cap": 1024}

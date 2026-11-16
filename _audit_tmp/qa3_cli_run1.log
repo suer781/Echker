@@ -1,27 +1,0 @@
-[0006747ms] 加载 O:\Documents\智能自学习AI（新）\byt5_model（fp32, GPU）…
-[0009075ms] W1114 19:50:41.477000 26772 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
-[0010142ms] Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   1%|          | 1/170 [00:00<00:20,  8.40it/s]Loading weights:   6%|▋         | 11/170 [00:00<00:02, 56.31it/s]Loading weights:  10%|█         | 17/170 [00:00<00:04, 31.77it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 287.43it/s]
-[0010201ms] [transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-[0010578ms] O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
-[0010634ms]   warnings.warn(
-[0010691ms] 在线学习开启：22,609,920 个参数逐轮真权重更新
-[0010750ms] 输入文字开始对话；/save 保存，/exit 退出。
-[0010807ms] 
-[0010867ms] 你: [自适应] 空闲 1.28GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-[0012165ms] 助手: 我一定要的，你好可以后就可以动手，你好可以在大学习，可以动怎么样，你好可以好。
-[0012219ms] [生成 1.59s]
-[0012275ms] [transformers] `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
-[0012950ms] [本轮学习 loss=1.3864 强度=1.00]
-[0013005ms] 
-[0013067ms] 你: [自适应] 空闲 0.99GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-[0014335ms] 助手: � are you doing today? You are you doing today? The same that the this part of the way. He is the the best of the place.
-[0014392ms] [生成 1.39s]
-[0014736ms] [本轮学习 loss=1.3522 强度=1.00]
-[0014791ms] 
-[0014852ms] 你: [自适应] 空闲 0.79GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-[0016285ms] 助手: � ọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọọ
-[0016341ms] [生成 1.55s]
-[0016426ms] [本轮学习跳过：loss=3.1691 超过阈值 2.0]
-[0016481ms] 
-[0016539ms] 你: [未知命令。可用命令：/save /exit]
-[0016594ms] 

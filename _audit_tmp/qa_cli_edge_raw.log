@@ -1,18 +1,0 @@
-加载 O:\Documents\智能自学习AI（新）\byt5_model（fp32, GPU）…
-W1114 17:16:08.685000 28172 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
-Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   6%|▌         | 10/170 [00:00<00:02, 73.28it/s]Loading weights:  11%|█         | 18/170 [00:00<00:04, 34.97it/s]Loading weights:  14%|█▎        | 23/170 [00:00<00:04, 35.05it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 273.35it/s]
-[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
-  warnings.warn(
-在线学习关闭（--learn 可开启）
-输入文字开始对话；/save 保存，/exit 退出。
-
-你: Traceback (most recent call last):
-  File "O:\Documents\智能自学习AI（新）\chat_cli.py", line 346, in <module>
-    raise SystemExit(main())
-                     ~~~~^^
-  File "O:\Documents\智能自学习AI（新）\chat_cli.py", line 236, in main
-    user_text = input("\n你: ").strip()
-                ~~~~~^^^^^^^^^^
-  File "<frozen codecs>", line 325, in decode
-UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte

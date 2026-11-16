@@ -1,30 +1,0 @@
-双半球初始化（两侧均为 O:\Documents\智能自学习AI（新）\byt5_model）…
-W1114 18:48:58.861000 20456 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
-Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   5%|▌         | 9/170 [00:00<00:02, 70.52it/s]Loading weights:  10%|█         | 17/170 [00:00<00:02, 60.33it/s]Loading weights:  14%|█▍        | 24/170 [00:01<00:08, 17.22it/s]Loading weights: 100%|██████████| 170/170 [00:01<00:00, 153.95it/s]
-[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
-  warnings.warn(
-Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   2%|▏         | 4/170 [00:00<00:04, 34.13it/s]Loading weights:   5%|▍         | 8/170 [00:00<00:05, 31.73it/s]Loading weights:   8%|▊         | 14/170 [00:00<00:07, 20.02it/s]Loading weights:  10%|█         | 17/170 [00:00<00:07, 19.60it/s]Loading weights:  12%|█▏        | 20/170 [00:00<00:07, 19.20it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 175.34it/s]
-[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-[双半球] 无历史检查点，按全新档启动。
-检查点：全新（两侧继承微调权重）
-双半球在线学习开启：每轮都更新活动侧权重，被动侧巩固，曲线自适应切换
-输入文字开始对话；/status 状态，/save 保存，/exit 退出。
-
-你: [自适应] 空闲 1.28GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 left
-助手(left): 好可以吗，可以加入我可以吗，一定要学习好可以吗，你好可以吗，你好可以吗，你好可以吗
-[生成 1.63s]
-[transformers] `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
-[left 学习 loss=1.7239 强度=1.00]
-
-你: [自适应] 空闲 1.27GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 left
-助手(left): 等于 1。
-[生成 0.15s]
-[left 学习 loss=0.2591 强度=1.00]
-
-你: [自适应] 空闲 1.26GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 left
-助手(left): 到我不让我们的可能动怎之大学习。
-[生成 0.56s]
-[left 学习跳过：quality-gate loss=3.5217]
-
-你: 冒烟模式：未保存，退出。

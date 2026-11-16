@@ -1,4 +1,0 @@
-今天晚上吃什么呢
-What is your name?
-/save
-/exit

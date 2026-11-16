@@ -28,3 +28,6 @@ _audit_tmp/qa_dual_edge_state/
 _audit_tmp/dbg_state/
 _audit_tmp/dbg_state2/
 *.brainpack
+finetune_data_rec/
+finetune_data_r2/
+_audit_tmp/

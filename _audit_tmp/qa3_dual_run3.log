@@ -1,37 +1,0 @@
-[0008066ms] 双半球初始化（两侧均为 O:\Documents\智能自学习AI（新）\byt5_model）…
-[0010796ms] W1114 19:36:32.071000 10476 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
-[0018780ms] Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   1%|          | 1/170 [00:00<00:48,  3.48it/s]Loading weights:   1%|          | 2/170 [00:00<01:11,  2.34it/s]Loading weights:   2%|▏         | 3/170 [00:01<01:59,  1.40it/s]Loading weights:   5%|▌         | 9/170 [00:01<00:25,  6.25it/s]Loading weights:   7%|▋         | 12/170 [00:02<00:32,  4.84it/s]Loading weights:   8%|▊         | 14/170 [00:04<00:51,  3.05it/s]Loading weights:   9%|▉         | 16/170 [00:04<00:40,  3.79it/s]Loading weights:  11%|█         | 18/170 [00:06<01:20,  1.88it/s]Loading weights: 100%|██████████| 170/170 [00:06<00:00, 24.78it/s]
-[0018844ms] [transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-[0018907ms] O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
-[0018967ms]   warnings.warn(
-[0019703ms] Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   4%|▎         | 6/170 [00:00<00:05, 28.29it/s]Loading weights:   6%|▋         | 11/170 [00:00<00:08, 18.59it/s]Loading weights:   8%|▊         | 14/170 [00:00<00:08, 18.53it/s]Loading weights:   9%|▉         | 16/170 [00:00<00:08, 18.58it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 203.04it/s]
-[0019764ms] [transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-[0030258ms] Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   2%|▏         | 4/170 [00:00<00:05, 32.13it/s]Loading weights:   5%|▍         | 8/170 [00:00<00:04, 32.46it/s]Loading weights:   7%|▋         | 12/170 [00:05<01:46,  1.49it/s]Loading weights:   8%|▊         | 14/170 [00:10<02:42,  1.04s/it]Loading weights: 100%|██████████| 170/170 [00:10<00:00, 16.39it/s]
-[0030316ms] [transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-[0045341ms] Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   2%|▏         | 3/170 [00:00<00:32,  5.16it/s]Loading weights:   5%|▍         | 8/170 [00:05<02:09,  1.25it/s]Loading weights:   5%|▌         | 9/170 [00:06<02:11,  1.23it/s]Loading weights:   6%|▌         | 10/170 [00:07<02:17,  1.16it/s]Loading weights:   6%|▋         | 11/170 [00:08<02:07,  1.24it/s]Loading weights:   8%|▊         | 13/170 [00:08<01:26,  1.81it/s]Loading weights:   9%|▉         | 15/170 [00:09<01:18,  1.96it/s]Loading weights:   9%|▉         | 16/170 [00:11<02:15,  1.13it/s]Loading weights:  10%|█         | 17/170 [00:12<02:13,  1.14it/s]Loading weights:  11%|█         | 18/170 [00:14<02:47,  1.10s/it]Loading weights: 100%|██████████| 170/170 [00:14<00:00, 11.68it/s]
-[0045402ms] [transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-[0045495ms] 检查点：已恢复
-[0046353ms] 双半球在线学习开启：每轮都更新活动侧权重，被动侧巩固，曲线自适应切换
-[0046410ms] 输入文字开始对话；/status 状态，/save 保存，/exit 退出。
-[0046465ms] 
-[0046522ms] 你: [自适应] 空闲 1.28GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 right
-[0049759ms] 助手(right): 你喜欢什么音乐。
-[0049815ms] [生成 3.39s]
-[0050867ms] [right 学习 loss=0.5965 强度=1.00]
-[0053086ms] [left 巩固 steps=2 loss=0.7793426513671875]
-[0053148ms] 
-[0053212ms] 你: [自适应] 空闲 1.27GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 right
-[0054599ms] 助手(right): м。 ！ Do you like music? do you like music? Do you like music? Do you like music? Do you like music? Do you like music? Do y
-[0054658ms] [生成 1.52s]
-[0054787ms] [right 学习 loss=0.9910 强度=1.00]
-[0056666ms] [left 巩固 steps=2 loss=0.47035354375839233]
-[0056723ms] 
-[0056781ms] 你: active=right 切换次数=1 紧迫度=0.133 累计=0.161 被动侧容量=4.375 被动侧待偿债务=4
-[0056835ms] 
-[0067445ms] 你: Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:10<00:00, 10.77s/it]Writing model shards: 100%|██████████| 1/1 [00:10<00:00, 10.77s/it]
-[0084417ms] Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:16<00:00, 16.24s/it]Writing model shards: 100%|██████████| 1/1 [00:16<00:00, 16.24s/it]
-[0084747ms] 已保存。
-[0084805ms] 
-[0102751ms] 你: Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:17<00:00, 17.99s/it]Writing model shards: 100%|██████████| 1/1 [00:17<00:00, 17.99s/it]
-[0117134ms] Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:14<00:00, 14.03s/it]Writing model shards: 100%|██████████| 1/1 [00:14<00:00, 14.03s/it]
-[0117494ms] 已保存并退出。

@@ -1,5 +1,0 @@
-你好，最近怎么样？
-How are you doing today?
-a
-/foobar
-/exit

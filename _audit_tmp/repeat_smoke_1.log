@@ -1,30 +1,0 @@
-双半球初始化（两侧均为 O:\Documents\智能自学习AI（新）\byt5_model）…
-W1114 18:48:34.446000 13316 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
-Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   2%|▏         | 3/170 [00:00<00:55,  3.01it/s]Loading weights:   2%|▏         | 4/170 [00:04<03:18,  1.20s/it]Loading weights:   3%|▎         | 5/170 [00:04<02:44,  1.00it/s]Loading weights:   4%|▎         | 6/170 [00:05<02:24,  1.14it/s]Loading weights: 100%|██████████| 170/170 [00:05<00:00, 32.42it/s]
-[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
-  warnings.warn(
-Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   2%|▏         | 4/170 [00:00<00:06, 24.05it/s]Loading weights:   4%|▍         | 7/170 [00:00<00:17,  9.09it/s]Loading weights:   6%|▋         | 11/170 [00:00<00:14, 11.24it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 173.18it/s]
-[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-[双半球] 无历史检查点，按全新档启动。
-检查点：全新（两侧继承微调权重）
-双半球在线学习开启：每轮都更新活动侧权重，被动侧巩固，曲线自适应切换
-输入文字开始对话；/status 状态，/save 保存，/exit 退出。
-
-你: [自适应] 空闲 1.28GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 left
-助手(left): 好可以吗，可以加入我可以吗，一定要学习好可以吗，你好可以吗，你好可以吗，你好可以吗
-[生成 2.59s]
-[transformers] `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
-[left 学习跳过：quality-gate loss=2.1672]
-
-你: [自适应] 空闲 1.27GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 left
-助手(left): 等于 1。
-[生成 0.25s]
-[left 学习 loss=0.6377 强度=1.00]
-
-你: [自适应] 空闲 1.26GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 left
-助手(left): 到我不让我们的可能动怎之大学习。
-[生成 0.57s]
-[left 学习跳过：quality-gate loss=2.3820]
-
-你: 冒烟模式：未保存，退出。

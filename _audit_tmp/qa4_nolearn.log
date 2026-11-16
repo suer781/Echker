@@ -1,28 +1,0 @@
-双半球初始化（两侧均为 O:\Documents\智能自学习AI（新）\byt5_model）…
-W1114 20:47:45.964000 25748 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
-Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   1%|          | 2/170 [00:01<01:54,  1.47it/s]Loading weights:   2%|▏         | 3/170 [00:02<02:09,  1.28it/s]Loading weights:   2%|▏         | 4/170 [00:02<01:27,  1.90it/s]Loading weights: 100%|██████████| 170/170 [00:02<00:00, 71.17it/s]
-[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
-  warnings.warn(
-Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   2%|▏         | 4/170 [00:00<00:07, 22.64it/s]Loading weights:   4%|▍         | 7/170 [00:00<00:11, 14.62it/s]Loading weights:   5%|▌         | 9/170 [00:00<00:12, 13.38it/s]Loading weights:   6%|▋         | 11/170 [00:00<00:11, 13.31it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 216.35it/s]
-[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-[双半球] 无历史检查点，按全新档启动。
-检查点：全新（两侧继承微调权重）
-纯对话模式（--no-learn）：本轮起不学习、不巩固、不切换
-输入文字开始对话；/status 状态，/save 保存，/exit 退出。
-
-你: [自适应] 空闲 1.28GB · enc≤512 · 回复≤128 · 压力 0.00 · 半球 left
-助手(left): 好可以吗，可以加入我可以吗，一定要学习好可以吗，你好可以吗，你好可以吗，你好可以吗
-[生成 1.75s]
-
-你: [自适应] 空闲 1.27GB · enc≤512 · 回复≤128 · 压力 0.00 · 半球 left
-助手(left): 等于 12。
-[生成 0.18s]
-
-你: [自适应] 空闲 1.27GB · enc≤512 · 回复≤128 · 压力 0.00 · 半球 left
-助手(left): 饭吃什么好，有一天可以这是好吃。
-[生成 0.66s]
-
-你: active=left 切换次数=0 紧迫度=0.000 累计=0.000 被动侧容量=0.000 被动侧待偿债务=0
-
-你: 冒烟模式：未保存，退出。

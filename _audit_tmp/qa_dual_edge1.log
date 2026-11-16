@@ -1,44 +1,0 @@
-双半球初始化（两侧均为 O:\Documents\智能自学习AI（新）\byt5_model）…
-W1114 17:06:14.821000 23460 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
-Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   1%|          | 2/170 [00:00<00:12, 13.83it/s]Loading weights:   5%|▌         | 9/170 [00:00<00:07, 22.06it/s]Loading weights:   7%|▋         | 12/170 [00:00<00:07, 20.98it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 283.31it/s]
-[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
-  warnings.warn(
-Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   2%|▏         | 4/170 [00:00<00:07, 21.51it/s]Loading weights:   4%|▍         | 7/170 [00:00<00:07, 21.50it/s]Loading weights:   7%|▋         | 12/170 [00:00<00:05, 29.75it/s]Loading weights:  10%|█         | 17/170 [00:00<00:04, 32.42it/s]Loading weights:  14%|█▎        | 23/170 [00:00<00:03, 38.25it/s]Loading weights:  16%|█▋        | 28/170 [00:00<00:03, 37.60it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 186.09it/s]
-[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-检查点：全新（两侧继承微调权重）
-双半球在线学习开启：每轮都更新活动侧权重，被动侧巩固，曲线自适应切换
-输入文字开始对话；/status 状态，/save 保存，/exit 退出。
-
-你: 
-你: 
-你: [自适应] 空闲 1.28GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 left
-助手(left): 你好可以合最好！ 大家发的好友好！！
-[生成 0.85s]
-[transformers] `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
-[left 学习 loss=1.9647 强度=1.00]
-[半球切换 #1] → right（紧迫度曲线已达标，债务交换+2%插值完成）
-
-你: [自适应] 空闲 1.27GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00 · 半球 right
-助手(right): �なのが。
-[生成 0.17s]
-[right 学习跳过：quality-gate loss=3.1272]
-[left 巩固 steps=2 loss=1.6425553560256958]
-
-你: Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:07<00:00,  7.76s/it]Writing model shards: 100%|██████████| 1/1 [00:07<00:00,  7.76s/it]
-Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:11<00:00, 11.12s/it]Writing model shards: 100%|██████████| 1/1 [00:11<00:00, 11.12s/it]
-已保存。
-
-你: Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:16<00:00, 16.98s/it]Writing model shards: 100%|██████████| 1/1 [00:16<00:00, 16.99s/it]
-Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:16<00:00, 16.05s/it]Writing model shards: 100%|██████████| 1/1 [00:16<00:00, 16.05s/it]
-已保存。
-
-你: Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:17<00:00, 17.69s/it]Writing model shards: 100%|██████████| 1/1 [00:17<00:00, 17.69s/it]
-Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:14<00:00, 14.68s/it]Writing model shards: 100%|██████████| 1/1 [00:14<00:00, 14.68s/it]
-已保存。
-
-你: active=right 切换次数=1 紧迫度=0.000 累计=0.000 被动侧容量=2.000 被动侧待偿债务=1
-
-你: Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:16<00:00, 16.60s/it]Writing model shards: 100%|██████████| 1/1 [00:16<00:00, 16.60s/it]
-Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:17<00:00, 17.96s/it]Writing model shards: 100%|██████████| 1/1 [00:17<00:00, 17.96s/it]
-已保存并退出。

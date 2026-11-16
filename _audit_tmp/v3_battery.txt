@@ -1,38 +1,0 @@
-加载 O:\Documents\智能自学习AI（新）\byt5_model（fp32, GPU）…
-W1114 14:03:34.288000 20900 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
-Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   1%|          | 2/170 [00:00<00:13, 12.58it/s]Loading weights:   4%|▎         | 6/170 [00:00<00:09, 17.17it/s]Loading weights:   6%|▌         | 10/170 [00:00<00:09, 17.51it/s]Loading weights:   7%|▋         | 12/170 [00:00<00:09, 17.21it/s]Loading weights:   8%|▊         | 14/170 [00:01<00:14, 10.79it/s]Loading weights: 100%|██████████| 170/170 [00:01<00:00, 154.84it/s]
-[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
-  warnings.warn(
-在线学习开启：22,609,920 个参数逐轮真权重更新
-输入文字开始对话；/save 保存，/exit 退出。
-
-你: 
-你: 
-你: [自适应] 空闲 1.28GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-助手: � 。
-[生成 0.36s]
-[transformers] `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
-[本轮学习 loss=1.3956 强度=1.00]
-
-你: [自适应] 空闲 0.98GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-助手: 长文本压力测试。长文本压力测试。长文本压力测试。长文本压力测试。长文本压力测试。长文�
-[生成 1.97s]
-[本轮学习 loss=0.1387 强度=1.00]
-
-你: [自适应] 空闲 0.83GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-助手: ан，学的。
-[生成 0.22s]
-[本轮学习跳过：loss=2.0328 超过阈值 2.0]
-
-你: [自适应] 空闲 0.72GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-助手: 好可以吗，可以加入我可以吗，一定要的学习好可以吗，你好可以吗，你好可以吗，你好可以吗
-[生成 1.50s]
-[本轮学习 loss=1.1954 强度=1.00]
-
-你: [自适应] 空闲 0.64GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-助手: 等于 1。
-[生成 0.15s]
-[本轮学习 loss=0.2715 强度=1.00]
-
-你: 

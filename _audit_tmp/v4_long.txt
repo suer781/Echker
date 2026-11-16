@@ -1,71 +1,0 @@
-加载 O:\Documents\智能自学习AI（新）\byt5_model（fp32, GPU）…
-W1114 14:03:54.888000 3588 .venv-life\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
-Loading weights:   0%|          | 0/170 [00:00<?, ?it/s]Loading weights:   1%|          | 2/170 [00:00<00:12, 13.73it/s]Loading weights:   3%|▎         | 5/170 [00:00<00:08, 20.13it/s]Loading weights:   5%|▍         | 8/170 [00:00<00:08, 19.74it/s]Loading weights:   6%|▋         | 11/170 [00:00<00:07, 20.63it/s]Loading weights:   8%|▊         | 14/170 [00:00<00:07, 20.12it/s]Loading weights:  13%|█▎        | 22/170 [00:00<00:04, 30.10it/s]Loading weights: 100%|██████████| 170/170 [00:00<00:00, 190.21it/s]
-[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
-O:\Documents\智能自学习AI（新）\.venv-life\Lib\site-packages\transformers\modeling_utils.py:3195: FutureWarning: `gradient_checkpointing_enable` is deprecated and will be removed in v6. Use `activation_checkpointing_enable` instead.
-  warnings.warn(
-在线学习开启：22,609,920 个参数逐轮真权重更新
-输入文字开始对话；/save 保存，/exit 退出。
-
-你: [自适应] 空闲 1.28GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-助手: 好可以吗，可以加入我可以吗，一定要学习好可以吗，你好可以吗，你好可以吗，你好可以吗
-[生成 1.64s]
-[transformers] `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
-[本轮学习 loss=1.6831 强度=1.00]
-
-你: [自适应] 空闲 0.99GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-助手: 到大家发的时候，你可以在加说吧做吧，可以在全部分发现发现发现发现发现发现发现发现发现�
-[生成 1.42s]
-[本轮学习 loss=1.9383 强度=1.00]
-
-你: [自适应] 空闲 0.79GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-助手: 等于 1。
-[生成 0.17s]
-[本轮学习 loss=0.2815 强度=1.00]
-
-你: [自适应] 空闲 0.65GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-助手: 等于 12。
-[生成 0.17s]
-[本轮学习 loss=0.3321 强度=1.00]
-
-你: [自适应] 空闲 0.55GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-助手: 笑话话话话话话话话话话话话话话话话话话话话话话话话话话话话话话话话话话话话话话话
-[生成 1.36s]
-[本轮学习 loss=1.0435 强度=1.00]
-
-你: [自适应] 空闲 0.48GB · enc≤512 · 回复≤128 · 学习强度 1.00 · 压力 0.00
-助手: 的上下雨地上湿说明什么时候天上下雨地上湿说明什么情字发发发发发发发发发发发发发发发发�
-[生成 1.43s]
-[本轮学习 loss=1.0858 强度=1.00]
-
-你: [自适应] 空闲 0.43GB · enc≤509 · 回复≤127 · 学习强度 1.00 · 压力 0.00
-助手: 再说，一我从发动时做。
-[生成 0.39s]
-[本轮学习 loss=1.9600 强度=1.00]
-
-你: [自适应] 空闲 0.40GB · enc≤490 · 回复≤123 · 学习强度 1.00 · 压力 0.00
-助手: 好呀，可以加学习好可以后就是到大家可以好可以好可以好可以好可以好可以好可以好可以好
-[生成 1.41s]
-[本轮学习 loss=1.5918 强度=1.00]
-
-你: [自适应] 空闲 0.38GB · enc≤469 · 回复≤119 · 学习强度 1.00 · 压力 0.00
-助手: 小到我该该该该该该该该该该该该该该该该该该该该该该该该该该该该该该该该该该该该�
-[生成 1.37s]
-[本轮学习 loss=1.2731 强度=1.00]
-
-你: [自适应] 空闲 0.36GB · enc≤450 · 回复≤116 · 学习强度 1.00 · 压力 0.00
-助手: 等于 1。
-[生成 0.15s]
-[本轮学习 loss=0.0633 强度=1.00]
-
-你: [自适应] 空闲 0.35GB · enc≤435 · 回复≤113 · 学习强度 1.00 · 压力 0.00
-助手: 叫什么名字，叫什么名字，叫什么名字，叫什么名字，叫什么名字，叫什么名字，你�
-[生成 1.26s]
-[本轮学习 loss=0.8724 强度=1.00]
-
-你: [自适应] 空闲 0.34GB · enc≤424 · 回复≤111 · 学习强度 1.00 · 压力 0.00
-助手: 晚安安安安安安安安安安安安安安安安安安安安安安安安安安安安安安安安安安安安
-[生成 1.26s]
-[本轮学习 loss=0.5551 强度=1.00]
-
-你: 
