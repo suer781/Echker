@@ -303,7 +303,7 @@ def main() -> int:
         with torch.no_grad():
             output = model.generate(
                 input_ids=inputs,
-                max_new_tokens=gen_tokens,
+                max_new_tokens=gen_tokens, min_new_tokens=8,
                 do_sample=sampling,
                 temperature=max(args.temperature, 1e-5) if sampling else None,
                 top_k=40 if sampling else None,

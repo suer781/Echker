@@ -104,6 +104,12 @@ def main() -> int:
                 rate = step / max(1e-9, time.time() - started)
                 print(json.dumps({"step": step, "ema_loss": round(ema, 4), "steps_per_s": round(rate, 2),
                                   "enc_cap": enc_cap}, ensure_ascii=False), flush=True)
+            if step % 2000 == 0:
+                model.config.use_cache = True
+                model.save_pretrained(OUTPUT, safe_serialization=True)
+                tok.save_pretrained(OUTPUT)
+                model.config.use_cache = False
+                print(json.dumps({"checkpoint": step}), flush=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
     model.config.use_cache = True
     model.save_pretrained(OUTPUT, safe_serialization=True)

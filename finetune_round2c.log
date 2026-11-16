@@ -1,0 +1,34 @@
+{"trainable_tensors": 40, "trainable_params": 22609920}
+{"data": "round2_pairs.jsonl", "pairs": 77449}
+{"examples": 77449}
+{"step": 200, "ema_loss": 1.3805, "steps_per_s": 5.24, "enc_cap": 1024}
+{"step": 400, "ema_loss": 1.4573, "steps_per_s": 5.25, "enc_cap": 1024}
+{"step": 600, "ema_loss": 1.4122, "steps_per_s": 5.08, "enc_cap": 1024}
+{"step": 800, "ema_loss": 1.4963, "steps_per_s": 5.09, "enc_cap": 1024}
+{"step": 1000, "ema_loss": 1.4456, "steps_per_s": 5.04, "enc_cap": 1024}
+{"step": 1200, "ema_loss": 1.4455, "steps_per_s": 5.04, "enc_cap": 1024}
+{"step": 1400, "ema_loss": 1.4693, "steps_per_s": 5.04, "enc_cap": 1024}
+{"step": 1600, "ema_loss": 1.4019, "steps_per_s": 5.03, "enc_cap": 1024}
+{"step": 1800, "ema_loss": 1.4243, "steps_per_s": 5.03, "enc_cap": 1024}
+{"step": 2000, "ema_loss": 1.4251, "steps_per_s": 5.05, "enc_cap": 1024}
+{"step": 2200, "ema_loss": 1.4564, "steps_per_s": 5.05, "enc_cap": 1024}
+{"step": 2400, "ema_loss": 1.4168, "steps_per_s": 5.04, "enc_cap": 1024}
+{"step": 2600, "ema_loss": 1.4511, "steps_per_s": 5.03, "enc_cap": 1024}
+{"step": 2800, "ema_loss": 1.4368, "steps_per_s": 5.03, "enc_cap": 1024}
+{"step": 3000, "ema_loss": 1.4793, "steps_per_s": 5.0, "enc_cap": 1024}
+{"step": 3200, "ema_loss": 1.3904, "steps_per_s": 4.94, "enc_cap": 1024}
+{"step": 3400, "ema_loss": 1.4639, "steps_per_s": 4.93, "enc_cap": 1024}
+{"step": 3600, "ema_loss": 1.4711, "steps_per_s": 4.92, "enc_cap": 1024}
+{"step": 3800, "ema_loss": 1.3699, "steps_per_s": 4.91, "enc_cap": 1024}
+{"step": 4000, "ema_loss": 1.4328, "steps_per_s": 4.91, "enc_cap": 1024}
+{"step": 4200, "ema_loss": 1.367, "steps_per_s": 4.91, "enc_cap": 1024}
+{"step": 4400, "ema_loss": 1.3637, "steps_per_s": 4.91, "enc_cap": 1024}
+{"step": 4600, "ema_loss": 1.3926, "steps_per_s": 4.91, "enc_cap": 1024}
+{"step": 4800, "ema_loss": 1.4272, "steps_per_s": 4.9, "enc_cap": 1024}
+{"step": 5000, "ema_loss": 1.4172, "steps_per_s": 4.9, "enc_cap": 1024}
+{"step": 5200, "ema_loss": 1.4495, "steps_per_s": 4.91, "enc_cap": 1024}
+{"step": 5400, "ema_loss": 1.3968, "steps_per_s": 4.92, "enc_cap": 1024}
+{"step": 5600, "ema_loss": 1.4498, "steps_per_s": 4.92, "enc_cap": 1024}
+{"step": 5800, "ema_loss": 1.3702, "steps_per_s": 4.93, "enc_cap": 1024}
+{"step": 6000, "ema_loss": 1.4555, "steps_per_s": 4.94, "enc_cap": 1024}
+{"step": 6200, "ema_loss": 1.4131, "steps_per_s": 4.93, "enc_cap": 1024}

@@ -1,0 +1,10 @@
+{
+  "active": "left",
+  "switch_urgency_acc": 0.515625,
+  "pressure_baseline": {
+    "left": 0.0,
+    "right": 0.0
+  },
+  "switch_count": 0,
+  "switch_log": []
+}

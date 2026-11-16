@@ -1,0 +1,6 @@
+remote: warning: See https://gh.io/lfs for more information.        
+remote: warning: File finetune_data/sft_mega_pairs.jsonl is 86.29 MB; this is larger than GitHub's recommended maximum file size of 50.00 MB        
+remote: warning: File finetune_data_r2/round2_pairs.jsonl is 58.71 MB; this is larger than GitHub's recommended maximum file size of 50.00 MB        
+remote: warning: GH001: Large files detected. You may want to try Git Large File Storage - https://git-lfs.github.com.        
+To https://github.com/suer781/Echker.git
+   81d9a35..10e8afb  main -> main

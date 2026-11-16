@@ -1,0 +1,65 @@
+{"trainable_tensors": 40, "trainable_params": 22609920}
+{"data": "recovery_pairs.jsonl", "pairs": 205999}
+{"examples": 205999}
+{"step": 200, "ema_loss": 1.1783, "steps_per_s": 3.93, "enc_cap": 1024}
+{"step": 400, "ema_loss": 1.3139, "steps_per_s": 4.08, "enc_cap": 1024}
+{"step": 600, "ema_loss": 1.2401, "steps_per_s": 4.04, "enc_cap": 1024}
+{"step": 800, "ema_loss": 1.2069, "steps_per_s": 4.02, "enc_cap": 1024}
+{"step": 1000, "ema_loss": 1.3162, "steps_per_s": 4.02, "enc_cap": 1024}
+{"step": 1200, "ema_loss": 1.2619, "steps_per_s": 4.01, "enc_cap": 1024}
+{"step": 1400, "ema_loss": 1.2373, "steps_per_s": 4.02, "enc_cap": 1024}
+{"step": 1600, "ema_loss": 1.2195, "steps_per_s": 4.0, "enc_cap": 1024}
+{"step": 1800, "ema_loss": 1.2413, "steps_per_s": 3.97, "enc_cap": 1024}
+{"step": 2000, "ema_loss": 1.2545, "steps_per_s": 3.97, "enc_cap": 1024}
+{"checkpoint": 2000}
+{"step": 2200, "ema_loss": 1.2417, "steps_per_s": 3.87, "enc_cap": 1024}
+{"step": 2400, "ema_loss": 1.2863, "steps_per_s": 3.89, "enc_cap": 1024}
+{"step": 2600, "ema_loss": 1.1701, "steps_per_s": 3.88, "enc_cap": 1024}
+{"step": 2800, "ema_loss": 1.2938, "steps_per_s": 3.86, "enc_cap": 1024}
+{"step": 3000, "ema_loss": 1.268, "steps_per_s": 3.85, "enc_cap": 1024}
+{"step": 3200, "ema_loss": 1.2677, "steps_per_s": 3.85, "enc_cap": 1024}
+{"step": 3400, "ema_loss": 1.2669, "steps_per_s": 3.83, "enc_cap": 1024}
+{"step": 3600, "ema_loss": 1.1365, "steps_per_s": 3.82, "enc_cap": 1024}
+{"step": 3800, "ema_loss": 1.2917, "steps_per_s": 3.82, "enc_cap": 1024}
+{"step": 4000, "ema_loss": 1.2885, "steps_per_s": 3.81, "enc_cap": 1024}
+{"checkpoint": 4000}
+{"step": 4200, "ema_loss": 1.2565, "steps_per_s": 3.76, "enc_cap": 1024}
+{"step": 4400, "ema_loss": 1.3213, "steps_per_s": 3.78, "enc_cap": 1024}
+{"step": 4600, "ema_loss": 1.1968, "steps_per_s": 3.77, "enc_cap": 1024}
+{"step": 4800, "ema_loss": 1.2641, "steps_per_s": 3.76, "enc_cap": 1024}
+{"step": 5000, "ema_loss": 1.2404, "steps_per_s": 3.77, "enc_cap": 1024}
+{"step": 5200, "ema_loss": 1.1424, "steps_per_s": 3.78, "enc_cap": 1024}
+{"step": 5400, "ema_loss": 1.2831, "steps_per_s": 3.79, "enc_cap": 1024}
+{"step": 5600, "ema_loss": 1.2549, "steps_per_s": 3.79, "enc_cap": 1024}
+{"step": 5800, "ema_loss": 1.4137, "steps_per_s": 3.81, "enc_cap": 1024}
+{"step": 6000, "ema_loss": 1.1758, "steps_per_s": 3.82, "enc_cap": 1024}
+{"checkpoint": 6000}
+{"step": 6200, "ema_loss": 1.2548, "steps_per_s": 3.79, "enc_cap": 1024}
+{"step": 6400, "ema_loss": 1.155, "steps_per_s": 3.79, "enc_cap": 1024}
+{"step": 6600, "ema_loss": 1.2076, "steps_per_s": 3.8, "enc_cap": 1024}
+{"step": 6800, "ema_loss": 1.1223, "steps_per_s": 3.79, "enc_cap": 1024}
+{"step": 7000, "ema_loss": 1.2428, "steps_per_s": 3.79, "enc_cap": 1024}
+{"step": 7200, "ema_loss": 1.2545, "steps_per_s": 3.81, "enc_cap": 1024}
+{"step": 7400, "ema_loss": 1.1548, "steps_per_s": 3.81, "enc_cap": 1024}
+{"step": 7600, "ema_loss": 1.2945, "steps_per_s": 3.82, "enc_cap": 1024}
+{"step": 7800, "ema_loss": 1.3142, "steps_per_s": 3.83, "enc_cap": 1024}
+{"step": 8000, "ema_loss": 1.1964, "steps_per_s": 3.83, "enc_cap": 1024}
+{"checkpoint": 8000}
+{"step": 8200, "ema_loss": 1.2614, "steps_per_s": 3.81, "enc_cap": 1024}
+{"step": 8400, "ema_loss": 1.2368, "steps_per_s": 3.81, "enc_cap": 1024}
+{"step": 8600, "ema_loss": 1.2544, "steps_per_s": 3.81, "enc_cap": 1024}
+{"step": 8800, "ema_loss": 1.3014, "steps_per_s": 3.82, "enc_cap": 1024}
+{"step": 9000, "ema_loss": 1.2531, "steps_per_s": 3.82, "enc_cap": 1024}
+{"step": 9200, "ema_loss": 1.2573, "steps_per_s": 3.81, "enc_cap": 1024}
+{"step": 9400, "ema_loss": 1.1356, "steps_per_s": 3.82, "enc_cap": 1024}
+{"step": 9600, "ema_loss": 1.1811, "steps_per_s": 3.82, "enc_cap": 1024}
+{"step": 9800, "ema_loss": 1.294, "steps_per_s": 3.82, "enc_cap": 1024}
+{"step": 10000, "ema_loss": 1.0541, "steps_per_s": 3.82, "enc_cap": 1024}
+{"checkpoint": 10000}
+{"step": 10200, "ema_loss": 1.1812, "steps_per_s": 3.8, "enc_cap": 1024}
+{"step": 10400, "ema_loss": 1.2204, "steps_per_s": 3.8, "enc_cap": 1024}
+{"step": 10600, "ema_loss": 1.3066, "steps_per_s": 3.79, "enc_cap": 1024}
+{"step": 10800, "ema_loss": 1.3156, "steps_per_s": 3.8, "enc_cap": 1024}
+{"step": 11000, "ema_loss": 1.3105, "steps_per_s": 3.8, "enc_cap": 1024}
+{"step": 11200, "ema_loss": 1.1568, "steps_per_s": 3.8, "enc_cap": 1024}
+{"step": 11400, "ema_loss": 1.2563, "steps_per_s": 3.8, "enc_cap": 1024}

@@ -1,0 +1,15 @@
+{"trainable_tensors": 40, "trainable_params": 22609920}
+{"data": "recovery_pairs.jsonl", "pairs": 205999}
+{"examples": 205999}
+{"step": 200, "ema_loss": 2.6263, "steps_per_s": 3.84, "enc_cap": 1024}
+{"step": 400, "ema_loss": 2.4115, "steps_per_s": 3.94, "enc_cap": 1024}
+{"step": 600, "ema_loss": 2.0923, "steps_per_s": 3.8, "enc_cap": 1024}
+{"step": 800, "ema_loss": 2.0347, "steps_per_s": 3.78, "enc_cap": 1024}
+{"step": 1000, "ema_loss": 2.2403, "steps_per_s": 3.8, "enc_cap": 1024}
+{"step": 1200, "ema_loss": 2.0599, "steps_per_s": 3.81, "enc_cap": 1024}
+{"step": 1400, "ema_loss": 1.9577, "steps_per_s": 3.83, "enc_cap": 1024}
+{"step": 1600, "ema_loss": 1.8405, "steps_per_s": 3.8, "enc_cap": 1024}
+{"step": 1800, "ema_loss": 1.763, "steps_per_s": 3.77, "enc_cap": 1024}
+{"step": 2000, "ema_loss": 1.7482, "steps_per_s": 3.77, "enc_cap": 1024}
+{"checkpoint": 2000}
+{"step": 2200, "ema_loss": 1.8205, "steps_per_s": 3.64, "enc_cap": 1024}
