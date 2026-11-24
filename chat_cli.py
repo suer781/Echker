@@ -1,4 +1,4 @@
-"""Interactive chat with the fine-tuned byt5-small — and real online learning.
+"""Archived ByT5 chat CLI. The maintained main-line entry point is chat_qwen.py.
 
 Every turn can update the model's own attention q/v weights on the exchange
 (TTT-style, one Adafactor step), so the model keeps learning while you talk.

@@ -1,14 +1,6 @@
-"""双半球 ByT5 交互 CLI：两侧真权重在线学习 + 曲线自适应切换。
+"""已归档的双半球 ByT5 CLI；新主线请运行 chat_qwen.py。
 
-每轮流程：
-  活动侧生成 → 字节有效性闸门 → 活动侧真权重学习（强度曲线缩放学习率）
-  → 新数据入活动侧债务（切换压力）→ 被动侧巩固（换入 GPU 训练后换回）
-  → 曲线紧迫度累计 → 满足则切换（债务交换 + 2% 对称插值 + 换驻留）
-
-Usage:
-  python chat_dual.py            # 双半球对话（每轮都学习）
-  python chat_dual.py --no-learn # 只对话
-  /save  /status  /exit
+仅为兼容历史检查点而保留，不属于 Qwen 主线。
 """
 from __future__ import annotations
 

@@ -1,70 +1,39 @@
-# 双半球 ByT5 在线学习智能体
+# Qwen 在线纠错学习助手
 
-当前版本：`0.8.0`（ByT5 移植时代）。详细交接文档见 [HANDOVER.md](HANDOVER.md)。
+主线模型：`Qwen/Qwen2.5-0.5B-Instruct`。它使用常见的子词词表与因果语言模型接口，不是字节级 ByT5。
 
-这是一个持续在线学习的对话系统：**谷歌 ByT5（byt5-small，300M，真权重）** 作为双半球的底座，每轮对话都真实更新模型权重（不是微调一次就冻结）。文本、图片、音频、未知二进制全部以原始字节进入同一条路径——256 种字节值与 token 一一双射映射，无 tokenizer、无模态专用管线。
+旧 ByT5 实现已保存在 `legacy-byte-level-frozen` 分支，并标记为永久停更。主线不再把旧实现的测试结果当作 Qwen 的验收证据。
 
-## 30 秒上手
+## 开始使用
+
+安装 [requirements.txt](requirements.txt) 中的依赖后运行：
 
 ```powershell
-cd /d O:\Documents\智能自学习AI（新）
-.\.venv-life\Scripts\python.exe .\chat_dual.py
+.\.venv-life\Scripts\python.exe -m pip install -r .\requirements.txt
+.\.venv-life\Scripts\python.exe .\chat_qwen.py
 ```
 
-- 直接输入文字对话；每轮自动学习（`[left/right 学习 loss=X 强度=X]`）
-- `/status`：活动半球、切换次数、紧迫度曲线、被动侧容量与债务
-- `/save`：落盘（原子写 + 上一代 .bak 自动保留）
-- `/exit`：保存退出
-- `--no-learn`：纯对话模式（不学习/不巩固/不切换）
-- 单半球轻量版：`chat_cli.py`
+首次运行会从 Hugging Face 下载模型。也可以通过 `--model` 指向兼容的本地模型目录或其他模型 ID。
 
-## 架构
+普通对话**不会自动更新权重**。若回答有误，在下一条命令输入：
 
-| 机制 | 实现 |
-|---|---|
-| 语言底座 | google/byt5-small 预训练真权重，fp32，q/v 22.6M 参数在线更新 |
-| 双半球 | 左右各自完整权重 + 独立优化器/回放/债务账本；顺序驻留（单对象 `.to(device)` 原地迁移，GPU 永远只有活动侧） |
-| 学习强度曲线 | 等效学习率随空闲显存连续缩放（smoothstep，下限 0.15）——每轮都学，永不停止，紧张时步子变小 |
-| 显存治理 | 无档位：上下文/回复上限同为显存的光滑函数；OOM 压力标量平滑收紧并指数衰减 |
-| 切换时机 | 紧迫度 = smoothstep(活动侧净压力增长 ÷ 被动侧学到的偿还容量)，积分满 1 触发；积分封顶 + 当下紧迫度 >0 双约束（陈年积压不级联、零紧迫度不切换） |
-| 债务账本 | 语义以字节为单位；切换时债务交换（exchange 标签不计新压力）；巩固只记实际训练过的样本 |
-| 质量闸门 | 字节有效性掩码（坏序列/控制符/替换符从损失中 -100 屏蔽）+ loss>2.0 拒学 + 反向 NaN 卫兵——垃圾从机制上学不进权重 |
-| 持久化 | 原子目录写（tmp→替换）+ 上一代 .bak 代际保留 + 损坏档 .corrupt 隔离；重启自动恢复 |
-
-## 验收状态（独立子 agent 三轮验证）
-
-| 判据 | 结果 |
-|---|---|
-| 单元测试 | 55/55 通过 |
-| D1-D7 双半球验收 | 7/7 通过（独立生成/双侧真学习/曲线切换/切换后完整/巩固/持久化/资源 VRAM 1.23GB）|
-| holdout 泛化 | **+96.3%**（微调模型 vs 原始基座，从未训练的 1% 保留集）|
-| 重复测试 | 3 连测全绿（VRAM 1.33GB 稳定，双侧 3/3 成功学习每轮）|
-| 独立审计 | 三轮子 agent（用户实测员+代码审计员）发现的 2×P0、6×P1、10+×P2 全部修复并回归 |
-
-## 已知边界（诚实清单）
-
-- **回复质量受 300M 字节模型限制**：复读循环、简单算术会算错（如 66-15）——是模型规模与数据量的边界，非程序缺陷；改善路径是扩充指令数据或更大底座
-- **无会话内多轮记忆**：单轮 seq2seq；跨轮"记住"只通过权重学习发生
-- **显存依赖**：需要 ~1.3GB 空闲 VRAM（3GB 卡与桌面共存实测可行）；`--no-learn` 纯对话更轻
-- **首次生成预热** 2.6-4.6s（CUDA 预热），稳态 0.15-1.8s
-- 账本驱逐语义（P2-5）待设计：极端长会话下低权重债务可能被挤出
-
-## 仓库地图
-
-```
-chat_dual.py          双半球交互 CLI（主力入口）
-chat_cli.py           单半球轻量 CLI
-byt5_dual.py          双半球核心（半球/大脑/曲线治理）
-verify_dual.py        D1-D7 双半球验收（可随时复测）
-evaluate_byt5_holdout.py   泛化判决仪器（+96.3% 判决来源）
-finetune_byt5.py      对话微调（--resume 续训）
-prepare_finetune_data.py / make_chitchat_data.py   微调数据制备
-byt5_probe.py         显存/字节映射探针
-watchdog.ps1 / status_check.ps1 / start_training.ps1 / stop_training.ps1   长跑运维（legacy 语料管线）
-run_agent.py / start_agent.ps1   legacy 架构入口（0.5.0 时代，保留参考）
-HANDOVER.md           完整交接文档（0.5.0 legacy → 0.8.0 ByT5 时代的全部验收记录）
+```text
+/teach <你认可的正确回答>
 ```
 
-## 依赖
+系统才会用这条明确纠正进行一次 LoRA 更新，并保存 adapter、优化器状态和最多 128 条纠正样本；回放样本用于降低新纠正覆盖旧纠正的风险。`/status` 查看模型、设备和样本数，`/save` 保存，`/exit` 保存退出。
 
-Python 3.13 + torch 2.8.0+cu126 + transformers>=5.23（见 requirements.txt）。GPU 需 ≥1.3GB 空闲显存（fp32；3GB 卡实测与桌面共存）。注意：transformers 必须 ≥5.x——4.x 会静默丢失 lm_head 权重。
+## 学习与验收边界
+
+- 这是“根据明确纠正进行增量监督更新”，不是无监督地产生正确知识；没有可信反馈时，系统无法判断自己的答案是否正确。
+- 代码只训练 LoRA adapter，不覆盖基础模型文件。模型权重和纠正数据保存在本地 `state_qwen/`，不会提交到仓库。
+- 目前只实现对话文本；没有声称支持图片、音频或字节流训练。
+- 本机 GTX 1060 3GB 尚未对 Qwen 生成和 LoRA 更新做实机显存验收。若 CUDA OOM，可用 `--device cpu`，但会明显变慢；不要在验证前启动长时间训练。
+- `tests/test_qwen_agent.py` 只验证训练标签确实屏蔽提示词、只对纠正答案计算损失；它不证明模型回答质量或泛化提升。需要用固定、人工核验的测试集比较更新前后的结果后，才能宣称有改善。
+
+## 主线文件
+
+- [chat_qwen.py](chat_qwen.py)：交互命令行入口。
+- [qwen_agent.py](qwen_agent.py)：Qwen 加载、对话、纠正样本学习和 adapter 持久化。
+- [tests/test_qwen_agent.py](tests/test_qwen_agent.py)：训练目标掩码测试。
+- `chat_dual.py`、`chat_cli.py`、`byt5_dual.py` 和旧 ByT5 训练/验证脚本是历史兼容代码，不再作为主线入口。
