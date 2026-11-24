@@ -1,23 +1,27 @@
-"""Vocabulary-tokenized Qwen chat with explicit-feedback LoRA updates."""
+"""Vocabulary-tokenized Qwen chat with continuous dual-hemisphere learning."""
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
+import logging
 import os
 from pathlib import Path
-import random
+import threading
 from typing import Any
 
 import torch
-from torch import nn
+
+from life_agent.memory import Sample
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 SYSTEM_PROMPT = "你是一个有帮助的助手。请清楚作答；无法确认时明确说明，不要编造事实。"
 MAX_SEQUENCE_LENGTH = 512
-MAX_CORRECTIONS = 128
+TTT_CHUNK_TOKENS = 8
+LOG = logging.getLogger(__name__)
 
 
 def completion_labels(prompt_ids: list[int], full_ids: list[int]) -> list[int]:
-    """Mask prompt tokens so optimization is only against the supplied answer."""
+    """Mask a prompt prefix while keeping the generated completion trainable."""
     if not prompt_ids or len(full_ids) <= len(prompt_ids):
         raise ValueError("training example must contain a prompt and a non-empty answer")
     if full_ids[: len(prompt_ids)] != prompt_ids:
@@ -25,31 +29,43 @@ def completion_labels(prompt_ids: list[int], full_ids: list[int]) -> list[int]:
     return [-100] * len(prompt_ids) + full_ids[len(prompt_ids) :]
 
 
+def transcript_samples(ids: list[int]) -> list[Sample]:
+    if len(ids) < 2:
+        raise ValueError("tokenized transcript is too short to train")
+    samples = []
+    start = 0
+    while start < len(ids):
+        end = min(start + MAX_SEQUENCE_LENGTH, len(ids))
+        if len(ids) - end == 1:
+            end -= 1
+        chunk = ids[start:end]
+        if len(chunk) < 2:
+            raise ValueError("transcript chunk is too short to train")
+        samples.append(
+            Sample(
+                ids=chunk,
+                labels=chunk.copy(),
+                weight=1.0,
+                source="conversation:all-roles",
+            )
+        )
+        start = end
+    return samples
+
+
 class QwenAgent:
     def __init__(
         self,
         model_name: str = DEFAULT_MODEL,
-        state_dir: Path = Path("state_qwen"),
+        state_dir: Path = Path("state_qwen_dual"),
         device: str | None = None,
     ) -> None:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
-        try:
-            from peft import LoraConfig, PeftModel, get_peft_model
-        except ImportError as exc:
-            raise RuntimeError(
-                "LoRA support is missing; install the project requirements including peft."
-            ) from exc
+        from qwen_dual import QwenDualBrain
 
         self.model_name = model_name
         self.state_dir = Path(state_dir)
-        self.adapter_dir = self.state_dir / "adapter"
-        self.feedback_path = self.state_dir / "feedback.jsonl"
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        dtype = torch.float16 if self.device.type == "cuda" else torch.float32
-
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        metadata_path = self.state_dir / "model.json"
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        metadata_path = self.state_dir / "model_name.json"
         if metadata_path.exists():
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             if metadata.get("model_name") != model_name:
@@ -57,205 +73,252 @@ class QwenAgent:
                     f"checkpoint uses {metadata.get('model_name')!r}, not {model_name!r}"
                 )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        self.brain = QwenDualBrain(model_name, self.state_dir, self.device)
+        self.restored = self.brain.load()
+        self.tokenizer = self.brain.active_h().tokenizer
         if len(self.tokenizer) < 1000:
             raise ValueError("selected tokenizer does not appear to have a normal text vocabulary")
+        self.brain.ensure_active_gpu()
 
-        base_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            dtype=dtype,
-            low_cpu_mem_usage=True,
+        self._consolidator = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="qwen-consolidation",
         )
-        if self.adapter_dir.exists():
-            self.model = PeftModel.from_pretrained(
-                base_model,
-                self.adapter_dir,
-                is_trainable=True,
-            )
+        self._consolidation_future: Future | None = None
+        self._consolidation_error: str | None = None
+        self._closed = False
+        self._lock: threading.RLock = self.brain.training_lock
+        self.last_learning_result: dict[str, Any] | None = None
+
+    @staticmethod
+    def _ids(encoded: Any) -> list[int]:
+        if isinstance(encoded, dict):
+            encoded = encoded["input_ids"]
+        if torch.is_tensor(encoded):
+            encoded = encoded.detach().cpu().tolist()
+        if encoded and isinstance(encoded[0], list):
+            encoded = encoded[0]
+        return [int(value) for value in encoded]
+
+    def _template_ids(
+        self,
+        messages: list[dict[str, Any]],
+        add_generation_prompt: bool,
+    ) -> list[int]:
+        encoded = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=add_generation_prompt,
+        )
+        return self._ids(encoded)
+
+    def _await_consolidation(self) -> None:
+        future = self._consolidation_future
+        if future is None:
+            return
+        self._consolidation_future = None
+        future.result()
+
+    def _consolidate_and_switch(self) -> dict[str, Any] | None:
+        result = self.brain.consolidate_passive(1.0)
+        with self._lock:
+            self.brain.maybe_switch()
+        return result
+
+    def _record_consolidation_result(self, future: Future) -> None:
+        try:
+            future.result()
+        except Exception as exc:
+            self._consolidation_error = f"{type(exc).__name__}: {exc}"
+            LOG.exception("Qwen passive consolidation failed")
         else:
-            config = LoraConfig(
-                task_type="CAUSAL_LM",
-                r=8,
-                lora_alpha=16,
-                lora_dropout=0.05,
-                target_modules=["q_proj", "v_proj"],
-            )
-            self.model = get_peft_model(base_model, config)
-        self.model.to(self.device)
-        self.model.config.use_cache = True
+            self._consolidation_error = None
 
-        trainable = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
-        if not trainable:
-            raise RuntimeError("LoRA adapter has no trainable parameters")
-        self.optimizer = torch.optim.AdamW(trainable, lr=2e-5)
-        optimizer_path = self.state_dir / "optimizer.pt"
-        if optimizer_path.exists():
-            self.optimizer.load_state_dict(
-                torch.load(optimizer_path, map_location="cpu", weights_only=True)
-            )
-        self.examples = self._load_feedback()
-        self.model.eval()
-
-    def _load_feedback(self) -> list[dict[str, str]]:
-        if not self.feedback_path.exists():
-            return []
-        examples: list[dict[str, str]] = []
-        with self.feedback_path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, 1):
-                if not line.strip():
-                    continue
-                item = json.loads(line)
-                user = item.get("user")
-                assistant = item.get("assistant")
-                if not isinstance(user, str) or not isinstance(assistant, str):
-                    raise ValueError(f"invalid feedback record at line {line_number}")
-                examples.append({"user": user, "assistant": assistant})
-        return examples[-MAX_CORRECTIONS:]
-
-    def _tokenized_example(self, user: str, assistant: str) -> tuple[torch.Tensor, torch.Tensor]:
-        prompt = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ]
-        full = prompt + [{"role": "assistant", "content": assistant}]
-        prompt_encoding = self.tokenizer.apply_chat_template(
-            prompt,
-            tokenize=True,
-            add_generation_prompt=True,
+    def _schedule_consolidation(self) -> None:
+        future = self._consolidation_future
+        if future is not None:
+            if not future.done():
+                return
+        self._consolidation_future = self._consolidator.submit(
+            self._consolidate_and_switch,
         )
-        full_encoding = self.tokenizer.apply_chat_template(
-            full,
-            tokenize=True,
-            add_generation_prompt=False,
-        )
-        prompt_ids = list(prompt_encoding["input_ids"])
-        full_ids = list(full_encoding["input_ids"])
-        labels = completion_labels(prompt_ids, full_ids)
-        if len(full_ids) > MAX_SEQUENCE_LENGTH:
-            raise ValueError(
-                f"training example is {len(full_ids)} tokens; maximum is {MAX_SEQUENCE_LENGTH}"
-            )
-        return (
-            torch.tensor([full_ids], dtype=torch.long, device=self.device),
-            torch.tensor([labels], dtype=torch.long, device=self.device),
-        )
+        self._consolidation_future.add_done_callback(self._record_consolidation_result)
 
-    @torch.inference_mode()
+    def _messages_for_user(
+        self,
+        user: str,
+        history: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        prior = list(history or [])
+        if prior and prior[0].get("role") == "system":
+            messages = prior
+        else:
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}, *prior]
+        messages.append({"role": "user", "content": user})
+        while len(messages) > 2:
+            prompt_ids = self._template_ids(messages, add_generation_prompt=True)
+            if len(prompt_ids) <= MAX_SEQUENCE_LENGTH:
+                return messages
+            del messages[1]
+        if len(self._template_ids(messages, add_generation_prompt=True)) > MAX_SEQUENCE_LENGTH:
+            raise ValueError(f"prompt exceeds the {MAX_SEQUENCE_LENGTH}-token context limit")
+        return messages
+
     def generate(
         self,
         user: str,
-        history: list[dict[str, str]] | None = None,
+        history: list[dict[str, Any]] | None = None,
         max_new_tokens: int = 128,
         temperature: float = 0.7,
     ) -> str:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        messages.extend(history or [])
-        messages.append({"role": "user", "content": user})
-        encoded = self.tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
-        )
-        input_ids = encoded["input_ids"]
-        while input_ids.shape[1] > MAX_SEQUENCE_LENGTH and len(messages) > 2:
-            del messages[1:3]
-            input_ids = self.tokenizer.apply_chat_template(
-                messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
-            )
-        if input_ids.shape[1] > MAX_SEQUENCE_LENGTH:
-            raise ValueError(
-                f"prompt is {input_ids.shape[1]} tokens; maximum is {MAX_SEQUENCE_LENGTH}"
-            )
-        input_ids = input_ids.to(self.device)
-        self.model.eval()
-        generation_args = {
-            "input_ids": input_ids,
-            "max_new_tokens": max_new_tokens,
-            "do_sample": temperature > 0,
-            "repetition_penalty": 1.05,
-            "pad_token_id": self.tokenizer.eos_token_id,
-            "eos_token_id": self.tokenizer.eos_token_id,
-        }
-        if temperature > 0:
-            generation_args.update(temperature=temperature, top_p=0.9)
-        output = self.model.generate(**generation_args)
-        return self.tokenizer.decode(
-            output[0, input_ids.shape[1] :],
-            skip_special_tokens=True,
-        ).strip()
-
-    def learn_from_correction(self, user: str, correction: str) -> dict[str, Any]:
         user = user.strip()
-        correction = correction.strip()
-        if not user or not correction:
-            raise ValueError("both the original user message and correction are required")
-        if any(item["user"] == user and item["assistant"] == correction for item in self.examples):
-            return {"trained": False, "reason": "duplicate"}
+        if not user:
+            return ""
+        if max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be positive")
+        if temperature < 0:
+            raise ValueError("temperature must be non-negative")
+        messages = self._messages_for_user(user, history)
+        prompt_ids = self._template_ids(messages, add_generation_prompt=True)
+        generated: list[int] = []
 
-        batch = [{"user": user, "assistant": correction}]
-        if self.examples:
-            batch.append(random.choice(self.examples))
+        with self._lock:
+            self.brain.ensure_active_gpu()
+            hemisphere = self.brain.active_h()
+            model = hemisphere.model
+            model.eval()
+            for start in range(0, max_new_tokens, TTT_CHUNK_TOKENS):
+                context = prompt_ids + generated
+                context = context[-MAX_SEQUENCE_LENGTH:]
+                input_ids = torch.tensor(
+                    [context],
+                    dtype=torch.long,
+                    device=next(model.parameters()).device,
+                )
+                model.config.use_cache = True
+                generation_args: dict[str, Any] = {
+                    "input_ids": input_ids,
+                    "max_new_tokens": min(TTT_CHUNK_TOKENS, max_new_tokens - start),
+                    "repetition_penalty": 1.05,
+                    "pad_token_id": self.tokenizer.eos_token_id,
+                    "eos_token_id": self.tokenizer.eos_token_id,
+                }
+                if temperature > 0:
+                    generation_args.update(
+                        do_sample=True,
+                        temperature=temperature,
+                        top_p=0.9,
+                        top_k=40,
+                    )
+                else:
+                    generation_args.update(
+                        do_sample=False,
+                        temperature=1.0,
+                        top_p=1.0,
+                        top_k=50,
+                    )
+                with torch.inference_mode():
+                    output = model.generate(**generation_args)
+                chunk = [
+                    int(value)
+                    for value in output[0, input_ids.shape[1] :].detach().cpu().tolist()
+                ]
+                if not chunk:
+                    break
+                generated.extend(chunk)
+                training_ids = (prompt_ids + generated)[-MAX_SEQUENCE_LENGTH:]
+                trainable_start = max(0, len(training_ids) - len(generated))
+                labels = [-100] * trainable_start + training_ids[trainable_start:]
+                self.last_learning_result = hemisphere.learn(
+                    training_ids,
+                    labels,
+                    intensity=1.0,
+                    kind="ttt",
+                )
+                if not self.last_learning_result["learned"]:
+                    LOG.warning(
+                        "Qwen TTT step skipped: %s",
+                        self.last_learning_result.get("reason"),
+                    )
+                if self.tokenizer.eos_token_id in chunk:
+                    break
 
-        self.model.train()
-        self.model.config.use_cache = False
-        self.optimizer.zero_grad(set_to_none=True)
-        losses: list[float] = []
-        try:
-            for item in batch:
-                input_ids, labels = self._tokenized_example(item["user"], item["assistant"])
-                output = self.model(input_ids=input_ids, labels=labels)
-                loss = output.loss
-                if not torch.isfinite(loss):
-                    raise FloatingPointError("non-finite loss; adapter weights were not updated")
-                (loss / len(batch)).backward()
-                losses.append(float(loss.detach().item()))
+            model.config.use_cache = False
+            response = self.tokenizer.decode(
+                generated,
+                skip_special_tokens=True,
+            ).strip()
+            transcript = messages + [{"role": "assistant", "content": response}]
+            self.learn_from_transcript(transcript)
+            return response
 
-            trainable = [
-                parameter for parameter in self.model.parameters() if parameter.requires_grad
-            ]
-            grad_norm = nn.utils.clip_grad_norm_(trainable, 1.0)
-            if not torch.isfinite(grad_norm):
-                raise FloatingPointError("non-finite gradient; adapter weights were not updated")
-            self.optimizer.step()
-        except Exception:
-            self.optimizer.zero_grad(set_to_none=True)
-            raise
-        finally:
-            self.model.config.use_cache = True
-            self.model.eval()
+    def learn_from_transcript(self, messages: list[dict[str, Any]]) -> int:
+        """Store every role as a causal-LM target, including tool call/results."""
+        if not messages:
+            raise ValueError("a conversation transcript must contain at least one message")
+        transcript = list(messages)
+        if transcript[0].get("role") != "system":
+            transcript.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+        ids = self._template_ids(transcript, add_generation_prompt=False)
+        samples = transcript_samples(ids)
 
-        self.examples.append({"user": user, "assistant": correction})
-        self.examples = self.examples[-MAX_CORRECTIONS:]
-        self.save()
-        return {"trained": True, "loss": sum(losses) / len(losses), "examples": len(self.examples)}
+        with self._lock:
+            for sample in samples:
+                self.brain.admit_exchange_sample(sample)
+        self._schedule_consolidation()
+        return len(samples)
 
-    @staticmethod
-    def _to_cpu(value: Any) -> Any:
-        if isinstance(value, torch.Tensor):
-            return value.detach().cpu()
-        if isinstance(value, dict):
-            return {key: QwenAgent._to_cpu(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [QwenAgent._to_cpu(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(QwenAgent._to_cpu(item) for item in value)
-        return value
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            hemispheres = {}
+            for name, hemisphere in self.brain.hemispheres.items():
+                if hemisphere.model is None:
+                    raise RuntimeError(f"Qwen hemisphere {name} has no loaded model")
+                hemispheres[name] = {
+                    "device": hemisphere.device,
+                    "steps": hemisphere.global_step,
+                    "ttt_steps": hemisphere.ttt_steps,
+                    "consolidation_steps": hemisphere.consolidate_steps,
+                    "loss": hemisphere.last_loss,
+                    "replay": len(hemisphere.replay),
+                    "debt": len(hemisphere.debt),
+                    "repayment_capacity": hemisphere.debt.repayment_capacity,
+                    "mlp_widths": [
+                        layer.mlp.gate_proj.out_features
+                        for layer in hemisphere.model.model.layers
+                    ],
+                }
+            return {
+                "model": self.model_name,
+                "training_device": self.device,
+                "active": self.brain.active,
+                "passive": self.brain.passive_h().name,
+                "switch_count": self.brain.switch_count,
+                "background_consolidation": (
+                    self._consolidation_future is not None
+                    and not self._consolidation_future.done()
+                ),
+                "consolidation_error": self._consolidation_error,
+                "hemispheres": hemispheres,
+            }
 
     def save(self) -> None:
+        self._await_consolidation()
+        with self._lock:
+            self.brain.save()
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        metadata_tmp = self.state_dir / "model.json.tmp"
-        metadata_tmp.write_text(
+        temporary = self.state_dir / "model_name.json.tmp"
+        temporary.write_text(
             json.dumps({"model_name": self.model_name}, ensure_ascii=False),
             encoding="utf-8",
         )
-        os.replace(metadata_tmp, self.state_dir / "model.json")
+        os.replace(temporary, self.state_dir / "model_name.json")
 
-        self.adapter_dir.mkdir(parents=True, exist_ok=True)
-        self.model.save_pretrained(self.adapter_dir, safe_serialization=True)
-        optimizer_tmp = self.state_dir / "optimizer.pt.tmp"
-        torch.save(self._to_cpu(self.optimizer.state_dict()), optimizer_tmp)
-        os.replace(optimizer_tmp, self.state_dir / "optimizer.pt")
-
-        feedback_tmp = self.state_dir / "feedback.jsonl.tmp"
-        with feedback_tmp.open("w", encoding="utf-8", newline="\n") as handle:
-            for item in self.examples:
-                handle.write(json.dumps(item, ensure_ascii=False) + "\n")
-        os.replace(feedback_tmp, self.feedback_path)
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            self.save()
+        finally:
+            self._consolidator.shutdown(wait=True)
+            self._closed = True

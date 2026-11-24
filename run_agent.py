@@ -1,4 +1,4 @@
-from life_agent.cli import main
+from chat_qwen import main
 
 
 if __name__ == "__main__":

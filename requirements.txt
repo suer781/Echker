@@ -1,4 +1,4 @@
 torch==2.8.0
 numpy>=2.0
-transformers>=5.23
-peft>=0.18.0
+transformers>=4.38.2,<5.0
+safetensors>=0.4.1

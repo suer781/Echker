@@ -16,12 +16,30 @@ class MemoryTests(unittest.TestCase):
         self.assertLess(cleaner.structural_quality(repeated), 0.005)
         self.assertGreater(cleaner.structural_quality(varied), 0.5)
 
+    def test_token_domain_cleaning_handles_vocabulary_ids(self):
+        ids = [1000 + index for index in range(32)]
+        cleaner = StatisticalCleaner(token_domain=True)
+        self.assertGreater(cleaner.structural_quality(ids, token_domain=True), 0.5)
+        cleaner.observe(ids)
+        cleaner.observe(ids)
+        self.assertEqual(cleaner.signal()["familiarity"], 1.0)
+
     def test_replay_deduplicates(self):
         replay = ReplayBuffer(capacity=4)
         item = sample()
         replay.add(item)
         replay.add(item.clone())
         self.assertEqual(len(replay), 1)
+
+    def test_token_replay_and_debt_use_token_quality(self):
+        ids = [1000 + index for index in range(32)]
+        item = Sample(ids=ids, labels=ids.copy())
+        replay = ReplayBuffer(capacity=4, token_domain=True)
+        ledger = DebtLedger(capacity=4, decay=0.5, min_weight=0.01, token_domain=True)
+        replay.add(item.clone())
+        ledger.add(item, retention=1.0)
+        self.assertGreater(replay.samples[item.digest].weight, 0.5)
+        self.assertGreater(ledger.clean_backlog(), 0.5)
 
     def test_debt_is_lossy_and_decays_after_repayment(self):
         ledger = DebtLedger(capacity=2, decay=0.5, min_weight=0.05)

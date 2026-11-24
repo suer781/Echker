@@ -93,10 +93,11 @@ class StatisticalCleaner:
     psychological habituation principle applied inside the existing cleaner.
     """
 
-    def __init__(self, familiarity_window: int = 4096) -> None:
+    def __init__(self, familiarity_window: int = 4096, token_domain: bool = False) -> None:
         self.count = 0
         self.loss_mean = 0.0
         self.loss_var = 1.0
+        self.token_domain = token_domain
         self.familiarity_window = max(64, familiarity_window)
         self.familiarity_order: deque[int] = deque()
         self.familiarity_counts: dict[int, int] = {}
@@ -106,14 +107,27 @@ class StatisticalCleaner:
         self.familiarity_signal = 1.0
 
     @staticmethod
-    def _ngram_hashes(ids: list[int], ngram_size: int = 4, limit: int = 2048) -> list[int]:
-        raw = [int(value) for value in ids if 0 <= int(value) < 256]
+    def _ngram_hashes(
+        ids: list[int],
+        ngram_size: int = 4,
+        limit: int = 2048,
+        token_domain: bool = False,
+    ) -> list[int]:
+        if token_domain:
+            raw = [int(value) for value in ids if 0 <= int(value) < 2**32]
+        else:
+            raw = [int(value) for value in ids if 0 <= int(value) < 256]
         if len(raw) < ngram_size:
             return []
         hashes: list[int] = []
         count = min(len(raw) - ngram_size + 1, limit)
         for index in range(count):
-            window = bytes(raw[index : index + ngram_size])
+            values = raw[index : index + ngram_size]
+            window = (
+                b"".join(value.to_bytes(4, "big") for value in values)
+                if token_domain
+                else bytes(values)
+            )
             digest = hashlib.blake2b(window, digest_size=8).digest()
             hashes.append(int.from_bytes(digest, "big"))
         return hashes
@@ -132,7 +146,7 @@ class StatisticalCleaner:
 
     def observe(self, ids: list[int]) -> dict[str, float]:
         """Update the bounded familiarity trace and return its current value."""
-        hashes = self._ngram_hashes(ids)
+        hashes = self._ngram_hashes(ids, token_domain=self.token_domain)
         self.frames_seen += 1
         if not hashes:
             novelty = 1.0
@@ -163,8 +177,12 @@ class StatisticalCleaner:
         }
 
     @staticmethod
-    def structural_quality(ids: list[int]) -> float:
-        raw = [value for value in ids if 0 <= value < 256]
+    def structural_quality(ids: list[int], token_domain: bool = False) -> float:
+        raw = (
+            [value for value in ids if 0 <= value < 2**32]
+            if token_domain
+            else [value for value in ids if 0 <= value < 256]
+        )
         n = len(raw)
         if n < 16:
             return 1.0
@@ -209,6 +227,7 @@ class StatisticalCleaner:
             "count": self.count,
             "loss_mean": self.loss_mean,
             "loss_var": self.loss_var,
+            "token_domain": self.token_domain,
             "frames_seen": self.frames_seen,
             "last_novelty": self.last_novelty,
             "last_familiarity": self.last_familiarity,
@@ -220,6 +239,7 @@ class StatisticalCleaner:
         self.count = int(raw.get("count", 0))
         self.loss_mean = float(raw.get("loss_mean", 0.0))
         self.loss_var = float(raw.get("loss_var", 1.0))
+        self.token_domain = bool(raw.get("token_domain", self.token_domain))
         self.frames_seen = int(raw.get("frames_seen", 0))
         self.last_novelty = float(raw.get("last_novelty", 1.0))
         self.last_familiarity = float(raw.get("last_familiarity", 0.0))
@@ -232,13 +252,18 @@ class StatisticalCleaner:
 
 
 class ReplayBuffer:
-    def __init__(self, capacity: int) -> None:
+    def __init__(self, capacity: int, token_domain: bool = False) -> None:
         self.capacity = capacity
         self.samples: dict[str, Sample] = {}
-        self.cleaner = StatisticalCleaner(familiarity_window=max(1024, capacity * 4))
+        self.cleaner = StatisticalCleaner(
+            familiarity_window=max(1024, capacity * 4),
+            token_domain=token_domain,
+        )
 
     def add(self, sample: Sample) -> bool:
-        quality = self.cleaner.structural_quality(sample.ids)
+        quality = self.cleaner.structural_quality(
+            sample.ids, token_domain=self.cleaner.token_domain
+        )
         familiarity = self.cleaner.observe(sample.ids)
         # Habituation is a multiplier on value, not a gate. It lowers the
         # salience of repeated n-grams toward a non-zero floor so silence,
@@ -303,10 +328,17 @@ class ReplayBuffer:
 class DebtLedger:
     """Directional, compressed debt: quantized weights and exponential forgetting."""
 
-    def __init__(self, capacity: int, decay: float, min_weight: float) -> None:
+    def __init__(
+        self,
+        capacity: int,
+        decay: float,
+        min_weight: float,
+        token_domain: bool = False,
+    ) -> None:
         self.capacity = capacity
         self.decay = decay
         self.min_weight = min_weight
+        self.token_domain = token_domain
         self.items: dict[str, Sample] = {}
         self.total_created = 0
         self.total_repaid = 0
@@ -320,9 +352,10 @@ class DebtLedger:
         # to the top-weight selection bias than a cumulative arithmetic mean.
         self.capacity_history: deque[float] = deque(maxlen=32)
 
-    @staticmethod
-    def _quality(item: Sample) -> float:
-        return StatisticalCleaner.structural_quality(item.ids)
+    def _quality(self, item: Sample) -> float:
+        return StatisticalCleaner.structural_quality(
+            item.ids, token_domain=self.token_domain
+        )
 
     def clean_backlog(self) -> float:
         """Current unlearned mass after repetition and structural-noise weights."""
@@ -435,6 +468,7 @@ class DebtLedger:
     def to_dict(self) -> dict[str, Any]:
         return {
             "capacity": self.capacity,
+            "token_domain": self.token_domain,
             "items": [item.to_dict() for item in self.items.values()],
             "total_created": self.total_created,
             "total_repaid": self.total_repaid,
@@ -445,6 +479,7 @@ class DebtLedger:
         }
 
     def load_dict(self, raw: dict[str, Any]) -> None:
+        self.token_domain = bool(raw.get("token_domain", self.token_domain))
         self.items = {}
         for value in raw.get("items", []):
             item = sample_from_dict(value)

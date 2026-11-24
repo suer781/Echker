@@ -20,6 +20,7 @@ validation_runs/postfix-1-console.log
 # 双半球状态目录（大检查点不入库）
 state_dual/
 state_qwen/
+state_qwen_dual/
 _audit_tmp/qa_dual_state/
 _audit_tmp/qa_cli_state/
 _audit_tmp/qa_reg_state/
